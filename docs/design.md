@@ -1,0 +1,96 @@
+# Design
+
+## What the server is not
+
+It is not an arbiter. The document is a CRDT, so the outcome of two concurrent
+edits is decided by the operations themselves, not by whoever the server heard
+from first. The server keeps a replica so it can answer a joiner and persist the
+result, applies what it is sent, and passes it on unchanged.
+
+Everything else follows from that:
+
+- **Offline editing works** because a participant's replica is as authoritative
+  as the server's.
+- **The server can be restarted, replaced, or run behind a load balancer**
+  without a handover protocol: a new one loads a snapshot and is immediately
+  correct.
+- **Operations need no sequencing on the wire.** Applying them is idempotent and
+  order-independent, so a batch is relayed exactly as it arrived.
+
+## Two counters, and where they show up here
+
+`crdt` gives every operation a per-site sequence number and a Lamport clock (see
+that project's `docs/design.md`). The sequence number is what makes this service
+possible: because a site's numbers have no gaps, a version vector describes a
+replica *exactly*, so "what have I missed" is answerable in one message rather
+than by replaying a log.
+
+## Joining, and the direction people forget
+
+A `Welcome` carries three things:
+
+1. the document — a snapshot for a new participant, or just the operations it
+   missed for one that said what it had;
+2. who else is present, so a joiner draws everyone's cursor immediately;
+3. **the server's own version vector.**
+
+The third is easy to leave out and doing so quietly breaks offline editing. A
+participant resuming after a disconnection has work the server has never seen; if
+it is only *sent* what it missed and never asked what to *send*, that work stays
+on one replica for ever. With the server's vector in hand the client answers with
+exactly what is missing. `TestResumeCarriesWorkBothWays` fails if either
+direction is dropped.
+
+## Backpressure
+
+A participant that stops reading cannot be allowed to hold up the document, and
+cannot be silently skipped either — skipping an operation would leave that
+replica permanently wrong. So it is disconnected with `ResourceExhausted` once
+its queue overflows, and rejoins with its version vector to be caught up. The
+queue depth is `Config.Backlog`.
+
+This is the one place the server makes a decision, and it is a decision about the
+connection, never about the document.
+
+## Persistence
+
+`Store` holds snapshots rather than an operation log, because a snapshot is
+self-contained: `crdt` guarantees the whole history is recoverable from one, so a
+document restored after a restart can still serve a participant that has been
+away for a month.
+
+Writes happen when the last participant leaves, and whenever `Server.Flush` is
+called — a server wanting durability without waiting calls it on a timer. A write
+that fails leaves the document marked as needing one, so the next `Flush` tries
+again instead of losing the fact.
+
+Documents stay in memory once opened. For the fleet's expected shape — a handful
+of documents per server — that is the right trade; a server hosting very many
+would want eviction, which is a change to `open` and `leave` alone.
+
+## Testing
+
+Three layers, because each catches what the others cannot:
+
+- **In-process, over `bufconn`** — the fast bulk of the suite, including every
+  rejection on both sides of the wire. A stub server lets the client be shown
+  messages a real server would never send; a raw client lets the server be sent
+  messages a real client would never send.
+- **Over a real WebSocket** — `TestOverWebSocket`, natively.
+- **Across two runtimes** — `TestWasmConverges`: two participants compiled to
+  WebAssembly and executed by Node, editing concurrently with a native one,
+  all three required to converge on the same text with no character lost. This is
+  the acceptance gate for the claim that a browser and a server run the same
+  merge logic, and compiling for `js/wasm` would not prove it.
+
+A skipped test is not a passing one, so CI sets `COLLAB_REQUIRE_WASM` on the job
+that exists to run the last of these: a missing Node or wasm glue fails it rather
+than turning it green.
+
+## Next
+
+- Postgres-backed `Store` against [weft's HA datastore](https://github.com/openweft),
+  keeping snapshots and an operation log.
+- Wiring `weft-loom-server` and the loom browser client to this package.
+- Access control: the service has no notion of who may open a document, which
+  belongs in an interceptor rather than here.
