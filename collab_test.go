@@ -133,13 +133,14 @@ func TestConcurrentParticipantsConverge(t *testing.T) {
 	done := make(chan error, participants)
 	for i, c := range clients {
 		go func() {
-			for j, r := range runs[i] {
-				if err := c.Insert(1+j, string(r)); err != nil {
-					done <- err
-					return
-				}
-			}
-			done <- nil
+			// One call per participant, not one per character. Typing character
+			// by character means asking for a *position* each time, and a peer's
+			// insertion arriving between two keystrokes moves what that position
+			// refers to — so the second character would hang off someone else's,
+			// and the run would split for a perfectly good reason. A single
+			// insertion is uninterrupted by construction, which is what makes the
+			// contiguity assertion below meaningful.
+			done <- c.Insert(1, runs[i])
 		}()
 	}
 	for range clients {
