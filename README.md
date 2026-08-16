@@ -100,8 +100,21 @@ an interceptor; the context carries whatever it put there.
 
 `Store` is a two-method seam — `Load` and `Save` on snapshots, which are
 self-contained, so a document restored from one can still serve a participant
-that has been away. `MemoryStore` is the default; anything else (Postgres, object
-storage) implements the interface.
+that has been away. `MemoryStore` is the default.
+
+[`collab/pgstore`](pgstore) keeps documents in PostgreSQL, over a plain `*sql.DB`
+and with no driver of its own, so the caller picks one:
+
+```go
+db, _ := sql.Open("pgx", os.Getenv("DATABASE_URL"))
+store, _ := pgstore.New(db)
+store.Migrate(ctx)
+srv := collab.NewServer(collab.Config{Store: store})
+```
+
+It is a module of its own, so importing `collab` does not drag a database driver
+into anyone's build. Its tests run against a real PostgreSQL — CI fails the job
+if one is missing rather than skipping it.
 
 ## Status
 
