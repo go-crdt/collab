@@ -321,6 +321,37 @@ func (c *Client) Len() int {
 	return c.doc.Len()
 }
 
+// LenUTF16 returns the length a browser would report, counting UTF-16 code
+// units. Its companions InsertUTF16 and DeleteUTF16 take offsets in the same
+// units, so a caller in the browser never converts by hand; see [crdt.Doc].
+func (c *Client) LenUTF16() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.doc.LenUTF16()
+}
+
+// InsertUTF16 adds text at an offset counted in UTF-16 code units.
+func (c *Client) InsertUTF16(pos int, text string) error {
+	c.mu.Lock()
+	ops, err := c.doc.InsertUTF16(pos, text)
+	c.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return c.publish(ops)
+}
+
+// DeleteUTF16 removes length code units at an offset counted in the same units.
+func (c *Client) DeleteUTF16(pos, length int) error {
+	c.mu.Lock()
+	ops, err := c.doc.DeleteUTF16(pos, length)
+	c.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return c.publish(ops)
+}
+
 // Version returns what this participant holds, for [ClientConfig.Resume] or for
 // diagnostics.
 func (c *Client) Version() crdt.VersionVector {
