@@ -76,6 +76,26 @@ it wrote while away. After that, operations and presence flow both ways.
   `Server.Flush` writes it without waiting. A write that fails is retried rather
   than forgotten.
 
+## Who may open what
+
+`Config.Authorize` is asked once per session, after the join arrives and before
+the document is touched, so a refused session neither reads the store nor reveals
+whether the document exists:
+
+```go
+collab.NewServer(collab.Config{
+    Authorize: func(ctx context.Context, document string, site crdt.SiteID) error {
+        return myACL.Check(userFrom(ctx), document)
+    },
+})
+```
+
+It lives here rather than in a gRPC interceptor, which is where one would first
+look for it: an interceptor sees the method and the request metadata, and the
+document being joined is in neither — it arrives in the stream's first message.
+Authentication, being per connection rather than per document, still belongs in
+an interceptor; the context carries whatever it put there.
+
 ## Persistence
 
 `Store` is a two-method seam — `Load` and `Save` on snapshots, which are
