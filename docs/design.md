@@ -49,9 +49,15 @@ two do not, the failure is not a conflict anyone can see: both mint the same
 of each pair and discards the second, and the lost characters are simply not
 there. Nobody is told.
 
-The server therefore refuses a site already editing a document, and refuses site
-zero, which is its own replica. A participant that reconnects finds its site free
-again, because the previous session released it on leaving.
+So the arriving session takes the identity and the one already holding it is
+disconnected with `Aborted`. Refusing the newcomer instead would be worse exactly
+where this happens: a participant whose connection dropped comes back long before
+the server notices the old one is dead, and would be locked out until a TCP
+timeout it cannot see. Displacing also makes a genuine clash loud — two tabs
+would take turns evicting each other — rather than losing characters quietly.
+Being displaced is not leaving, so no departure is announced: the identity is
+still in the document, on the session that took it. Site zero, the server's own
+replica, is refused outright.
 
 This puts a requirement on whoever allocates identities: they must be unique
 among *concurrent* participants of one document. Deriving one by hashing a

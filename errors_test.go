@@ -749,46 +749,60 @@ func TestAuthorize(t *testing.T) {
 // Two participants sharing a replica identity is silent data loss, not a merge
 // conflict: both mint the same operation identities for different characters and
 // the version vector discards one of each pair, telling nobody. Before this was
-// refused, a second participant on site 5 could write four characters and have
+// handled, a second participant on site 5 could write four characters and have
 // them simply not be there.
+//
+// The arriving session wins and the one already holding the identity is
+// disconnected, because the case this actually happens in is a participant whose
+// connection dropped coming back before the server noticed.
 func TestASiteCanOnlyBeInADocumentOnce(t *testing.T) {
 	_, conn := serve(t, collab.Config{})
 	first := join(t, conn, collab.ClientConfig{Document: "doc", Site: 5})
 	if err := first.Insert(0, "AAAA"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
+	witness := join(t, conn, collab.ClientConfig{Document: "doc", Site: 9})
+	awaitText(t, witness, "AAAA")
 
-	_, err := collab.Join(t.Context(), conn, collab.ClientConfig{Document: "doc", Site: 5})
-	if got := status.Code(err); got != codes.FailedPrecondition {
-		t.Fatalf("joining twice on one site = %v (%v), want FailedPrecondition", got, err)
+	second := join(t, conn, collab.ClientConfig{Document: "doc", Site: 5})
+
+	// The first session ends, and says why.
+	select {
+	case <-first.Done():
+	case <-time.After(settle):
+		t.Fatal("the displaced session did not end")
 	}
+	if got := status.Code(first.Err()); got != codes.Aborted {
+		t.Fatalf("the displaced session ended with %v (%v), want Aborted", got, first.Err())
+	}
+
+	// The one that took the identity has the document and can use it.
+	if got, want := second.Text(), "AAAA"; got != want {
+		t.Fatalf("the arriving session sees %q, want %q", got, want)
+	}
+	if err := second.Insert(4, "BBBB"); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	awaitText(t, witness, "AAAABBBB")
+
+	// Being displaced is not leaving: the identity is still in the document, so
+	// no departure may have been announced for it.
+	if err := second.SetCursor(awareness.Cursor{Head: 2}, map[string]string{"name": "still here"}); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+	await(t, witness, "the arriving session's presence", func() bool {
+		for _, p := range witness.Peers() {
+			if p.Site == 5 && p.Meta["name"] == "still here" {
+				return true
+			}
+		}
+		return false
+	})
 
 	// The same site in a different document is a different participant, and fine.
 	elsewhere := join(t, conn, collab.ClientConfig{Document: "other", Site: 5})
 	if err := elsewhere.Insert(0, "fine"); err != nil {
 		t.Fatalf("Insert: %v", err)
-	}
-
-	// And once the first participant has gone, its site is free again — that is
-	// what reconnecting is.
-	if err := first.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	deadline := time.After(settle)
-	for {
-		back, err := collab.Join(t.Context(), conn, collab.ClientConfig{Document: "doc", Site: 5})
-		if err == nil {
-			defer back.Close()
-			if got, want := back.Text(), "AAAA"; got != want {
-				t.Fatalf("the rejoining participant sees %q, want %q", got, want)
-			}
-			return
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("the site was never released: %v", err)
-		case <-time.After(10 * time.Millisecond):
-		}
 	}
 }
 
