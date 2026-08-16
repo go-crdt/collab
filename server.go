@@ -32,6 +32,23 @@ type Config struct {
 	// everyone else; it rejoins and is caught up from its version vector.
 	// Defaults to [DefaultBacklog].
 	Backlog int
+
+	// Authorize, when set, decides whether a participant may open a document.
+	// It is asked once per session, after the join arrives and before the
+	// document is touched, so a refused session neither reads the store nor
+	// reveals whether the document exists.
+	//
+	// This belongs here rather than in a gRPC interceptor, which is where one
+	// would first look for it: an interceptor sees the method and the request
+	// metadata, and the document being joined is in neither — it arrives in the
+	// stream's first message. Anything deciding per document has to run after
+	// that message, which means here. Authentication, which is per connection
+	// rather than per document, still belongs in an interceptor; ctx carries
+	// whatever it put there.
+	//
+	// Returning a gRPC status error passes that status to the participant
+	// unchanged; any other error is reported as PermissionDenied.
+	Authorize func(ctx context.Context, document string, site crdt.SiteID) error
 }
 
 // A Server hosts documents. Register it with
@@ -44,8 +61,9 @@ type Config struct {
 type Server struct {
 	collabpb.UnimplementedCollabServer
 
-	store   Store
-	backlog int
+	store     Store
+	backlog   int
+	authorize func(ctx context.Context, document string, site crdt.SiteID) error
 
 	mu   sync.Mutex
 	docs map[string]*document
@@ -59,7 +77,12 @@ func NewServer(cfg Config) *Server {
 	if cfg.Backlog <= 0 {
 		cfg.Backlog = DefaultBacklog
 	}
-	return &Server{store: cfg.Store, backlog: cfg.Backlog, docs: map[string]*document{}}
+	return &Server{
+		store:     cfg.Store,
+		backlog:   cfg.Backlog,
+		authorize: cfg.Authorize,
+		docs:      map[string]*document{},
+	}
 }
 
 // Flush persists every document that has changed since it was last written.
@@ -162,6 +185,12 @@ func (s *Server) Session(stream collabpb.Collab_SessionServer) error {
 		return status.Error(codes.InvalidArgument, "collab: a join must name a document")
 	}
 
+	if s.authorize != nil {
+		if err := s.authorize(ctx, join.GetDocument(), crdt.SiteID(join.GetSite())); err != nil {
+			return refusal(err)
+		}
+	}
+
 	doc, err := s.open(ctx, join.GetDocument())
 	if err != nil {
 		return err
@@ -208,6 +237,16 @@ func (s *Server) Session(stream collabpb.Collab_SessionServer) error {
 			}
 		}
 	}
+}
+
+// refusal reports why a participant was not allowed in. A status error passes
+// through with the code its author chose; anything else is PermissionDenied,
+// with the reason kept, since that is what refusing a document means.
+func refusal(err error) error {
+	if _, ok := status.FromError(err); ok {
+		return err
+	}
+	return status.Error(codes.PermissionDenied, err.Error())
 }
 
 // received is one result from the stream: a message, or the error that ended it.

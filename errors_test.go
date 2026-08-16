@@ -672,3 +672,76 @@ func TestJoinReportsAConnectionThatWillNotOpen(t *testing.T) {
 		})
 	}
 }
+
+// Deciding who may open which document has to happen here rather than in a gRPC
+// interceptor: the document being joined arrives in the stream's first message,
+// which an interceptor never sees.
+func TestAuthorize(t *testing.T) {
+	type call struct {
+		document string
+		site     crdt.SiteID
+	}
+	var asked []call
+	store := collab.NewMemoryStore()
+	refuse := errors.New("not your document")
+
+	_, conn := serve(t, collab.Config{
+		Store: store,
+		Authorize: func(_ context.Context, document string, site crdt.SiteID) error {
+			asked = append(asked, call{document, site})
+			switch document {
+			case "open":
+				return nil
+			case "teapot":
+				return status.Error(codes.Unavailable, "come back later")
+			default:
+				return refuse
+			}
+		},
+	})
+
+	t.Run("allowed", func(t *testing.T) {
+		c := join(t, conn, collab.ClientConfig{Document: "open", Site: 7})
+		if err := c.Insert(0, "welcome"); err != nil {
+			t.Fatalf("Insert: %v", err)
+		}
+	})
+
+	t.Run("refused with a plain error", func(t *testing.T) {
+		stream := rawSession(t, conn)
+		if err := stream.Send(joinMessage("private", 8, nil)); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		expectCode(t, stream, codes.PermissionDenied)
+	})
+
+	t.Run("refused with a status of its own", func(t *testing.T) {
+		stream := rawSession(t, conn)
+		if err := stream.Send(joinMessage("teapot", 9, nil)); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		expectCode(t, stream, codes.Unavailable)
+	})
+
+	want := []call{{"open", 7}, {"private", 8}, {"teapot", 9}}
+	if len(asked) != len(want) {
+		t.Fatalf("Authorize was asked %d times, want %d: %+v", len(asked), len(want), asked)
+	}
+	for i := range want {
+		if asked[i] != want[i] {
+			t.Errorf("call %d was %+v, want %+v", i, asked[i], want[i])
+		}
+	}
+
+	// A refused session must not have opened, read or created its document — the
+	// answer must not depend on whether that document exists. The one that was
+	// allowed is in the store, written when its participant left.
+	for _, name := range store.Documents() {
+		if name != "open" {
+			t.Errorf("a refused session created %q in the store", name)
+		}
+	}
+	if _, err := collab.Join(t.Context(), conn, collab.ClientConfig{Document: "private", Site: 1}); err == nil {
+		t.Fatal("Join was accepted for a refused document")
+	}
+}

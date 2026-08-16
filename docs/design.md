@@ -87,10 +87,22 @@ A skipped test is not a passing one, so CI sets `COLLAB_REQUIRE_WASM` on the job
 that exists to run the last of these: a missing Node or wasm glue fails it rather
 than turning it green.
 
+## Who may open what
+
+`Config.Authorize` decides it, once per session, after the join arrives and
+before the document is touched — so a refused session neither reads the store nor
+reveals whether the document exists.
+
+The obvious place for this is a gRPC interceptor, and that is the wrong place: an
+interceptor sees the method and the request metadata, and the document being
+joined is in neither. It arrives in the stream's first message, so anything
+deciding *per document* has to run after that message. Authentication, being per
+connection rather than per document, does belong in an interceptor; the context
+carries whatever it put there.
+
 ## Next
 
 - Postgres-backed `Store` against [weft's HA datastore](https://github.com/openweft),
   keeping snapshots and an operation log.
 - Wiring `weft-loom-server` and the loom browser client to this package.
-- Access control: the service has no notion of who may open a document, which
-  belongs in an interceptor rather than here.
+- Wiring `weft-loom-server` and the loom browser client to this package.
