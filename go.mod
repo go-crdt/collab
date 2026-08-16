@@ -3,7 +3,7 @@ module github.com/go-crdt/collab
 go 1.26.4
 
 require (
-	github.com/go-crdt/crdt v0.8.0
+	github.com/go-crdt/crdt v0.10.0
 	github.com/grpc-transports/websocket v0.2.0
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.12
