@@ -94,7 +94,14 @@ c.TakeChanges()      // []crdt.Change: remove this many here, put this there
 c.Anchor(pos)        // a handle on a character, for a comment or a stored selection
 c.Position(anchor)   // where it is now, or where it was if it has gone
 c.AuthorRuns()       // the text split by who wrote each stretch
+c.InsertUTF16(pos, text)  // offsets in the units a browser counts
 ```
+
+A browser counts UTF-16 code units, and an emoji is one character and two units.
+A session that took the browser's offsets for runes would edit in the wrong
+place, silently, from the first emoji onwards — so the same operations are
+addressed both ways, and an offset landing inside a character is refused rather
+than moved.
 
 ## Who may open what
 

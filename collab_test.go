@@ -2,6 +2,7 @@ package collab_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -499,5 +500,46 @@ func TestAnchorsThroughASession(t *testing.T) {
 	runs := grace.AuthorRuns()
 	if len(runs) != 1 || runs[0].Site != 1 || runs[0].Len != grace.Len() {
 		t.Fatalf("AuthorRuns() = %+v, want all %d characters by site 1", runs, grace.Len())
+	}
+}
+
+// A browser counts UTF-16 code units, and hands those offsets straight to the
+// session. An emoji is one character and two units, so a session that took them
+// for runes would edit in the wrong place — silently, once, and then for ever.
+func TestEditingInTheUnitsABrowserCounts(t *testing.T) {
+	_, conn := serve(t, collab.Config{})
+	browser := join(t, conn, collab.ClientConfig{Document: "doc", Site: 1})
+	watcher := join(t, conn, collab.ClientConfig{Document: "doc", Site: 2})
+
+	if err := browser.Insert(0, "a😀b"); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if got, want := browser.Len(), 3; got != want {
+		t.Fatalf("Len() = %d, want %d runes", got, want)
+	}
+	if got, want := browser.LenUTF16(), 4; got != want {
+		t.Fatalf("LenUTF16() = %d, want %d — what the browser would report", got, want)
+	}
+
+	// The browser's caret after the emoji is at unit 3, not rune 3.
+	if err := browser.InsertUTF16(3, "X"); err != nil {
+		t.Fatalf("InsertUTF16: %v", err)
+	}
+	awaitText(t, watcher, "a😀Xb")
+
+	// An offset inside the emoji is refused rather than moved.
+	if err := browser.InsertUTF16(2, "!"); !errors.Is(err, crdt.ErrSurrogateBoundary) {
+		t.Fatalf("InsertUTF16 inside a character = %v, want ErrSurrogateBoundary", err)
+	}
+	// So is a deletion that would cut one in half.
+	if err := browser.DeleteUTF16(2, 1); !errors.Is(err, crdt.ErrSurrogateBoundary) {
+		t.Fatalf("DeleteUTF16 inside a character = %v, want ErrSurrogateBoundary", err)
+	}
+	if err := browser.DeleteUTF16(1, 2); err != nil {
+		t.Fatalf("DeleteUTF16: %v", err)
+	}
+	awaitText(t, watcher, "aXb")
+	if got, want := watcher.LenUTF16(), 3; got != want {
+		t.Fatalf("LenUTF16() = %d, want %d", got, want)
 	}
 }
