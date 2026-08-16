@@ -53,6 +53,7 @@ type Client struct {
 	mu       sync.Mutex
 	doc      *crdt.Doc
 	presence *awareness.Registry
+	changed  []crdt.Change
 	err      error
 }
 
@@ -195,13 +196,63 @@ func (c *Client) applyOperations(raw []byte) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// One rejection covers both: ParseOps already guarantees what Apply checks,
-	// so a separate branch for the merge could not be reached.
+	// One rejection covers both: ParseOps already guarantees what ApplyChanges
+	// checks, so a separate branch for the merge could not be reached.
 	ops, err := crdt.ParseOps(raw)
-	if err == nil {
-		err = c.doc.Apply(ops...)
+	if err != nil {
+		return err
 	}
+	changes, err := c.doc.ApplyChanges(ops...)
+	c.changed = append(c.changed, changes...)
 	return err
+}
+
+// TakeChanges returns the edits made by everyone else since it was last called,
+// in the order a view of the text has to make them, and forgets them.
+//
+// It pairs with [Client.Changes]: that says something happened, this says what.
+// A view that only ever applies these holds what the document holds — see
+// [crdt.Change].
+//
+// Local edits are not reported. A caller that made them already knows.
+func (c *Client) TakeChanges() []crdt.Change {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	changes := c.changed
+	c.changed = nil
+	return changes
+}
+
+// Anchor returns the identity of the character at rune offset pos, which keeps
+// naming that character however the document moves around it. It is what a
+// comment or a stored selection should hold; see [crdt.Doc.Anchor].
+func (c *Client) Anchor(pos int) (crdt.ID, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.doc.Anchor(pos)
+}
+
+// Position returns where the character an anchor names sits now — or where it
+// was, if it has been deleted. See [crdt.Doc.Position].
+func (c *Client) Position(anchor crdt.ID) (int, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.doc.Position(anchor)
+}
+
+// Visible reports whether the character an anchor names is still in the text.
+func (c *Client) Visible(anchor crdt.ID) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.doc.Visible(anchor)
+}
+
+// AuthorRuns splits the visible text into stretches by who wrote them, which is
+// what colouring a document by author needs.
+func (c *Client) AuthorRuns() []crdt.AuthorRun {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.doc.AuthorRuns()
 }
 
 func (c *Client) applyPresence(raw []byte) error {

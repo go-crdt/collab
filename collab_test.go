@@ -402,3 +402,102 @@ func TestMemoryStore(t *testing.T) {
 		t.Fatalf("Load returned %q: the store handed out its own bytes", again)
 	}
 }
+
+// A binding keeps its own copy of the text and is told the edits, because being
+// handed the whole text would throw away the selection and the scroll position
+// on every keystroke anybody else makes. This is that loop, over a session.
+func TestAViewIsKeptInStepByTheChanges(t *testing.T) {
+	_, conn := serve(t, collab.Config{})
+	writer := join(t, conn, collab.ClientConfig{Document: "doc", Site: 1})
+	watcher := join(t, conn, collab.ClientConfig{Document: "doc", Site: 2})
+
+	var text []rune
+	catchUp := func(want string) {
+		t.Helper()
+		awaitText(t, watcher, want)
+		for _, c := range watcher.TakeChanges() {
+			if c.Pos < 0 || c.Pos+c.Removed > len(text) {
+				t.Fatalf("change %+v does not fit a view of %d characters", c, len(text))
+			}
+			tail := append([]rune(nil), text[c.Pos+c.Removed:]...)
+			text = append(append(text[:c.Pos], []rune(c.Text)...), tail...)
+		}
+		if got := string(text); got != want {
+			t.Fatalf("the view holds %q, the document %q", got, want)
+		}
+	}
+
+	if err := writer.Insert(0, "the quick fox"); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	catchUp("the quick fox")
+
+	if err := writer.Insert(10, "brown "); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	catchUp("the quick brown fox")
+
+	if err := writer.Delete(3, 6); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	catchUp("the brown fox")
+
+	// Taking them again yields nothing: they were taken.
+	if got := watcher.TakeChanges(); len(got) != 0 {
+		t.Fatalf("TakeChanges again returned %+v, want nothing", got)
+	}
+	// And a participant's own edits are not reported back to it.
+	if err := watcher.Insert(0, ">> "); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if got := watcher.TakeChanges(); len(got) != 0 {
+		t.Fatalf("a local edit was reported as a change: %+v", got)
+	}
+}
+
+// An anchor taken through a client keeps naming its character while everyone
+// else edits, which is what a comment pinned to a line needs.
+func TestAnchorsThroughASession(t *testing.T) {
+	_, conn := serve(t, collab.Config{})
+	ada := join(t, conn, collab.ClientConfig{Document: "doc", Site: 1})
+	grace := join(t, conn, collab.ClientConfig{Document: "doc", Site: 2})
+
+	if err := ada.Insert(0, "chapter one"); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	awaitText(t, grace, "chapter one")
+
+	anchor, err := grace.Anchor(8) // the "o" of one
+	if err != nil {
+		t.Fatalf("Anchor: %v", err)
+	}
+	if !grace.Visible(anchor) {
+		t.Fatal("the anchored character is reported as gone")
+	}
+
+	if err := ada.Insert(0, "part two, "); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	awaitText(t, grace, "part two, chapter one")
+	pos, ok := grace.Position(anchor)
+	if !ok || pos != 18 {
+		t.Fatalf("Position after an insertion above = %d, %v; want 18, true", pos, ok)
+	}
+
+	if err := ada.Delete(18, 3); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	awaitText(t, grace, "part two, chapter ")
+	if grace.Visible(anchor) {
+		t.Fatal("the anchored character is reported as present after being deleted")
+	}
+	if pos, _ := grace.Position(anchor); pos != 18 {
+		t.Fatalf("Position of the deleted character = %d, want 18", pos)
+	}
+
+	// And who wrote what, which is the other thing a margin shows.
+	runs := grace.AuthorRuns()
+	if len(runs) != 1 || runs[0].Site != 1 || runs[0].Len != grace.Len() {
+		t.Fatalf("AuthorRuns() = %+v, want all %d characters by site 1", runs, grace.Len())
+	}
+}

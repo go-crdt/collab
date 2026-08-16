@@ -37,7 +37,8 @@ c.Insert(0, "hello")
 c.SetCursor(awareness.Cursor{Anchor: 5, Head: 5}, map[string]string{"name": "ada"})
 
 for range c.Changes() {
-    render(c.Text(), c.Peers())
+    apply(c.TakeChanges())   // the edits, not the whole text
+    render(c.Peers())
 }
 ```
 
@@ -80,6 +81,20 @@ it wrote while away. After that, operations and presence flow both ways.
 - **Documents outlive sessions.** The last participant out writes the document;
   `Server.Flush` writes it without waiting. A write that fails is retried rather
   than forgotten.
+
+## What a binding needs
+
+An editor cannot be handed the whole text on every keystroke somebody else
+makes: that throws away the selection, the scroll position and every decoration.
+`Changes` says something happened, `TakeChanges` says what — the edits, in the
+order they have to be made.
+
+```go
+c.TakeChanges()      // []crdt.Change: remove this many here, put this there
+c.Anchor(pos)        // a handle on a character, for a comment or a stored selection
+c.Position(anchor)   // where it is now, or where it was if it has gone
+c.AuthorRuns()       // the text split by who wrote each stretch
+```
 
 ## Who may open what
 
