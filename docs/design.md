@@ -126,6 +126,34 @@ deciding *per document* has to run after that message. Authentication, being per
 connection rather than per document, does belong in an interceptor; the context
 carries whatever it put there.
 
+Over a WebSocket, that authentication is a **cookie**, because a browser cannot
+put a header on one — and a cookie only exists while the upgrade is still an HTTP
+request. `grpc-transports/websocket` v0.2.0 carries it across:
+
+```go
+lis, _ := wstransport.ListenWebSocket(addr, wstransport.ServerConfig{
+    OnUpgrade: func(r *http.Request) (any, error) {
+        c, err := r.Cookie("session")            // still an HTTP request here
+        if err != nil {
+            return nil, &wstransport.UpgradeError{Code: 401, Message: "sign in"}
+        }
+        return c.Value, nil
+    },
+})
+gs := grpc.NewServer(grpc.Creds(wstransport.ServerCredentials()))
+
+collab.NewServer(collab.Config{
+    Authorize: func(ctx context.Context, document string, _ crdt.SiteID) error {
+        user, _ := wstransport.FromContext(ctx) // what the upgrade carried
+        return acl.Check(user, document)
+    },
+})
+```
+
+`TestAuthorizeFromTheUpgradeCookie` is that chain end to end, because each link
+works alone and the question is whether they meet. A session with no cookie never
+becomes one: the refusal happens during the handshake, before any stream exists.
+
 ## Next
 
 - Postgres-backed `Store` against [weft's HA datastore](https://github.com/openweft),
