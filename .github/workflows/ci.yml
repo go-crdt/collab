@@ -95,6 +95,48 @@ jobs:
           awk -v t="$cov" 'BEGIN { exit !(t+0 >= 100.0) }' || {
             echo "::error::coverage ${cov}% < 100%"; exit 1; }
 
+  # The PostgreSQL store is tested against PostgreSQL. A store that has never
+  # spoken to a database has not been tested, so the happy paths here are the
+  # ones only a real server can exercise — and COLLAB_REQUIRE_POSTGRES turns a
+  # missing database into a failure rather than a skipped test.
+  postgres-store:
+    name: postgres store
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: collab
+          POSTGRES_PASSWORD: collab
+          POSTGRES_DB: collab
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      COLLAB_POSTGRES: postgres://collab:collab@localhost:5432/collab?sslmode=disable
+      COLLAB_REQUIRE_POSTGRES: "1"
+    defaults:
+      run:
+        working-directory: pgstore
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go vet ./...
+      - run: go test -race -v ./...
+      - name: Test + 100% coverage gate
+        run: |
+          go test -coverpkg=github.com/go-crdt/collab/pgstore -coverprofile=cover.out ./...
+          go tool cover -func=cover.out | tail -n 15
+          cov=$(go tool cover -func=cover.out | tail -1 | awk '{print $3}' | tr -d '%')
+          echo "coverage: ${cov}%"
+          awk -v t="$cov" 'BEGIN { exit !(t+0 >= 100.0) }' || {
+            echo "::error::coverage ${cov}% < 100%"; exit 1; }
+
   # The point of the whole design is that a browser runs the same merge logic as
   # the server. This job proves it: two participants compiled to WebAssembly and
   # run by Node, editing concurrently with a native one through a real WebSocket,
