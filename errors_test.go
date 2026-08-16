@@ -745,3 +745,59 @@ func TestAuthorize(t *testing.T) {
 		t.Fatal("Join was accepted for a refused document")
 	}
 }
+
+// Two participants sharing a replica identity is silent data loss, not a merge
+// conflict: both mint the same operation identities for different characters and
+// the version vector discards one of each pair, telling nobody. Before this was
+// refused, a second participant on site 5 could write four characters and have
+// them simply not be there.
+func TestASiteCanOnlyBeInADocumentOnce(t *testing.T) {
+	_, conn := serve(t, collab.Config{})
+	first := join(t, conn, collab.ClientConfig{Document: "doc", Site: 5})
+	if err := first.Insert(0, "AAAA"); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	_, err := collab.Join(t.Context(), conn, collab.ClientConfig{Document: "doc", Site: 5})
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Fatalf("joining twice on one site = %v (%v), want FailedPrecondition", got, err)
+	}
+
+	// The same site in a different document is a different participant, and fine.
+	elsewhere := join(t, conn, collab.ClientConfig{Document: "other", Site: 5})
+	if err := elsewhere.Insert(0, "fine"); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	// And once the first participant has gone, its site is free again — that is
+	// what reconnecting is.
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	deadline := time.After(settle)
+	for {
+		back, err := collab.Join(t.Context(), conn, collab.ClientConfig{Document: "doc", Site: 5})
+		if err == nil {
+			defer back.Close()
+			if got, want := back.Text(), "AAAA"; got != want {
+				t.Fatalf("the rejoining participant sees %q, want %q", got, want)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("the site was never released: %v", err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// Site zero is the server's own replica, so a participant claiming it would be
+// minting operations the server believes are its own.
+func TestSiteZeroIsRefused(t *testing.T) {
+	_, conn := serve(t, collab.Config{})
+	_, err := collab.Join(t.Context(), conn, collab.ClientConfig{Document: "doc", Site: 0})
+	if got := status.Code(err); got != codes.InvalidArgument {
+		t.Fatalf("joining as site 0 = %v (%v), want InvalidArgument", got, err)
+	}
+}

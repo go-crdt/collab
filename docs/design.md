@@ -41,6 +41,26 @@ on one replica for ever. With the server's vector in hand the client answers wit
 exactly what is missing. `TestResumeCarriesWorkBothWays` fails if either
 direction is dropped.
 
+## One replica identity per participant
+
+`crdt` assumes every replica editing a document has an identity of its own. When
+two do not, the failure is not a conflict anyone can see: both mint the same
+`(site, sequence)` for different characters, the version vector keeps the first
+of each pair and discards the second, and the lost characters are simply not
+there. Nobody is told.
+
+The server therefore refuses a site already editing a document, and refuses site
+zero, which is its own replica. A participant that reconnects finds its site free
+again, because the previous session released it on leaving.
+
+This puts a requirement on whoever allocates identities: they must be unique
+among *concurrent* participants of one document. Deriving one by hashing a
+session token ([crdt.DeriveSiteID]) satisfies that, but note what it costs on the
+wire — a 64-bit identity is carried twice in every operation, once for the
+operation and once for its origin, which roughly doubles the encoded size against
+small dense numbers. A server handing out small identities per session is
+cheaper, and it is the server that can guarantee uniqueness anyway.
+
 ## Backpressure
 
 A participant that stops reading cannot be allowed to hold up the document, and
@@ -104,5 +124,4 @@ carries whatever it put there.
 
 - Postgres-backed `Store` against [weft's HA datastore](https://github.com/openweft),
   keeping snapshots and an operation log.
-- Wiring `weft-loom-server` and the loom browser client to this package.
 - Wiring `weft-loom-server` and the loom browser client to this package.

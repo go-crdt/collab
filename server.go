@@ -281,6 +281,23 @@ func (d *document) join(j *collabpb.Join) (*subscriber, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	// Two participants sharing a replica identity is not a merge conflict, it is
+	// silent data loss: both mint the same operation identities for different
+	// characters, and the version vector discards one of each pair. Neither
+	// participant is told, and the characters simply are not there. It is
+	// therefore refused here rather than left to callers to get right.
+	site := crdt.SiteID(j.GetSite())
+	if site == serverSite {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"collab: site %d is the server's own replica", serverSite)
+	}
+	for other := range d.subs {
+		if other.site == site {
+			return nil, status.Errorf(codes.FailedPrecondition,
+				"collab: site %d is already editing this document", site)
+		}
+	}
+
 	welcome := &collabpb.Welcome{}
 	if have := j.GetHave(); len(have) == 0 {
 		welcome.Snapshot = d.doc.Snapshot()

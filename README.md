@@ -72,6 +72,10 @@ it wrote while away. After that, operations and presence flow both ways.
   than holding everyone up or being served state that is quietly out of date.
 - **Nothing is trusted.** Malformed operations, presence, version vectors and
   snapshots are each refused with `InvalidArgument`, on both sides of the wire.
+- **One replica identity per participant.** Two participants sharing a site is
+  silent data loss rather than a conflict — both mint the same operation
+  identities for different characters — so a site already editing a document is
+  refused, and so is the server's own.
 - **Documents outlive sessions.** The last participant out writes the document;
   `Server.Flush` writes it without waiting. A write that fails is retried rather
   than forgotten.
