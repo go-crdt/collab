@@ -1,0 +1,85 @@
+// Package collab.v1 carries a collaborative editing session.
+//
+// The service is deliberately thin. Because the document is a CRDT, the server
+// never transforms an operation and never decides an outcome — it applies what
+// it is sent to its own replica, hands it to everyone else, and can therefore be
+// replaced, restarted, or run in several copies without any client noticing.
+syntax = "proto3";
+
+package collab.v1;
+
+option go_package = "github.com/go-crdt/collab/collabpb";
+
+// Collab is one bidirectional stream per participant per document.
+service Collab {
+  // Session carries a participant's whole involvement with one document: it
+  // opens with a Join, and from then on operations and presence flow both ways
+  // until either side hangs up.
+  rpc Session(stream ClientMessage) returns (stream ServerMessage);
+}
+
+// ClientMessage is anything a participant sends.
+message ClientMessage {
+  oneof body {
+    Join join = 1;
+    Operations operations = 2;
+    Presence presence = 3;
+  }
+}
+
+// ServerMessage is anything the server sends back.
+message ServerMessage {
+  oneof body {
+    Welcome welcome = 1;
+    Operations operations = 2;
+    Presence presence = 3;
+  }
+}
+
+// Join opens a session. It must be the first message, and it must not be sent
+// twice.
+message Join {
+  // document names the document to edit. It is opened if it does not exist.
+  string document = 1;
+
+  // site is the participant's replica identity, which must be distinct from
+  // every other participant's. See crdt.DeriveSiteID.
+  uint64 site = 2;
+
+  // have is the participant's encoded version vector, sent when rejoining a
+  // document it already holds. The server then replies with only the operations
+  // that are missing, instead of the whole document. Empty means "send
+  // everything".
+  bytes have = 3;
+}
+
+// Welcome answers a Join with the state of the document at that moment.
+message Welcome {
+  // snapshot is the whole document, sent when the participant is new to it or
+  // too far behind to catch up cheaply. Empty when operations were sent instead.
+  bytes snapshot = 1;
+
+  // operations catches up a participant that supplied a version vector.
+  bytes operations = 2;
+
+  // presence is the state of everyone already in the document.
+  repeated bytes presence = 3;
+
+  // version is the server's encoded version vector. A participant answers with
+  // whatever the server is missing, which is what lets work done while
+  // disconnected reach everyone else rather than being stranded.
+  bytes version = 4;
+}
+
+// Operations carries a batch of CRDT operations, encoded by crdt.AppendOps.
+// Applying them is idempotent and order-independent, so this message needs no
+// sequencing of its own.
+message Operations {
+  bytes operations = 1;
+}
+
+// Presence carries one encoded awareness update: a cursor, a selection, or a
+// departure. It is never persisted.
+message Presence {
+  bytes update = 1;
+}
