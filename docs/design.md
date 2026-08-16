@@ -41,6 +41,32 @@ on one replica for ever. With the server's vector in hand the client answers wit
 exactly what is missing. `TestResumeCarriesWorkBothWays` fails if either
 direction is dropped.
 
+## One replica identity per participant
+
+`crdt` assumes every replica editing a document has an identity of its own. When
+two do not, the failure is not a conflict anyone can see: both mint the same
+`(site, sequence)` for different characters, the version vector keeps the first
+of each pair and discards the second, and the lost characters are simply not
+there. Nobody is told.
+
+So the arriving session takes the identity and the one already holding it is
+disconnected with `Aborted`. Refusing the newcomer instead would be worse exactly
+where this happens: a participant whose connection dropped comes back long before
+the server notices the old one is dead, and would be locked out until a TCP
+timeout it cannot see. Displacing also makes a genuine clash loud — two tabs
+would take turns evicting each other — rather than losing characters quietly.
+Being displaced is not leaving, so no departure is announced: the identity is
+still in the document, on the session that took it. Site zero, the server's own
+replica, is refused outright.
+
+This puts a requirement on whoever allocates identities: they must be unique
+among *concurrent* participants of one document. Deriving one by hashing a
+session token ([crdt.DeriveSiteID]) satisfies that, but note what it costs on the
+wire — a 64-bit identity is carried twice in every operation, once for the
+operation and once for its origin, which roughly doubles the encoded size against
+small dense numbers. A server handing out small identities per session is
+cheaper, and it is the server that can guarantee uniqueness anyway.
+
 ## Backpressure
 
 A participant that stops reading cannot be allowed to hold up the document, and
@@ -104,5 +130,4 @@ carries whatever it put there.
 
 - Postgres-backed `Store` against [weft's HA datastore](https://github.com/openweft),
   keeping snapshots and an operation log.
-- Wiring `weft-loom-server` and the loom browser client to this package.
 - Wiring `weft-loom-server` and the loom browser client to this package.

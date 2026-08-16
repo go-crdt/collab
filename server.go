@@ -163,10 +163,11 @@ type document struct {
 
 // A subscriber is one participant's queue of outbound messages.
 type subscriber struct {
-	site    crdt.SiteID
-	out     chan *collabpb.ServerMessage
-	dropped atomic.Bool
-	closed  bool // guarded by document.mu
+	site      crdt.SiteID
+	out       chan *collabpb.ServerMessage
+	dropped   atomic.Bool
+	displaced atomic.Bool
+	closed    bool // guarded by document.mu
 }
 
 // Session is the service method: one bidirectional stream, one participant, one
@@ -267,9 +268,13 @@ func pump(stream collabpb.Collab_SessionServer, sub *subscriber) error {
 			return err
 		}
 	}
-	if sub.dropped.Load() {
+	switch {
+	case sub.dropped.Load():
 		return status.Error(codes.ResourceExhausted,
 			"collab: this participant fell too far behind; rejoin to be caught up")
+	case sub.displaced.Load():
+		return status.Error(codes.Aborted,
+			"collab: another session took this replica identity")
 	}
 	return nil
 }
@@ -280,6 +285,31 @@ func pump(stream collabpb.Collab_SessionServer, sub *subscriber) error {
 func (d *document) join(j *collabpb.Join) (*subscriber, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	// Two participants sharing a replica identity is not a merge conflict, it is
+	// silent data loss: both mint the same operation identities for different
+	// characters, and the version vector discards one of each pair. Neither is
+	// told, and the characters simply are not there.
+	//
+	// The arriving session wins, and the one already holding that identity is
+	// disconnected. Refusing the newcomer instead would be worse where this
+	// actually happens: a participant whose connection dropped comes back long
+	// before the server notices the old one is dead, and would be locked out
+	// until a TCP timeout it cannot see. Displacing also makes a genuine clash
+	// loud — two tabs would take turns evicting each other — rather than losing
+	// characters quietly.
+	site := crdt.SiteID(j.GetSite())
+	if site == serverSite {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"collab: site %d is the server's own replica", serverSite)
+	}
+	for other := range d.subs {
+		if other.site == site {
+			other.displaced.Store(true)
+			delete(d.subs, other)
+			d.close(other)
+		}
+	}
 
 	welcome := &collabpb.Welcome{}
 	if have := j.GetHave(); len(have) == 0 {
@@ -317,8 +347,13 @@ func (d *document) leave(ctx context.Context, sub *subscriber) {
 	d.mu.Lock()
 	delete(d.subs, sub)
 	d.close(sub)
-	departure, _ := d.presence.Leave(sub.site).MarshalBinary() // cannot fail
-	d.broadcast(nil, presenceMessage(departure))
+	// A displaced session must not announce a departure: the identity did not
+	// leave, it moved to the session that displaced this one, which is still
+	// here and has already published its own presence.
+	if !sub.displaced.Load() {
+		departure, _ := d.presence.Leave(sub.site).MarshalBinary() // cannot fail
+		d.broadcast(nil, presenceMessage(departure))
+	}
 	last := len(d.subs) == 0
 	d.mu.Unlock()
 
