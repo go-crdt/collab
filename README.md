@@ -1,5 +1,10 @@
 # collab — the wire for collaborative editing
 
+[![CI](https://github.com/go-crdt/collab/actions/workflows/ci.yml/badge.svg)](https://github.com/go-crdt/collab/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/go-crdt/collab.svg)](https://pkg.go.dev/github.com/go-crdt/collab)
+[![coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/go-crdt/collab/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-BSD--3--Clause-blue)](LICENSE)
+
 `github.com/go-crdt/collab` carries a [`go-crdt/crdt`](https://github.com/go-crdt/crdt)
 document between the people editing it: a gRPC service, a server that hosts
 documents, and a client that joins one. Pure Go, **CGO=0**.
