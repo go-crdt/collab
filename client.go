@@ -51,9 +51,9 @@ type Client struct {
 	send sync.Mutex // grpc-go allows exactly one sender per stream
 
 	mu       sync.Mutex
-	doc      *crdt.Doc
+	doc      *crdt.Composite
 	presence *awareness.Registry
-	changed  []crdt.Change
+	changed  []crdt.PartChange
 	err      error
 }
 
@@ -66,15 +66,15 @@ func Join(ctx context.Context, conn grpc.ClientConnInterface, cfg ClientConfig) 
 		return nil, errors.New("collab: Join needs a document name")
 	}
 
-	local := crdt.New(cfg.Site)
+	local := crdt.NewComposite(cfg.Site)
 	join := &collabpb.Join{Document: cfg.Document, Site: uint64(cfg.Site)}
 	if len(cfg.Resume) > 0 {
-		resumed, err := crdt.Load(cfg.Site, cfg.Resume)
+		resumed, err := crdt.LoadComposite(cfg.Site, cfg.Resume)
 		if err != nil {
 			return nil, err
 		}
 		local = resumed
-		// The version vector of a document cannot fail to encode.
+		// A version this replica built cannot fail to encode.
 		join.Have, _ = local.Version().MarshalBinary()
 	}
 
@@ -130,7 +130,7 @@ func Join(ctx context.Context, conn grpc.ClientConnInterface, cfg ClientConfig) 
 // joined fresh this is nothing; for one resuming after a disconnection it is the
 // work it did offline.
 func (c *Client) pushMissing(serverVersion []byte) error {
-	var held crdt.VersionVector
+	var held crdt.CompositeVersion
 	if len(serverVersion) > 0 {
 		if err := held.UnmarshalBinary(serverVersion); err != nil {
 			return err
@@ -145,7 +145,7 @@ func (c *Client) pushMissing(serverVersion []byte) error {
 // absorbWelcome adopts the state the server opened with.
 func (c *Client) absorbWelcome(w *collabpb.Welcome) error {
 	if snapshot := w.GetSnapshot(); len(snapshot) > 0 {
-		doc, err := crdt.Load(c.site, snapshot)
+		doc, err := crdt.LoadComposite(c.site, snapshot)
 		if err != nil {
 			return err
 		}
@@ -196,13 +196,14 @@ func (c *Client) applyOperations(raw []byte) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// One rejection covers both: ParseOps already guarantees what ApplyChanges
-	// checks, so a separate branch for the merge could not be reached.
-	ops, err := crdt.ParseOps(raw)
+	// One rejection covers both: ParsePartOps already guarantees what
+	// ApplyChanges checks, so a separate branch for the merge could not be
+	// reached.
+	batches, err := crdt.ParsePartOps(raw)
 	if err != nil {
 		return err
 	}
-	changes, err := c.doc.ApplyChanges(ops...)
+	changes, err := c.doc.ApplyChanges(batches...)
 	c.changed = append(c.changed, changes...)
 	return err
 }
@@ -215,44 +216,12 @@ func (c *Client) applyOperations(raw []byte) error {
 // [crdt.Change].
 //
 // Local edits are not reported. A caller that made them already knows.
-func (c *Client) TakeChanges() []crdt.Change {
+func (c *Client) TakeChanges() []crdt.PartChange {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	changes := c.changed
 	c.changed = nil
 	return changes
-}
-
-// Anchor returns the identity of the character at rune offset pos, which keeps
-// naming that character however the document moves around it. It is what a
-// comment or a stored selection should hold; see [crdt.Doc.Anchor].
-func (c *Client) Anchor(pos int) (crdt.ID, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.doc.Anchor(pos)
-}
-
-// Position returns where the character an anchor names sits now — or where it
-// was, if it has been deleted. See [crdt.Doc.Position].
-func (c *Client) Position(anchor crdt.ID) (int, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.doc.Position(anchor)
-}
-
-// Visible reports whether the character an anchor names is still in the text.
-func (c *Client) Visible(anchor crdt.ID) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.doc.Visible(anchor)
-}
-
-// AuthorRuns splits the visible text into stretches by who wrote them, which is
-// what colouring a document by author needs.
-func (c *Client) AuthorRuns() []crdt.AuthorRun {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.doc.AuthorRuns()
 }
 
 func (c *Client) applyPresence(raw []byte) error {
@@ -307,54 +276,9 @@ func (c *Client) Document() string { return c.document }
 // Site returns this participant's replica identity.
 func (c *Client) Site() crdt.SiteID { return c.site }
 
-// Text returns the document as it stands here.
-func (c *Client) Text() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.doc.String()
-}
-
-// Len returns the number of characters, counted in runes.
-func (c *Client) Len() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.doc.Len()
-}
-
-// LenUTF16 returns the length a browser would report, counting UTF-16 code
-// units. Its companions InsertUTF16 and DeleteUTF16 take offsets in the same
-// units, so a caller in the browser never converts by hand; see [crdt.Doc].
-func (c *Client) LenUTF16() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.doc.LenUTF16()
-}
-
-// InsertUTF16 adds text at an offset counted in UTF-16 code units.
-func (c *Client) InsertUTF16(pos int, text string) error {
-	c.mu.Lock()
-	ops, err := c.doc.InsertUTF16(pos, text)
-	c.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	return c.publish(ops)
-}
-
-// DeleteUTF16 removes length code units at an offset counted in the same units.
-func (c *Client) DeleteUTF16(pos, length int) error {
-	c.mu.Lock()
-	ops, err := c.doc.DeleteUTF16(pos, length)
-	c.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	return c.publish(ops)
-}
-
 // Version returns what this participant holds, for [ClientConfig.Resume] or for
 // diagnostics.
-func (c *Client) Version() crdt.VersionVector {
+func (c *Client) Version() crdt.CompositeVersion {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.doc.Version()
@@ -376,28 +300,6 @@ func (c *Client) Peers() []awareness.Peer {
 	return c.presence.Peers()
 }
 
-// Insert adds text at rune offset pos, locally and then everywhere.
-func (c *Client) Insert(pos int, text string) error {
-	c.mu.Lock()
-	ops, err := c.doc.Insert(pos, text)
-	c.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	return c.publish(ops)
-}
-
-// Delete removes length runes at rune offset pos, locally and then everywhere.
-func (c *Client) Delete(pos, length int) error {
-	c.mu.Lock()
-	ops, err := c.doc.Delete(pos, length)
-	c.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	return c.publish(ops)
-}
-
 // SetCursor publishes where this participant is. meta carries whatever the
 // editor wants shown — a display name, a colour — and is not interpreted here.
 //
@@ -414,11 +316,13 @@ func (c *Client) SetCursor(cursor awareness.Cursor, meta map[string]string) erro
 
 // publish sends the operations a local edit produced. An edit that changed
 // nothing sends nothing.
-func (c *Client) publish(ops []crdt.Op) error {
-	if len(ops) == 0 {
+func (c *Client) publish(batches []crdt.PartOps) error {
+	if len(batches) == 0 {
 		return nil
 	}
-	raw, _ := crdt.AppendOps(nil, ops) // operations we made are valid by construction
+	// Operations this replica made are valid by construction, so they cannot
+	// fail to encode.
+	raw, _ := crdt.AppendPartOps(nil, batches)
 	return c.transmit(&collabpb.ClientMessage{
 		Body: &collabpb.ClientMessage_Operations{Operations: &collabpb.Operations{Operations: raw}},
 	})

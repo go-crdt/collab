@@ -17,6 +17,20 @@
 // unmodified under js/wasm. The client in this package builds for js/wasm too,
 // so a browser tab and a server run the same code down to the merge.
 //
+// # A document holds named parts
+//
+// What an editor holds is not one structure: the text of a file, the comments
+// anchored into it, the record of who changed what, the messages beside it, the
+// cells of a sheet. A document here is a [github.com/go-crdt/crdt.Composite], so
+// they travel together — one snapshot, one version, one decision about who may
+// open it, and no instant at which the set of them disagrees.
+//
+// A caller reaches for a part by name and gets a handle: [Client.Text],
+// [Client.List], [Client.Map]. A handle edits and publishes in one step, which
+// is why it exists rather than the replicated structure itself — a caller
+// editing that directly would produce operations nobody ever heard, and drift
+// away from everyone else while its own screen looked right.
+//
 // # Shape of a session
 //
 // One bidirectional stream per participant per document. The client opens with

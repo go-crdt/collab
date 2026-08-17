@@ -29,18 +29,33 @@ srv := collab.NewServer(collab.Config{Store: myStore})
 collabpb.RegisterCollabServer(grpcServer, srv)
 ```
 
-Participant:
+Participant. A document holds **named parts**, so a caller reaches for the one it
+means and gets a handle that edits *and* publishes:
 
 ```go
 c, err := collab.Join(ctx, conn, collab.ClientConfig{Document: "notes", Site: 1})
-c.Insert(0, "hello")
+
+body, _ := c.Text("file:main.tex")   // the buffer an editor binds to
+chat, _ := c.List("chat")            // the messages beside it
+cells, _ := c.Map("cells")           // a sheet
+
+body.Insert(0, "hello")
+chat.Append([]byte("on commence"))
+cells.Set("B7", []byte("42"))
 c.SetCursor(awareness.Cursor{Anchor: 5, Head: 5}, map[string]string{"name": "ada"})
 
 for range c.Changes() {
-    apply(c.TakeChanges())   // the edits, not the whole text
+    for _, part := range c.TakeChanges() {   // which part moved, and how
+        render(part)
+    }
     render(c.Peers())
 }
 ```
+
+A handle is what a caller touches rather than the replicated structure, and that
+is forced: editing the structure directly would produce operations nobody ever
+heard, so the participant would drift away from everyone else while its own
+screen looked right.
 
 Coming back after a disconnection, keeping the work done offline:
 

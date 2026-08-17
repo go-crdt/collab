@@ -122,9 +122,9 @@ func (s *Server) open(ctx context.Context, name string) (*document, error) {
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "collab: reading document %q: %v", name, err)
 	}
-	doc := crdt.New(serverSite)
+	doc := crdt.NewComposite(serverSite)
 	if len(snapshot) > 0 {
-		if doc, err = crdt.Load(serverSite, snapshot); err != nil {
+		if doc, err = crdt.LoadComposite(serverSite, snapshot); err != nil {
 			return nil, status.Errorf(codes.Internal, "collab: stored document %q is unreadable: %v", name, err)
 		}
 	}
@@ -147,15 +147,24 @@ func (s *Server) open(ctx context.Context, name string) (*document, error) {
 }
 
 // A document is one hub: the server's replica, everyone's presence, and the
-// sessions to fan out to. crdt.Doc is not safe for concurrent use, so every
-// path through here holds mu.
+// sessions to fan out to. crdt.Composite is not safe for concurrent use, so
+// every path through here holds mu.
+//
+// The replica is a composite rather than a text because what a session carries
+// is not one structure: an editor has the text, the comments anchored into it,
+// the record of who changed what and the cells of a sheet. Held as separate
+// documents they would be separate snapshots persisted at separate moments,
+// with no instant at which the set of them agrees — a session restored from
+// them can hold a comment on a sentence the text it was saved beside does not
+// have. A document with only a text in it is a composite with one part, which
+// costs its name and a dozen bytes.
 type document struct {
 	name    string
 	store   Store
 	backlog int
 
 	mu       sync.Mutex
-	doc      *crdt.Doc
+	doc      *crdt.Composite
 	presence *awareness.Registry
 	subs     map[*subscriber]struct{}
 	dirty    bool
@@ -315,13 +324,13 @@ func (d *document) join(j *collabpb.Join) (*subscriber, error) {
 	if have := j.GetHave(); len(have) == 0 {
 		welcome.Snapshot = d.doc.Snapshot()
 	} else {
-		var held crdt.VersionVector
+		var held crdt.CompositeVersion
 		if err := held.UnmarshalBinary(have); err != nil {
-			return nil, status.Error(codes.InvalidArgument, "collab: malformed version vector")
+			return nil, status.Error(codes.InvalidArgument, "collab: malformed version")
 		}
 		// These operations came from this document, so they are valid by
 		// construction and cannot fail to encode.
-		welcome.Operations, _ = crdt.AppendOps(nil, d.doc.OpsSince(held))
+		welcome.Operations, _ = crdt.AppendPartOps(nil, d.doc.OpsSince(held))
 	}
 	for _, update := range d.presence.State() {
 		raw, _ := update.MarshalBinary() // cannot fail for an update we made
@@ -385,11 +394,11 @@ func (d *document) applyOperations(from *subscriber, raw []byte) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	// Decoding and merging share one rejection: both mean the same thing to the
-	// participant, and ParseOps already guarantees what Apply would check, so
+	// participant, and ParsePartOps already guarantees what Apply would check, so
 	// splitting them would leave a branch no input can reach.
-	ops, err := crdt.ParseOps(raw)
+	batches, err := crdt.ParsePartOps(raw)
 	if err == nil {
-		err = d.doc.Apply(ops...)
+		err = d.doc.Apply(batches...)
 	}
 	if err != nil {
 		return status.Error(codes.InvalidArgument, "collab: unusable operations")

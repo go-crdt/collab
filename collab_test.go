@@ -59,6 +59,24 @@ func join(t *testing.T, conn *grpc.ClientConn, cfg collab.ClientConfig) *collab.
 	return c
 }
 
+// body returns the text part these tests edit. A document holds named parts now,
+// so a test that means "the text" has to say which text — and every one of them
+// means this one.
+func body(t *testing.T, c *collab.Client) *collab.Text {
+	t.Helper()
+	h, err := c.Text("body")
+	if err != nil {
+		t.Fatalf("Text(\"body\"): %v", err)
+	}
+	return h
+}
+
+// text is body's string, which is what most assertions here are about.
+func text(t *testing.T, c *collab.Client) string {
+	t.Helper()
+	return body(t, c).String()
+}
+
 // await blocks until want holds, or fails the test with what it saw instead.
 func await(t *testing.T, c *collab.Client, what string, want func() bool) {
 	t.Helper()
@@ -68,10 +86,10 @@ func await(t *testing.T, c *collab.Client, what string, want func() bool) {
 		case <-c.Changes():
 		case <-c.Done():
 			if !want() {
-				t.Fatalf("session ended before %s: %v (text %q)", what, c.Err(), c.Text())
+				t.Fatalf("session ended before %s: %v (text %q)", what, c.Err(), text(t, c))
 			}
 		case <-deadline:
-			t.Fatalf("timed out waiting for %s; text is %q", what, c.Text())
+			t.Fatalf("timed out waiting for %s; text is %q", what, text(t, c))
 		}
 	}
 }
@@ -79,7 +97,7 @@ func await(t *testing.T, c *collab.Client, what string, want func() bool) {
 // awaitText is the common case: wait for a participant to hold exactly this text.
 func awaitText(t *testing.T, c *collab.Client, want string) {
 	t.Helper()
-	await(t, c, "the text to be "+want, func() bool { return c.Text() == want })
+	await(t, c, "the text to be "+want, func() bool { return text(t, c) == want })
 }
 
 func TestOneEditReachesTheOthers(t *testing.T) {
@@ -87,17 +105,17 @@ func TestOneEditReachesTheOthers(t *testing.T) {
 	ada := join(t, conn, collab.ClientConfig{Document: "notes", Site: 1})
 	grace := join(t, conn, collab.ClientConfig{Document: "notes", Site: 2})
 
-	if err := ada.Insert(0, "hello"); err != nil {
+	if err := body(t, ada).Insert(0, "hello"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	awaitText(t, grace, "hello")
 
-	if err := grace.Insert(5, " world"); err != nil {
+	if err := body(t, grace).Insert(5, " world"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	awaitText(t, ada, "hello world")
 
-	if err := ada.Delete(0, 6); err != nil {
+	if err := body(t, ada).Delete(0, 6); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	awaitText(t, grace, "world")
@@ -108,7 +126,7 @@ func TestOneEditReachesTheOthers(t *testing.T) {
 	if got, want := ada.Site(), crdt.SiteID(1); got != want {
 		t.Errorf("Site() = %d, want %d", got, want)
 	}
-	if got, want := ada.Len(), len("world"); got != want {
+	if got, want := body(t, ada).Len(), len("world"); got != want {
 		t.Errorf("Len() = %d, want %d", got, want)
 	}
 }
@@ -123,7 +141,7 @@ func TestConcurrentParticipantsConverge(t *testing.T) {
 		clients[i] = join(t, conn, collab.ClientConfig{Document: "draft", Site: crdt.SiteID(i + 1)})
 	}
 	// Give everyone the same starting point so the concurrent edits collide.
-	if err := clients[0].Insert(0, "[]"); err != nil {
+	if err := body(t, clients[0]).Insert(0, "[]"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	for _, c := range clients {
@@ -141,7 +159,7 @@ func TestConcurrentParticipantsConverge(t *testing.T) {
 			// and the run would split for a perfectly good reason. A single
 			// insertion is uninterrupted by construction, which is what makes the
 			// contiguity assertion below meaningful.
-			done <- c.Insert(1, runs[i])
+			done <- body(t, c).Insert(1, runs[i])
 		}()
 	}
 	for range clients {
@@ -152,23 +170,23 @@ func TestConcurrentParticipantsConverge(t *testing.T) {
 
 	want := len("[]") + participants*3
 	for i, c := range clients {
-		await(t, c, "every character to arrive", func() bool { return c.Len() == want })
-		if got := c.Len(); got != want {
+		await(t, c, "every character to arrive", func() bool { return body(t, c).Len() == want })
+		if got := body(t, c).Len(); got != want {
 			t.Fatalf("participant %d holds %d characters, want %d", i, got, want)
 		}
 	}
 	// Converged means identical, not merely complete.
-	text := clients[0].Text()
+	settled := text(t, clients[0])
 	for i, c := range clients {
-		await(t, c, "convergence", func() bool { return c.Text() == text })
-		if got := c.Text(); got != text {
-			t.Fatalf("participant %d holds %q, participant 0 holds %q", i, got, text)
+		await(t, c, "convergence", func() bool { return text(t, c) == settled })
+		if got := text(t, c); got != settled {
+			t.Fatalf("participant %d holds %q, participant 0 holds %q", i, got, settled)
 		}
 	}
 	// Nobody's run was chopped up by anybody else's.
 	for _, run := range runs {
-		if !strings.Contains(text, run) {
-			t.Fatalf("%q was split apart in %q", run, text)
+		if !strings.Contains(settled, run) {
+			t.Fatalf("%q was split apart in %q", run, settled)
 		}
 	}
 }
@@ -181,16 +199,16 @@ func TestLateJoinerIsSentTheDocument(t *testing.T) {
 	// Without it the late joiner could arrive first and be sent an empty
 	// document quite correctly, and the test would prove nothing.
 	witness := join(t, conn, collab.ClientConfig{Document: "minutes", Site: 9})
-	if err := ada.Insert(0, "already written"); err != nil {
+	if err := body(t, ada).Insert(0, "already written"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	awaitText(t, witness, "already written")
 
 	grace := join(t, conn, collab.ClientConfig{Document: "minutes", Site: 2})
-	if got, want := grace.Text(), "already written"; got != want {
+	if got, want := text(t, grace), "already written"; got != want {
 		t.Fatalf("a late joiner sees %q, want %q — the document was not sent on join", got, want)
 	}
-	if err := grace.Insert(grace.Len(), ", and more"); err != nil {
+	if err := body(t, grace).Insert(body(t, grace).Len(), ", and more"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	awaitText(t, ada, "already written, and more")
@@ -203,7 +221,7 @@ func TestResumeCarriesWorkBothWays(t *testing.T) {
 	_, conn := serve(t, collab.Config{})
 	ada := join(t, conn, collab.ClientConfig{Document: "novel", Site: 1})
 	grace := join(t, conn, collab.ClientConfig{Document: "novel", Site: 2})
-	if err := ada.Insert(0, "chapter"); err != nil {
+	if err := body(t, ada).Insert(0, "chapter"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	awaitText(t, grace, "chapter")
@@ -213,16 +231,20 @@ func TestResumeCarriesWorkBothWays(t *testing.T) {
 	if err := grace.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	offline, err := crdt.Load(2, kept)
+	offline, err := crdt.LoadComposite(2, kept)
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf("LoadComposite: %v", err)
 	}
-	if _, err := offline.Insert(offline.Len(), " two"); err != nil {
+	offlineBody, err := offline.Text("body")
+	if err != nil {
+		t.Fatalf("Text: %v", err)
+	}
+	if _, err := offlineBody.Insert(offlineBody.Len(), " two"); err != nil {
 		t.Fatalf("offline Insert: %v", err)
 	}
 
 	// Ada carries on without her.
-	if err := ada.Insert(0, "the "); err != nil {
+	if err := body(t, ada).Insert(0, "the "); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	awaitText(t, ada, "the chapter")
@@ -241,7 +263,7 @@ func TestPresence(t *testing.T) {
 	_, conn := serve(t, collab.Config{})
 	ada := join(t, conn, collab.ClientConfig{Document: "shared", Site: 1})
 	grace := join(t, conn, collab.ClientConfig{Document: "shared", Site: 2})
-	if err := ada.Insert(0, "0123456789"); err != nil {
+	if err := body(t, ada).Insert(0, "0123456789"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	awaitText(t, grace, "0123456789")
@@ -293,7 +315,7 @@ func TestDocumentSurvivesEveryoneLeaving(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Join: %v", err)
 	}
-	if err := ada.Insert(0, "kept"); err != nil {
+	if err := body(t, ada).Insert(0, "kept"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	if err := ada.Close(); err != nil {
@@ -308,7 +330,7 @@ func TestDocumentSurvivesEveryoneLeaving(t *testing.T) {
 	// A brand new server, the same store.
 	_, second := serve(t, collab.Config{Store: store})
 	grace := join(t, second, collab.ClientConfig{Document: "archive", Site: 2})
-	if got, want := grace.Text(), "kept"; got != want {
+	if got, want := text(t, grace), "kept"; got != want {
 		t.Fatalf("a restarted server serves %q, want %q", got, want)
 	}
 }
@@ -318,7 +340,7 @@ func TestFlushPersistsWhileInUse(t *testing.T) {
 	store := collab.NewMemoryStore()
 	srv, conn := serve(t, collab.Config{Store: store})
 	ada := join(t, conn, collab.ClientConfig{Document: "live", Site: 1})
-	if err := ada.Insert(0, "in progress"); err != nil {
+	if err := body(t, ada).Insert(0, "in progress"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	await(t, ada, "the server to have the edit", func() bool { return true })
@@ -335,11 +357,15 @@ func TestFlushPersistsWhileInUse(t *testing.T) {
 			t.Fatalf("Load: %v", err)
 		}
 		if len(saved) > 0 {
-			doc, err := crdt.Load(9, saved)
+			doc, err := crdt.LoadComposite(9, saved)
 			if err != nil {
 				t.Fatalf("the flushed snapshot is unreadable: %v", err)
 			}
-			if got, want := doc.String(), "in progress"; got != want {
+			saved, err := doc.Text("body")
+			if err != nil {
+				t.Fatalf("Text: %v", err)
+			}
+			if got, want := saved.String(), "in progress"; got != want {
 				t.Fatalf("the flushed document is %q, want %q", got, want)
 			}
 			break
@@ -416,29 +442,36 @@ func TestAViewIsKeptInStepByTheChanges(t *testing.T) {
 	catchUp := func(want string) {
 		t.Helper()
 		awaitText(t, watcher, want)
-		for _, c := range watcher.TakeChanges() {
-			if c.Pos < 0 || c.Pos+c.Removed > len(text) {
-				t.Fatalf("change %+v does not fit a view of %d characters", c, len(text))
+		for _, part := range watcher.TakeChanges() {
+			// A view binds to one part, so it takes the changes for that part and
+			// leaves the rest to whoever is watching them.
+			if want := (crdt.Part{Kind: crdt.PartText, Name: "body"}); part.Part != want {
+				t.Fatalf("change is for %v, want %v", part.Part, want)
 			}
-			tail := append([]rune(nil), text[c.Pos+c.Removed:]...)
-			text = append(append(text[:c.Pos], []rune(c.Text)...), tail...)
+			for _, c := range part.Text {
+				if c.Pos < 0 || c.Pos+c.Removed > len(text) {
+					t.Fatalf("change %+v does not fit a view of %d characters", c, len(text))
+				}
+				tail := append([]rune(nil), text[c.Pos+c.Removed:]...)
+				text = append(append(text[:c.Pos], []rune(c.Text)...), tail...)
+			}
 		}
 		if got := string(text); got != want {
 			t.Fatalf("the view holds %q, the document %q", got, want)
 		}
 	}
 
-	if err := writer.Insert(0, "the quick fox"); err != nil {
+	if err := body(t, writer).Insert(0, "the quick fox"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	catchUp("the quick fox")
 
-	if err := writer.Insert(10, "brown "); err != nil {
+	if err := body(t, writer).Insert(10, "brown "); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	catchUp("the quick brown fox")
 
-	if err := writer.Delete(3, 6); err != nil {
+	if err := body(t, writer).Delete(3, 6); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	catchUp("the brown fox")
@@ -448,7 +481,7 @@ func TestAViewIsKeptInStepByTheChanges(t *testing.T) {
 		t.Fatalf("TakeChanges again returned %+v, want nothing", got)
 	}
 	// And a participant's own edits are not reported back to it.
-	if err := watcher.Insert(0, ">> "); err != nil {
+	if err := body(t, watcher).Insert(0, ">> "); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	if got := watcher.TakeChanges(); len(got) != 0 {
@@ -463,43 +496,43 @@ func TestAnchorsThroughASession(t *testing.T) {
 	ada := join(t, conn, collab.ClientConfig{Document: "doc", Site: 1})
 	grace := join(t, conn, collab.ClientConfig{Document: "doc", Site: 2})
 
-	if err := ada.Insert(0, "chapter one"); err != nil {
+	if err := body(t, ada).Insert(0, "chapter one"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	awaitText(t, grace, "chapter one")
 
-	anchor, err := grace.Anchor(8) // the "o" of one
+	anchor, err := body(t, grace).Anchor(8) // the "o" of one
 	if err != nil {
 		t.Fatalf("Anchor: %v", err)
 	}
-	if !grace.Visible(anchor) {
+	if !body(t, grace).Visible(anchor) {
 		t.Fatal("the anchored character is reported as gone")
 	}
 
-	if err := ada.Insert(0, "part two, "); err != nil {
+	if err := body(t, ada).Insert(0, "part two, "); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	awaitText(t, grace, "part two, chapter one")
-	pos, ok := grace.Position(anchor)
+	pos, ok := body(t, grace).Position(anchor)
 	if !ok || pos != 18 {
 		t.Fatalf("Position after an insertion above = %d, %v; want 18, true", pos, ok)
 	}
 
-	if err := ada.Delete(18, 3); err != nil {
+	if err := body(t, ada).Delete(18, 3); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	awaitText(t, grace, "part two, chapter ")
-	if grace.Visible(anchor) {
+	if body(t, grace).Visible(anchor) {
 		t.Fatal("the anchored character is reported as present after being deleted")
 	}
-	if pos, _ := grace.Position(anchor); pos != 18 {
+	if pos, _ := body(t, grace).Position(anchor); pos != 18 {
 		t.Fatalf("Position of the deleted character = %d, want 18", pos)
 	}
 
 	// And who wrote what, which is the other thing a margin shows.
-	runs := grace.AuthorRuns()
-	if len(runs) != 1 || runs[0].Site != 1 || runs[0].Len != grace.Len() {
-		t.Fatalf("AuthorRuns() = %+v, want all %d characters by site 1", runs, grace.Len())
+	runs := body(t, grace).AuthorRuns()
+	if len(runs) != 1 || runs[0].Site != 1 || runs[0].Len != body(t, grace).Len() {
+		t.Fatalf("AuthorRuns() = %+v, want all %d characters by site 1", runs, body(t, grace).Len())
 	}
 }
 
@@ -511,35 +544,35 @@ func TestEditingInTheUnitsABrowserCounts(t *testing.T) {
 	browser := join(t, conn, collab.ClientConfig{Document: "doc", Site: 1})
 	watcher := join(t, conn, collab.ClientConfig{Document: "doc", Site: 2})
 
-	if err := browser.Insert(0, "a😀b"); err != nil {
+	if err := body(t, browser).Insert(0, "a😀b"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	if got, want := browser.Len(), 3; got != want {
+	if got, want := body(t, browser).Len(), 3; got != want {
 		t.Fatalf("Len() = %d, want %d runes", got, want)
 	}
-	if got, want := browser.LenUTF16(), 4; got != want {
+	if got, want := body(t, browser).LenUTF16(), 4; got != want {
 		t.Fatalf("LenUTF16() = %d, want %d — what the browser would report", got, want)
 	}
 
 	// The browser's caret after the emoji is at unit 3, not rune 3.
-	if err := browser.InsertUTF16(3, "X"); err != nil {
+	if err := body(t, browser).InsertUTF16(3, "X"); err != nil {
 		t.Fatalf("InsertUTF16: %v", err)
 	}
 	awaitText(t, watcher, "a😀Xb")
 
 	// An offset inside the emoji is refused rather than moved.
-	if err := browser.InsertUTF16(2, "!"); !errors.Is(err, crdt.ErrSurrogateBoundary) {
+	if err := body(t, browser).InsertUTF16(2, "!"); !errors.Is(err, crdt.ErrSurrogateBoundary) {
 		t.Fatalf("InsertUTF16 inside a character = %v, want ErrSurrogateBoundary", err)
 	}
 	// So is a deletion that would cut one in half.
-	if err := browser.DeleteUTF16(2, 1); !errors.Is(err, crdt.ErrSurrogateBoundary) {
+	if err := body(t, browser).DeleteUTF16(2, 1); !errors.Is(err, crdt.ErrSurrogateBoundary) {
 		t.Fatalf("DeleteUTF16 inside a character = %v, want ErrSurrogateBoundary", err)
 	}
-	if err := browser.DeleteUTF16(1, 2); err != nil {
+	if err := body(t, browser).DeleteUTF16(1, 2); err != nil {
 		t.Fatalf("DeleteUTF16: %v", err)
 	}
 	awaitText(t, watcher, "aXb")
-	if got, want := watcher.LenUTF16(), 3; got != want {
+	if got, want := body(t, watcher).LenUTF16(), 3; got != want {
 		t.Fatalf("LenUTF16() = %d, want %d", got, want)
 	}
 }
