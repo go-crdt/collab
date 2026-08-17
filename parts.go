@@ -192,12 +192,61 @@ func (t *Text) Visible(anchor crdt.ID) bool {
 	return t.doc().Visible(anchor)
 }
 
+// AnchorUTF16 is [Text.Anchor] with pos counted in UTF-16 code units, the units
+// a page counts in. An offset falling between the two units of one character is
+// refused rather than rounded; see [crdt.ErrSurrogateBoundary].
+func (t *Text) AnchorUTF16(pos int) (crdt.ID, error) {
+	t.c.mu.Lock()
+	defer t.c.mu.Unlock()
+	d := t.doc()
+	at, err := d.RuneOffset(pos)
+	if err != nil {
+		return crdt.ID{}, err
+	}
+	return d.Anchor(at)
+}
+
+// PositionUTF16 is [Text.Position] with the offset reported in UTF-16 code
+// units. ok is false for an anchor this replica has never seen, exactly as it
+// is there — which is not the same question as whether the character is still
+// in the text; that one is [Text.Visible].
+func (t *Text) PositionUTF16(anchor crdt.ID) (pos int, ok bool) {
+	t.c.mu.Lock()
+	defer t.c.mu.Unlock()
+	d := t.doc()
+	at, ok := d.Position(anchor)
+	if !ok {
+		return 0, false
+	}
+	// Position answers with an offset the document holds, and every such offset
+	// converts, so this cannot fail.
+	pos, _ = d.UTF16Offset(at)
+	return pos, true
+}
+
 // AuthorRuns splits the visible text into stretches by who wrote them, which is
 // what colouring a document by author needs.
 func (t *Text) AuthorRuns() []crdt.AuthorRun {
 	t.c.mu.Lock()
 	defer t.c.mu.Unlock()
 	return t.doc().AuthorRuns()
+}
+
+// AuthorRunsUTF16 is [Text.AuthorRuns] with every offset and length counted in
+// UTF-16 code units, so that a page can colour the string it holds without
+// converting anything by hand.
+func (t *Text) AuthorRunsUTF16() []crdt.AuthorRun {
+	t.c.mu.Lock()
+	defer t.c.mu.Unlock()
+	d := t.doc()
+	runs := d.AuthorRuns()
+	for i, run := range runs {
+		// Both ends are offsets the document holds, so neither can fail.
+		from, _ := d.UTF16Offset(run.Pos)
+		to, _ := d.UTF16Offset(run.Pos + run.Len)
+		runs[i].Pos, runs[i].Len = from, to-from
+	}
+	return runs
 }
 
 // doc returns the part. The name was accepted when the handle was made, so this
