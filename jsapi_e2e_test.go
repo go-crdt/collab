@@ -100,7 +100,7 @@ func TestTheJavaScriptAPIConverges(t *testing.T) {
 	// its round, then makes two edits whose offsets differ between runes and
 	// units — appending after an astral character, and deleting one — because
 	// what those are reported as is the thing being tested.
-	await(t, native, "the page's round", func() bool {
+	awaitFor(t, native, "the page's round", settleJS, func() bool {
 		return nativeBody.String() == "😀A" && nativeChat.Len() == 1 && nativeCells.Len() == 1
 	})
 	if err := nativeBody.Insert(nativeBody.Len(), "Z"); err != nil {
@@ -125,7 +125,7 @@ func TestTheJavaScriptAPIConverges(t *testing.T) {
 	// The page writes one last character and waits to be told it was seen, which
 	// is how it knows authorship has settled: one run per author, and the run
 	// boundaries are what a view colours by.
-	await(t, native, "the page's last character", func() bool {
+	awaitFor(t, native, "the page's last character", settleJS, func() bool {
 		return nativeBody.String() == "AZ!"
 	})
 	if err := nativeCells.Set("done", []byte("1")); err != nil {
@@ -157,7 +157,7 @@ func TestTheJavaScriptAPIConverges(t *testing.T) {
 	// The page and the native participant hold the same document, which is what
 	// "the same merge logic everywhere" means once a JavaScript API is in the
 	// way of one of them.
-	await(t, native, "convergence with the page", func() bool {
+	awaitFor(t, native, "convergence with the page", settleJS, func() bool {
 		return nativeBody.String() == result.Text
 	})
 	if got := nativeBody.String(); got != result.Text {
