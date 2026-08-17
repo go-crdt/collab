@@ -167,19 +167,46 @@ func TestASaveThatCannotTakeEffectSaysSo(t *testing.T) {
 }
 
 // A directory that cannot be read at all is reported when the store is opened,
-// rather than reported later as a store with nothing in it.
+// rather than later as a store with nothing in it. Injected rather than arranged
+// with permissions, for the reason above.
 func TestADirectoryThatCannotBeReadDoesNotOpen(t *testing.T) {
-	dir := t.TempDir()
-	inside := filepath.Join(dir, "documents")
-	if err := os.Mkdir(inside, 0o700); err != nil {
+	restore := readDir
+	readDir = func(string) ([]os.DirEntry, error) { return nil, errors.New("it will not open") }
+	defer func() { readDir = restore }()
+
+	if _, err := NewDirStore(t.TempDir()); err == nil {
+		t.Fatal("a directory that could not be read was opened")
+	}
+}
+
+// A document whose file is there but cannot be read is reported rather than
+// treated as new: treating it as new would quietly start that document again
+// from empty, and the next save would write the empty one over it.
+//
+// The failure is injected rather than arranged with permissions, because
+// permissions are a request rather than a result — on Windows the call succeeds
+// and the file stays readable — and a branch covered on one platform is a
+// coverage gate failing on another.
+func TestADocumentThatCannotBeReadIsNotTakenForANewOne(t *testing.T) {
+	store, err := NewDirStore(t.TempDir())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(inside, 0o000); err != nil {
-		t.Skip("this filesystem does not enforce permissions")
+	if err := store.Save(context.Background(), "doc", []byte("what was there")); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(inside, 0o700) })
+	restore := readFile
+	readFile = func(string) ([]byte, error) { return nil, errors.New("it will not open") }
+	defer func() { readFile = restore }()
 
-	if _, err := NewDirStore(inside); err == nil {
-		t.Skip("this filesystem let the directory be read anyway")
+	got, err := store.Load(context.Background(), "doc")
+	if err == nil {
+		t.Fatal("a document that could not be read was reported as new")
+	}
+	if got != nil {
+		t.Fatalf("a failed read returned %d bytes", len(got))
+	}
+	if !strings.Contains(err.Error(), "doc") {
+		t.Fatalf("the error is %q, want it to name the document", err)
 	}
 }

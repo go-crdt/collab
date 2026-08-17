@@ -63,6 +63,8 @@ var (
 	createTemp = func(dir, pattern string) (halfWritten, error) { return os.CreateTemp(dir, pattern) }
 	renameFile = os.Rename
 	removeFile = os.Remove
+	readFile   = os.ReadFile
+	readDir    = os.ReadDir
 )
 
 // NewDirStore returns a store keeping documents in dir, creating it if it is not
@@ -83,7 +85,7 @@ func NewDirStore(dir string) (*DirStore, error) {
 
 // sweep removes what a save that did not finish left behind.
 func (s *DirStore) sweep() error {
-	entries, err := os.ReadDir(s.dir)
+	entries, err := readDir(s.dir)
 	if err != nil {
 		return fmt.Errorf("collab: reading %s: %w", s.dir, err)
 	}
@@ -117,7 +119,7 @@ func (s *DirStore) Load(_ context.Context, document string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := readFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		// A document nobody has saved is not an error: it is a new one.
 		return nil, nil
@@ -173,7 +175,7 @@ func (s *DirStore) Save(_ context.Context, document string, snapshot []byte) err
 // a directory shared with anything else would otherwise turn every stray file
 // into an error nobody can act on.
 func (s *DirStore) Documents() ([]string, error) {
-	entries, err := os.ReadDir(s.dir)
+	entries, err := readDir(s.dir)
 	if err != nil {
 		return nil, fmt.Errorf("collab: reading %s: %w", s.dir, err)
 	}

@@ -240,29 +240,6 @@ func TestADirStoreSaysWhatItCannotDo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A document whose file cannot be read is reported rather than treated as
-	// new, because treating it as new would quietly start it again from empty.
-	unreadable := t.TempDir()
-	blocked, err := collab.NewDirStore(unreadable)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := blocked.Save(t.Context(), "doc", []byte("x")); err != nil {
-		t.Fatal(err)
-	}
-	held, err := blocked.Documents()
-	if err != nil || len(held) != 1 {
-		t.Fatalf("Documents() = %q, %v", held, err)
-	}
-	name := filepath.Join(unreadable, "ZG9j") // base64 of "doc"
-	if err := os.Chmod(name, 0o000); err != nil {
-		t.Skip("this filesystem does not enforce permissions")
-	}
-	t.Cleanup(func() { _ = os.Chmod(name, 0o600) })
-	if _, err := blocked.Load(t.Context(), "doc"); err == nil {
-		t.Error("a document that cannot be read was reported as new")
-	}
-
 	// And a store whose directory has gone reports it rather than an empty list.
 	gone := filepath.Join(dir, "gone")
 	away, err := collab.NewDirStore(gone)
