@@ -71,7 +71,7 @@ func TestOneDocumentCarriesEveryKindOfPart(t *testing.T) {
 	}
 
 	// Parts are named in one canonical order on both sides.
-	await(t, ada, "the parts to agree", func() bool {
+	awaitBoth(t, ada, grace, "the parts to agree", func() bool {
 		return len(grace.Parts()) == len(ada.Parts())
 	})
 	if got, want := fmt.Sprint(grace.Parts()), fmt.Sprint(ada.Parts()); got != want {
@@ -175,7 +175,7 @@ func TestAFieldOfACommentFlipsOnItsOwn(t *testing.T) {
 	settle(grace, graceComment)
 
 	// One comment, one record, and the rest of it untouched.
-	await(t, ada, "the two replicas to agree", func() bool {
+	awaitBoth(t, ada, grace, "the two replicas to agree", func() bool {
 		return bytes.Equal(ada.Snapshot(), grace.Snapshot())
 	})
 	if adaOrder.Len() != 1 || graceOrder.Len() != 1 {

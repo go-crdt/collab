@@ -124,10 +124,8 @@ func TestTheHandlesDoWhatTheySay(t *testing.T) {
 	}
 
 	// Nothing about the document was disturbed by any of it: the two replicas
-	// hold the same bytes. Waited on grace, because the server does not send a
-	// participant its own edits back and every edit above was ada's — so ada has
-	// nothing arriving to wake it.
-	await(t, grace, "the replicas to agree", func() bool {
+	// hold the same bytes.
+	awaitBoth(t, ada, grace, "the replicas to agree", func() bool {
 		return bytes.Equal(ada.Snapshot(), grace.Snapshot())
 	})
 }

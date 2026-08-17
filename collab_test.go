@@ -94,6 +94,35 @@ func await(t *testing.T, c *collab.Client, what string, want func() bool) {
 	}
 }
 
+// awaitBoth waits for something that is true of two replicas together, watching
+// both for wake-ups.
+//
+// Waiting on one of them is a trap, and a fast machine hides it: whichever
+// replica is behind is the one whose incoming message makes the condition hold,
+// so waiting on the other can sit until the deadline with the answer already on
+// its way. It surfaced under qemu, where two operations crossing each other no
+// longer landed inside one scheduling slice.
+func awaitBoth(t *testing.T, a, b *collab.Client, what string, want func() bool) {
+	t.Helper()
+	deadline := time.After(settle)
+	for !want() {
+		select {
+		case <-a.Changes():
+		case <-b.Changes():
+		case <-a.Done():
+			if !want() {
+				t.Fatalf("a session ended before %s: %v", what, a.Err())
+			}
+		case <-b.Done():
+			if !want() {
+				t.Fatalf("a session ended before %s: %v", what, b.Err())
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+}
+
 // awaitText is the common case: wait for a participant to hold exactly this text.
 func awaitText(t *testing.T, c *collab.Client, want string) {
 	t.Helper()
