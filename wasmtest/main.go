@@ -16,9 +16,6 @@ import (
 
 	"github.com/go-crdt/collab"
 	"github.com/go-crdt/crdt"
-	wstransport "github.com/grpc-transports/websocket"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // total is how many characters the document holds once everyone has typed: one
@@ -52,22 +49,16 @@ func run() ([2]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	opt, err := wstransport.DialOption(url, wstransport.ClientConfig{})
-	if err != nil {
-		return texts, err
-	}
-	conn, err := grpc.NewClient("passthrough:///collab",
-		grpc.WithTransportCredentials(insecure.NewCredentials()), opt)
-	if err != nil {
-		return texts, err
-	}
-	defer conn.Close()
+	// A browser reaches the server over a WebSocket carrying the session's own
+	// framing. It cannot afford protobuf: that alone is six times the size of
+	// the whole CRDT once compiled to wasm.
+	transport := collab.WebSocket(url)
 
 	// Two participants, two sessions, two replicas — as far as the server is
 	// concerned, two separate browser tabs.
 	clients := [2]*collab.Client{}
 	for i := range clients {
-		c, err := collab.Join(ctx, conn, collab.ClientConfig{
+		c, err := collab.Join(ctx, transport, collab.ClientConfig{
 			Document: document,
 			Site:     crdt.SiteID(i + 2), // the native participant is site 1
 		})

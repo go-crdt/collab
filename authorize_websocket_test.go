@@ -113,7 +113,7 @@ func TestAuthorizeFromTheUpgradeCookie(t *testing.T) {
 	awaitText(t, second, "mine")
 
 	// Grace may not, and is told so rather than being let in.
-	_, err := collab.Join(t.Context(), dialAs(t, addr, "grace"),
+	_, err := collab.Join(t.Context(), collab.GRPC(dialAs(t, addr, "grace")),
 		collab.ClientConfig{Document: "ada/notes", Site: 3})
 	if got := status.Code(err); got != codes.PermissionDenied {
 		t.Fatalf("joining someone else's document = %v (%v), want PermissionDenied", got, err)
@@ -130,7 +130,7 @@ func TestAuthorizeFromTheUpgradeCookie(t *testing.T) {
 
 	// And a connection with no cookie never becomes a session at all: the
 	// refusal happens during the handshake, before any gRPC stream exists.
-	if _, err := collab.Join(t.Context(), dialAs(t, addr, ""),
+	if _, err := collab.Join(t.Context(), collab.GRPC(dialAs(t, addr, "")),
 		collab.ClientConfig{Document: "ada/notes", Site: 5}); err == nil {
 		t.Fatal("a session with no cookie was accepted")
 	}

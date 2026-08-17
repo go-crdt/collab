@@ -5,19 +5,18 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/go-crdt/collab/collabpb"
 	"github.com/go-crdt/crdt"
 	"github.com/go-crdt/crdt/awareness"
-	"google.golang.org/grpc"
 )
 
 // ErrClosed is why a session ended when this participant closed it, and what an
 // edit made afterwards returns.
 var ErrClosed = errors.New("collab: session closed")
 
-// ErrProtocol reports a server that sent something a session cannot be in the
-// middle of — a second welcome, or nothing at all.
-var ErrProtocol = errors.New("collab: unexpected message from the server")
+// ErrProtocol reports a message that is not part of a session: a kind that
+// cannot arrive at that moment — a second welcome, or a join halfway through —
+// or bytes that are not a message at all.
+var ErrProtocol = errors.New("collab: unexpected message")
 
 // ClientConfig describes a participant joining a document.
 type ClientConfig struct {
@@ -43,12 +42,12 @@ type ClientConfig struct {
 type Client struct {
 	site     crdt.SiteID
 	document string
-	stream   collabpb.Collab_SessionClient
+	conn     carrierConn
 	cancel   context.CancelFunc
 	changes  chan struct{}
 	finished chan struct{}
 
-	send sync.Mutex // grpc-go allows exactly one sender per stream
+	send sync.Mutex // a carrier allows exactly one sender at a time
 
 	mu       sync.Mutex
 	doc      *crdt.Composite
@@ -57,17 +56,21 @@ type Client struct {
 	err      error
 }
 
-// Join opens a session on conn and returns once the document has arrived, so
-// the client is usable the moment it is returned.
+// Join opens a session over transport and returns once the document has
+// arrived, so the client is usable the moment it is returned.
+//
+// Use [WebSocket] unless there is a reason not to; it is what the same code
+// compiled for a browser can afford. [GRPC] is there for a native peer that
+// wants what gRPC brings with it.
 //
 // The session lives until ctx is cancelled or [Client.Close] is called.
-func Join(ctx context.Context, conn grpc.ClientConnInterface, cfg ClientConfig) (*Client, error) {
+func Join(ctx context.Context, transport Transport, cfg ClientConfig) (*Client, error) {
 	if cfg.Document == "" {
 		return nil, errors.New("collab: Join needs a document name")
 	}
 
 	local := crdt.NewComposite(cfg.Site)
-	join := &collabpb.Join{Document: cfg.Document, Site: uint64(cfg.Site)}
+	join := joinMsg{Document: cfg.Document, Site: uint64(cfg.Site)}
 	if len(cfg.Resume) > 0 {
 		resumed, err := crdt.LoadComposite(cfg.Site, cfg.Resume)
 		if err != nil {
@@ -79,25 +82,23 @@ func Join(ctx context.Context, conn grpc.ClientConnInterface, cfg ClientConfig) 
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
-	stream, err := collabpb.NewCollabClient(conn).Session(ctx)
+	conn, err := transport.open(ctx)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	if err := stream.Send(&collabpb.ClientMessage{
-		Body: &collabpb.ClientMessage_Join{Join: join},
-	}); err != nil {
+	if err := conn.Send(kindJoin, join); err != nil {
 		cancel()
 		return nil, err
 	}
 
-	first, err := stream.Recv()
+	kind, first, err := conn.Recv()
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	welcome := first.GetWelcome()
-	if welcome == nil {
+	welcome, ok := first.(welcomeMsg)
+	if kind != kindWelcome || !ok {
 		cancel()
 		return nil, ErrProtocol
 	}
@@ -105,7 +106,7 @@ func Join(ctx context.Context, conn grpc.ClientConnInterface, cfg ClientConfig) 
 	c := &Client{
 		site:     cfg.Site,
 		document: cfg.Document,
-		stream:   stream,
+		conn:     conn,
 		cancel:   cancel,
 		changes:  make(chan struct{}, 1),
 		finished: make(chan struct{}),
@@ -118,7 +119,7 @@ func Join(ctx context.Context, conn grpc.ClientConnInterface, cfg ClientConfig) 
 	}
 	// Anything this participant wrote while disconnected is still only here.
 	// Push it now, or it would stay stranded on this replica for ever.
-	if err := c.pushMissing(welcome.GetVersion()); err != nil {
+	if err := c.pushMissing(welcome.Version); err != nil {
 		cancel()
 		return nil, err
 	}
@@ -143,17 +144,17 @@ func (c *Client) pushMissing(serverVersion []byte) error {
 }
 
 // absorbWelcome adopts the state the server opened with.
-func (c *Client) absorbWelcome(w *collabpb.Welcome) error {
-	if snapshot := w.GetSnapshot(); len(snapshot) > 0 {
+func (c *Client) absorbWelcome(w welcomeMsg) error {
+	if snapshot := w.Snapshot; len(snapshot) > 0 {
 		doc, err := crdt.LoadComposite(c.site, snapshot)
 		if err != nil {
 			return err
 		}
 		c.doc = doc
-	} else if err := c.applyOperations(w.GetOperations()); err != nil {
+	} else if err := c.applyOperations(w.Operations); err != nil {
 		return err
 	}
-	for _, raw := range w.GetPresence() {
+	for _, raw := range w.Presence {
 		if err := c.applyPresence(raw); err != nil {
 			return err
 		}
@@ -165,12 +166,12 @@ func (c *Client) absorbWelcome(w *collabpb.Welcome) error {
 func (c *Client) receive() {
 	defer close(c.finished)
 	for {
-		msg, err := c.stream.Recv()
+		kind, msg, err := c.conn.Recv()
 		if err != nil {
 			c.fail(err)
 			return
 		}
-		if err := c.absorb(msg); err != nil {
+		if err := c.absorb(kind, msg); err != nil {
 			c.fail(err)
 			return
 		}
@@ -179,13 +180,22 @@ func (c *Client) receive() {
 }
 
 // absorb merges one server message.
-func (c *Client) absorb(msg *collabpb.ServerMessage) error {
-	switch body := msg.GetBody().(type) {
-	case *collabpb.ServerMessage_Operations:
-		return c.applyOperations(body.Operations.GetOperations())
-	case *collabpb.ServerMessage_Presence:
-		return c.applyPresence(body.Presence.GetUpdate())
+func (c *Client) absorb(kind byte, msg any) error {
+	switch kind {
+	case kindOperation:
+		body, ok := msg.(opsMsg)
+		if !ok {
+			return ErrProtocol
+		}
+		return c.applyOperations(body.Operations)
+	case kindPresence:
+		body, ok := msg.(presenceMsg)
+		if !ok {
+			return ErrProtocol
+		}
+		return c.applyPresence(body.Update)
 	default:
+		// A welcome arrives once, before this loop starts.
 		return ErrProtocol
 	}
 }
@@ -309,9 +319,7 @@ func (c *Client) SetCursor(cursor awareness.Cursor, meta map[string]string) erro
 	update := c.presence.Publish(c.site, cursor, meta)
 	c.mu.Unlock()
 	raw, _ := update.MarshalBinary() // cannot fail for an update we made
-	return c.transmit(&collabpb.ClientMessage{
-		Body: &collabpb.ClientMessage_Presence{Presence: &collabpb.Presence{Update: raw}},
-	})
+	return c.transmit(kindPresence, presenceMsg{Update: raw})
 }
 
 // publish sends the operations a local edit produced. An edit that changed
@@ -323,13 +331,11 @@ func (c *Client) publish(batches []crdt.PartOps) error {
 	// Operations this replica made are valid by construction, so they cannot
 	// fail to encode.
 	raw, _ := crdt.AppendPartOps(nil, batches)
-	return c.transmit(&collabpb.ClientMessage{
-		Body: &collabpb.ClientMessage_Operations{Operations: &collabpb.Operations{Operations: raw}},
-	})
+	return c.transmit(kindOperation, opsMsg{Operations: raw})
 }
 
 // transmit is the only place that writes to the stream.
-func (c *Client) transmit(msg *collabpb.ClientMessage) error {
+func (c *Client) transmit(kind byte, msg any) error {
 	select {
 	case <-c.finished:
 		// Err is never nil once the session has ended; see [Client.Err].
@@ -338,7 +344,7 @@ func (c *Client) transmit(msg *collabpb.ClientMessage) error {
 	}
 	c.send.Lock()
 	defer c.send.Unlock()
-	return c.stream.Send(msg)
+	return c.conn.Send(kind, msg)
 }
 
 // Close ends the session. The local document is left intact, so its
@@ -348,7 +354,7 @@ func (c *Client) Close() error {
 	// close reports itself rather than the transport reporting a cancelled
 	// context — which tells the caller nothing about who cancelled it.
 	c.fail(ErrClosed)
-	_ = c.stream.CloseSend()
+	_ = c.conn.Close()
 	c.cancel()
 	<-c.finished
 	return nil

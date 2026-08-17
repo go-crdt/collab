@@ -11,11 +11,22 @@
 //
 // # Over what
 //
-// Nothing here requires a particular carrier. Mounted on
-// [github.com/grpc-transports/websocket] the same service reaches a browser,
-// because that transport gives grpc-go a net.Conn a browser can open and runs
-// unmodified under js/wasm. The client in this package builds for js/wasm too,
-// so a browser tab and a server run the same code down to the merge.
+// Two carriers, and which one to use is decided by where the code runs rather
+// than by taste. [WebSocket] carries a session's own framing over a plain
+// WebSocket; [GRPC] carries it over gRPC. One server serves both at once —
+// [Server.ServeWebSocket] beside the registered service — and a participant on
+// each edits the same document.
+//
+// The reason there are two is measured. Everything a session carries is bytes
+// some encoder in [github.com/go-crdt/crdt] produced and will check on arrival,
+// so protobuf is describing fields nobody reads through it — and compiled to
+// wasm its reflection and registry machinery cannot be linked away. The browser
+// test client, gzipped, is 919 KB over the framing and 4 461 KB over gRPC,
+// against 633 KB for the CRDT alone. Outside a browser none of that matters,
+// and gRPC brings deadlines, interceptors and the tooling built around them.
+//
+// The client builds for js/wasm either way, so a browser tab and a server run
+// the same code down to the merge.
 //
 // # A document holds named parts
 //

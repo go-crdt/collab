@@ -307,7 +307,7 @@ func TestSimultaneousOpensShareOneDocument(t *testing.T) {
 		// Runs inside the first open, before it registers the document: this
 		// second participant gets there first.
 		defer ready.Done()
-		second, err := collab.Join(t.Context(), conn, collab.ClientConfig{Document: "race", Site: 2})
+		second, err := collab.Join(t.Context(), collab.GRPC(conn), collab.ClientConfig{Document: "race", Site: 2})
 		if err != nil {
 			t.Errorf("second Join: %v", err)
 			return
@@ -453,7 +453,7 @@ func TestJoinRejectsABadWelcome(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			conn := serveStub(t, tt.reply)
-			if c, err := collab.Join(t.Context(), conn, collab.ClientConfig{Document: "doc", Site: 1}); err == nil {
+			if c, err := collab.Join(t.Context(), collab.GRPC(conn), collab.ClientConfig{Document: "doc", Site: 1}); err == nil {
 				_ = c.Close()
 				t.Fatal("Join accepted a welcome it should have refused")
 			}
@@ -496,7 +496,7 @@ func TestSessionEndsOnBadServerMessages(t *testing.T) {
 				<-stream.Context().Done()
 				return nil
 			})
-			c, err := collab.Join(t.Context(), conn, collab.ClientConfig{Document: "doc", Site: 1})
+			c, err := collab.Join(t.Context(), collab.GRPC(conn), collab.ClientConfig{Document: "doc", Site: 1})
 			if err != nil {
 				t.Fatalf("Join: %v", err)
 			}
@@ -548,10 +548,10 @@ func TestEditingAfterClose(t *testing.T) {
 
 func TestClientRejectsBadConfiguration(t *testing.T) {
 	_, conn := serve(t, collab.Config{})
-	if _, err := collab.Join(t.Context(), conn, collab.ClientConfig{Site: 1}); err == nil {
+	if _, err := collab.Join(t.Context(), collab.GRPC(conn), collab.ClientConfig{Site: 1}); err == nil {
 		t.Fatal("Join accepted a session with no document")
 	}
-	if _, err := collab.Join(t.Context(), conn, collab.ClientConfig{
+	if _, err := collab.Join(t.Context(), collab.GRPC(conn), collab.ClientConfig{
 		Document: "doc", Site: 1, Resume: []byte("not a snapshot"),
 	}); err == nil {
 		t.Fatal("Join accepted an unreadable snapshot to resume from")
@@ -670,7 +670,7 @@ func TestJoinReportsAConnectionThatWillNotOpen(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := collab.Join(t.Context(), tt.conn, collab.ClientConfig{Document: "doc", Site: 1})
+			_, err := collab.Join(t.Context(), collab.GRPC(tt.conn), collab.ClientConfig{Document: "doc", Site: 1})
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("Join = %v, want %v", err, tt.want)
 			}
@@ -746,7 +746,7 @@ func TestAuthorize(t *testing.T) {
 			t.Errorf("a refused session created %q in the store", name)
 		}
 	}
-	if _, err := collab.Join(t.Context(), conn, collab.ClientConfig{Document: "private", Site: 1}); err == nil {
+	if _, err := collab.Join(t.Context(), collab.GRPC(conn), collab.ClientConfig{Document: "private", Site: 1}); err == nil {
 		t.Fatal("Join was accepted for a refused document")
 	}
 }
@@ -815,7 +815,7 @@ func TestASiteCanOnlyBeInADocumentOnce(t *testing.T) {
 // minting operations the server believes are its own.
 func TestSiteZeroIsRefused(t *testing.T) {
 	_, conn := serve(t, collab.Config{})
-	_, err := collab.Join(t.Context(), conn, collab.ClientConfig{Document: "doc", Site: 0})
+	_, err := collab.Join(t.Context(), collab.GRPC(conn), collab.ClientConfig{Document: "doc", Site: 0})
 	if got := status.Code(err); got != codes.InvalidArgument {
 		t.Fatalf("joining as site 0 = %v (%v), want InvalidArgument", got, err)
 	}
