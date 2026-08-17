@@ -22,6 +22,33 @@ import (
 // this bound is a failure, not a slow machine.
 const settle = 10 * time.Second
 
+// settleJS is the same bound for the one test where that reasoning does not
+// hold. The JavaScript end-to-end test is not in one process over a pipe: it
+// starts node, hands it a three-and-a-half megabyte WebAssembly binary to
+// compile and instantiate, and talks to it over a real socket. On a cold
+// runner that is most of ten seconds before the first message is sent, and it
+// timed out on macOS while passing six times out of six locally in a second
+// and a half — which is a bound applied where its justification does not
+// reach, not a race.
+const settleJS = 60 * time.Second
+
+// awaitFor waits for a condition with a deadline the caller chooses.
+func awaitFor(t *testing.T, c *collab.Client, what string, within time.Duration, want func() bool) {
+	t.Helper()
+	deadline := time.After(within)
+	for !want() {
+		select {
+		case <-c.Changes():
+		case <-c.Done():
+			if !want() {
+				t.Fatalf("session ended before %s: %v (text %q)", what, c.Err(), text(t, c))
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s; text is %q", what, text(t, c))
+		}
+	}
+}
+
 // serve starts a Collab server on an in-memory connection and returns both,
 // cleaned up when the test ends.
 func serve(t *testing.T, cfg collab.Config) (*collab.Server, *grpc.ClientConn) {
@@ -80,18 +107,7 @@ func text(t *testing.T, c *collab.Client) string {
 // await blocks until want holds, or fails the test with what it saw instead.
 func await(t *testing.T, c *collab.Client, what string, want func() bool) {
 	t.Helper()
-	deadline := time.After(settle)
-	for !want() {
-		select {
-		case <-c.Changes():
-		case <-c.Done():
-			if !want() {
-				t.Fatalf("session ended before %s: %v (text %q)", what, c.Err(), text(t, c))
-			}
-		case <-deadline:
-			t.Fatalf("timed out waiting for %s; text is %q", what, text(t, c))
-		}
-	}
+	awaitFor(t, c, what, settle, want)
 }
 
 // awaitBoth waits for something that is true of two replicas together, watching

@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/go-crdt/collab v0.2.0
-	github.com/go-crdt/crdt v0.13.0
+	github.com/go-crdt/crdt v0.15.0
 	github.com/jackc/pgx/v5 v5.10.0
 )
 

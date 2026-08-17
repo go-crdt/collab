@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/coder/websocket v1.8.15
-	github.com/go-crdt/crdt v0.13.0
+	github.com/go-crdt/crdt v0.15.0
 	github.com/grpc-transports/websocket v0.2.0
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.12
