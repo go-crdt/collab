@@ -68,13 +68,22 @@ changed what, the messages beside it. A server restarted while anybody was still
 connected lost everything since the document was opened, and said nothing.
 
 ```go
+store, err := collab.NewDirStore("/var/lib/loom/documents")
+
 srv := collab.NewServer(collab.Config{
-    Store:        myStore,
+    Store:        store,
     PersistEvery: 5 * time.Second,  // bounds what a crash costs
     EvictAfter:   10 * time.Minute, // let go of what nobody is in
 })
 defer srv.Close(ctx)
 ```
+
+`DirStore` keeps a document per file, written and renamed into place so a reader
+sees one whole version or the one before. The file is named after the *encoding*
+of the document name rather than the name: `project:default` and
+`file:src/main.tex` are not file names, and escaping them would leave the
+question of which characters, on which system. `Documents()` says what the file
+names cannot.
 
 Neither runs unless it is asked for, so a server configured as before behaves as
 before. `EvictAfter` also stops a long-lived server holding every document it has
