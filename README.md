@@ -59,6 +59,28 @@ Types are in [`wasm/collab.d.ts`](wasm/collab.d.ts). A value is `Uint8Array` in
 both directions, never a string and never JSON: the CRDT does not interpret it
 and neither does the binding.
 
+## Keeping what people wrote
+
+A document was saved when its last participant left, and otherwise when somebody
+called `Flush`. That is enough for a text people open and close, and not enough
+for what a session actually carries — the comments on it, the record of who
+changed what, the messages beside it. A server restarted while anybody was still
+connected lost everything since the document was opened, and said nothing.
+
+```go
+srv := collab.NewServer(collab.Config{
+    Store:        myStore,
+    PersistEvery: 5 * time.Second,  // bounds what a crash costs
+    EvictAfter:   10 * time.Minute, // let go of what nobody is in
+})
+defer srv.Close(ctx)
+```
+
+Neither runs unless it is asked for, so a server configured as before behaves as
+before. `EvictAfter` also stops a long-lived server holding every document it has
+ever served; reopening one costs a read from the store, not anything anybody
+wrote.
+
 ## Using it
 
 Server — any `grpc.Server`, any carrier:

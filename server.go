@@ -4,8 +4,10 @@ package collab
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-crdt/collab/collabpb"
 	"github.com/go-crdt/crdt"
@@ -34,6 +36,38 @@ type Config struct {
 	// everyone else; it rejoins and is caught up from its version vector.
 	// Defaults to [DefaultBacklog].
 	Backlog int
+
+	// PersistEvery, when set, saves every document that has changed at this
+	// interval, whoever is connected. Without it a document is saved when its
+	// last participant leaves and when [Server.Flush] is called, so a server
+	// restarted while anybody was still editing loses everything since the
+	// document was opened.
+	//
+	// It bounds what a crash costs to this interval, which is a number an
+	// operator can choose. A server that sets it must be closed with
+	// [Server.Close], which stops the housekeeping and saves what is left.
+	PersistEvery time.Duration
+
+	// EvictAfter, when set, persists a document nobody has been in for this long
+	// and lets go of it. Without it a long-lived server holds every document it
+	// has ever served.
+	//
+	// A document is reloaded from the store the next time somebody joins it, so
+	// evicting costs a read rather than anything anybody wrote.
+	EvictAfter time.Duration
+
+	// OnEvictError, when set, is told about a document that could not be saved
+	// as it was evicted. There is nobody left to return an error to, and the
+	// document cannot be kept — a session may already have opened a fresh
+	// replica of it — so this is the only place that failure can be seen.
+	OnEvictError func(document string, err error)
+
+	// Clock is what [Config.EvictAfter] measures with. It defaults to time.Now,
+	// and exists because a caller that wants a monotonic source, or a test that
+	// wants to reach an hour of idleness without waiting an hour, has nowhere
+	// else to say so. It is read from more than one goroutine, so it must be
+	// safe for concurrent use and must be given here rather than set afterwards.
+	Clock func() time.Time
 
 	// Authorize, when set, decides whether a participant may open a document.
 	// It is asked once per session, after the join arrives and before the
@@ -67,6 +101,18 @@ type Server struct {
 	backlog   int
 	authorize func(ctx context.Context, document string, site crdt.SiteID) error
 
+	// now is time.Now, replaced in tests so that idleness can be reached
+	// without waiting for it.
+	now func() time.Time
+	// betweenOpenAndJoin runs between getting a document and joining it, and is
+	// nil outside the test that has to make that window happen on purpose.
+	betweenOpenAndJoin func(*document)
+	onEvictError       func(document string, err error)
+
+	stop     chan struct{}
+	stopped  chan struct{}
+	stopOnce sync.Once
+
 	mu   sync.Mutex
 	docs map[string]*document
 }
@@ -79,12 +125,39 @@ func NewServer(cfg Config) *Server {
 	if cfg.Backlog <= 0 {
 		cfg.Backlog = DefaultBacklog
 	}
-	return &Server{
-		store:     cfg.Store,
-		backlog:   cfg.Backlog,
-		authorize: cfg.Authorize,
-		docs:      map[string]*document{},
+	if cfg.Clock == nil {
+		cfg.Clock = time.Now
 	}
+	s := &Server{
+		store:        cfg.Store,
+		backlog:      cfg.Backlog,
+		authorize:    cfg.Authorize,
+		now:          cfg.Clock,
+		onEvictError: cfg.OnEvictError,
+		stop:         make(chan struct{}),
+		stopped:      make(chan struct{}),
+		docs:         map[string]*document{},
+	}
+	if cfg.PersistEvery > 0 || cfg.EvictAfter > 0 {
+		go s.persistLoop(cfg.PersistEvery, cfg.EvictAfter)
+	} else {
+		// Nothing to stop, so Close has nothing to wait for.
+		close(s.stopped)
+	}
+	return s
+}
+
+// Close stops the housekeeping [Config.PersistEvery] and [Config.EvictAfter]
+// ask for, and saves everything that has changed. It does not end the sessions
+// in progress: those belong to whatever is serving them, and stopping that is
+// the caller's to do first.
+//
+// Calling it twice is harmless. A server that asked for neither still has one,
+// so a caller need not know which kind it configured.
+func (s *Server) Close(ctx context.Context) error {
+	s.stopOnce.Do(func() { close(s.stop) })
+	<-s.stopped
+	return s.Flush(ctx)
 }
 
 // Flush persists every document that has changed since it was last written.
@@ -110,11 +183,31 @@ func (s *Server) Flush(ctx context.Context) error {
 // open returns the hub for a document, reading it from the store the first time
 // it is asked for.
 func (s *Server) open(ctx context.Context, name string) (*document, error) {
-	s.mu.Lock()
-	existing, ok := s.docs[name]
-	s.mu.Unlock()
-	if ok {
-		return existing, nil
+	for {
+		s.mu.Lock()
+		existing, ok := s.docs[name]
+		var wait chan struct{}
+		if ok {
+			existing.mu.Lock()
+			if existing.evicted {
+				wait, ok = existing.gone, false
+			}
+			existing.mu.Unlock()
+		}
+		s.mu.Unlock()
+		if ok {
+			return existing, nil
+		}
+		if wait == nil {
+			break
+		}
+		// Being saved on its way out. Loading a second replica now is exactly
+		// what would lose somebody's work, so this waits for the first to go.
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return nil, status.FromContextError(ctx.Err()).Err()
+		}
 	}
 
 	// Reading from the store can be slow, so it happens without the lock held;
@@ -137,12 +230,14 @@ func (s *Server) open(ctx context.Context, name string) (*document, error) {
 		return existing, nil
 	}
 	d := &document{
-		name:     name,
-		store:    s.store,
-		backlog:  s.backlog,
-		doc:      doc,
-		presence: awareness.New(),
-		subs:     map[*subscriber]struct{}{},
+		name:       name,
+		store:      s.store,
+		backlog:    s.backlog,
+		doc:        doc,
+		presence:   awareness.New(),
+		subs:       map[*subscriber]struct{}{},
+		now:        s.now,
+		emptySince: s.now(),
 	}
 	s.docs[name] = d
 	return d, nil
@@ -164,12 +259,26 @@ type document struct {
 	name    string
 	store   Store
 	backlog int
+	// now is the server's clock, carried here so a test can move it.
+	now func() time.Time
 
 	mu       sync.Mutex
 	doc      *crdt.Composite
 	presence *awareness.Registry
 	subs     map[*subscriber]struct{}
 	dirty    bool
+	// emptySince is when the last participant left, and the zero time while
+	// anybody is here. See evictIdle.
+	emptySince time.Time
+	// evicted marks a document the server is letting go of. It stays in the
+	// table until it has been saved — see evictIdle — and anyone still holding
+	// it must not join it. gone is closed once it has left the table, which is
+	// what a session waiting to load it again waits on.
+	evicted bool
+	gone    chan struct{}
+	// saving serialises the saves of this document, and is what keeps one from
+	// being let go of while another is still in flight. See persist.
+	saving sync.Mutex
 }
 
 // A subscriber is one participant's queue of outbound messages.
@@ -218,11 +327,12 @@ func (s *Server) session(stream carrier) error {
 		}
 	}
 
-	doc, err := s.open(ctx, join.GetDocument())
-	if err != nil {
-		return err
-	}
-	sub, err := doc.join(join)
+	// Opening and joining are two steps, and a document can be evicted between
+	// them. Asking again gets the replica the server now hands out; a second
+	// eviction in the same breath would mean the document went idle twice while
+	// this session was joining it, which cannot happen because joining is what
+	// stops it being idle.
+	doc, sub, err := s.openAndJoin(ctx, join)
 	if err != nil {
 		return err
 	}
@@ -308,9 +418,17 @@ func pump(stream carrier, sub *subscriber) error {
 // join registers a participant and queues its welcome, both under the lock, so
 // that no operation can slip between the state it is told about and the stream
 // it starts receiving on.
+// errEvicted says the document this session was given is no longer the one the
+// server hands out, so the session has to ask for it again. It never reaches a
+// participant: [Server.session] retries.
+var errEvicted = errors.New("collab: the document was evicted; ask again")
+
 func (d *document) join(j *collabpb.Join) (*subscriber, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.evicted {
+		return nil, errEvicted
+	}
 
 	// Two participants sharing a replica identity is not a merge conflict, it is
 	// silent data loss: both mint the same operation identities for different
@@ -364,6 +482,8 @@ func (d *document) join(j *collabpb.Join) (*subscriber, error) {
 	}
 	sub.out <- &collabpb.ServerMessage{Body: &collabpb.ServerMessage_Welcome{Welcome: welcome}}
 	d.subs[sub] = struct{}{}
+	// Somebody is here, so this document is not idle.
+	d.emptySince = time.Time{}
 	return sub, nil
 }
 
@@ -381,6 +501,9 @@ func (d *document) leave(ctx context.Context, sub *subscriber) {
 		d.broadcast(nil, presenceMessage(departure))
 	}
 	last := len(d.subs) == 0
+	if last {
+		d.emptySince = d.leftAt()
+	}
 	d.mu.Unlock()
 
 	if last {
@@ -473,6 +596,15 @@ func (d *document) close(sub *subscriber) {
 // persist writes the document if it has changed. A failure puts it back in the
 // queue rather than losing the fact that it needs writing.
 func (d *document) persist(ctx context.Context) error {
+	// One save of a document at a time, from beginning to end. Two paths reach
+	// here — the last participant leaving, and the housekeeping — and letting
+	// them overlap loses work: the eviction would take the document out of the
+	// table while the departure's save was still on its way to the store, and
+	// the next session would load the snapshot from before it. Measured, before
+	// this: four characters of forty.
+	d.saving.Lock()
+	defer d.saving.Unlock()
+
 	d.mu.Lock()
 	if !d.dirty {
 		d.mu.Unlock()
