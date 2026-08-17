@@ -1,0 +1,163 @@
+//go:build !js
+
+package collab
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/go-crdt/collab/collabpb"
+	"google.golang.org/grpc/status"
+)
+
+// A document was persisted when its last participant left, and otherwise only
+// when somebody called [Server.Flush]. That is enough for a document people
+// open and close, and not enough for what a session actually carries: the
+// comments on a text, the record of who changed what, the messages beside it.
+// Those are written once and expected to still be there — and a server
+// restarted or redeployed while anybody was still connected lost everything
+// since the document was opened, with nothing to say it had.
+//
+// So a server can be told to keep what people wrote, on two clocks:
+//
+//   - [Config.PersistEvery] saves what changed, whoever is connected. It bounds
+//     what a crash can cost to that interval, which is a number an operator can
+//     choose rather than "since somebody opened it".
+//   - [Config.EvictAfter] persists a document nobody is in and lets go of it.
+//     Without that a long-lived server holds every document it has ever served,
+//     which is a leak dressed as a cache — and it makes every Flush slower than
+//     the last.
+//
+// Neither runs unless it is asked for, so a server configured as before behaves
+// as before.
+
+// persistLoop saves what changed and lets go of what nobody is in, until the
+// server is closed.
+//
+// The two intervals share one timer rather than taking one each: they are both
+// housekeeping, the shorter of them decides how often it runs, and two timers
+// would mean two goroutines racing to persist the same document.
+func (s *Server) persistLoop(every, evictAfter time.Duration) {
+	defer close(s.stopped)
+	tick := every
+	if tick <= 0 || (evictAfter > 0 && evictAfter < tick) {
+		tick = evictAfter
+	}
+	timer := time.NewTicker(tick)
+	defer timer.Stop()
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-timer.C:
+			// A context of its own: the housekeeping must not be cancelled by
+			// whatever request happened to open the document.
+			ctx, cancel := context.WithTimeout(context.Background(), tick)
+			s.housekeep(ctx, every > 0, evictAfter)
+			cancel()
+		}
+	}
+}
+
+// housekeep is one pass of it: save what changed, then let go of what nobody
+// has been in. Saving first means an evicted document usually has nothing left
+// to write, so the pass that drops it is not also the pass that does the work.
+func (s *Server) housekeep(ctx context.Context, persist bool, evictAfter time.Duration) {
+	if persist {
+		_ = s.Flush(ctx)
+	}
+	if evictAfter > 0 {
+		s.evictIdle(ctx, evictAfter)
+	}
+}
+
+// evictIdle persists and forgets every document that nobody has been in for
+// longer than idle.
+//
+// The order is the whole of the difficulty, and the obvious order is wrong. Take
+// the document out of the table first and then save it, and there is a window
+// between the two in which somebody asks for that document, does not find it,
+// and loads a second replica of it from the store. Two live replicas of one
+// document, neither aware of the other, and whichever saves last erases the
+// other's work. Measured, before this was fixed: forty sessions racing an
+// eviction wrote forty characters and twenty-five survived.
+//
+// So the document stays in the table while it is being saved, marked as one
+// nobody may join. A session that asks for it waits for the eviction to finish
+// and is then given the replica loaded fresh — one at a time, always.
+func (s *Server) evictIdle(ctx context.Context, idle time.Duration) {
+	cutoff := s.now().Add(-idle)
+	var going []*document
+
+	s.mu.Lock()
+	for _, d := range s.docs {
+		d.mu.Lock()
+		if len(d.subs) == 0 && !d.emptySince.IsZero() && d.emptySince.Before(cutoff) && !d.evicted {
+			d.evicted = true
+			d.gone = make(chan struct{})
+			going = append(going, d)
+		}
+		d.mu.Unlock()
+	}
+	s.mu.Unlock()
+
+	for _, d := range going {
+		// Nothing is left to return an error to, and the document cannot be
+		// kept: a session is already waiting for it to go so that it can be
+		// loaded again. So the failure is reported where an operator can see it.
+		if err := d.persist(ctx); err != nil && s.onEvictError != nil {
+			s.onEvictError(d.name, err)
+		}
+	}
+
+	s.mu.Lock()
+	for _, d := range going {
+		if s.docs[d.name] == d {
+			delete(s.docs, d.name)
+		}
+	}
+	s.mu.Unlock()
+	// Only now may anybody load it again.
+	for _, d := range going {
+		close(d.gone)
+	}
+}
+
+// openAndJoin gets the document the server hands out and joins it, asking again
+// if it was evicted in between.
+//
+// Once is enough. Eviction takes a document nobody is in, and a session that
+// has joined one is in it — so the replica handed back by the second attempt
+// cannot go idle while this session is joining it.
+func (s *Server) openAndJoin(ctx context.Context, join *collabpb.Join) (*document, *subscriber, error) {
+	for ctx.Err() == nil {
+		doc, err := s.open(ctx, join.GetDocument())
+		if err != nil {
+			return nil, nil, err
+		}
+		if s.betweenOpenAndJoin != nil {
+			// The window this retry exists for is a race, and a test that waited
+			// for it to happen would be a test of the scheduler. This is where a
+			// test steps in and evicts the document.
+			s.betweenOpenAndJoin(doc)
+		}
+		sub, err := doc.join(join)
+		if errors.Is(err, errEvicted) {
+			// The document was let go of between being handed over and being
+			// joined. open waits for the eviction to finish, so asking again
+			// gets the replica loaded in its place.
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		return doc, sub, nil
+	}
+	return nil, nil, status.FromContextError(ctx.Err()).Err()
+}
+
+// leftAt is when the last participant left, which is what eviction measures
+// from. It is the document's own clock rather than the server's so that a test
+// can move it; the caller holds d.mu.
+func (d *document) leftAt() time.Time { return d.now() }
