@@ -51,7 +51,7 @@ func serve(t *testing.T, cfg collab.Config) (*collab.Server, *grpc.ClientConn) {
 // join adds a participant, closed when the test ends.
 func join(t *testing.T, conn *grpc.ClientConn, cfg collab.ClientConfig) *collab.Client {
 	t.Helper()
-	c, err := collab.Join(t.Context(), conn, cfg)
+	c, err := collab.Join(t.Context(), collab.GRPC(conn), cfg)
 	if err != nil {
 		t.Fatalf("Join(%q, site %d): %v", cfg.Document, cfg.Site, err)
 	}
@@ -340,7 +340,7 @@ func TestDocumentSurvivesEveryoneLeaving(t *testing.T) {
 	store := collab.NewMemoryStore()
 	_, conn := serve(t, collab.Config{Store: store})
 
-	ada, err := collab.Join(t.Context(), conn, collab.ClientConfig{Document: "archive", Site: 1})
+	ada, err := collab.Join(t.Context(), collab.GRPC(conn), collab.ClientConfig{Document: "archive", Site: 1})
 	if err != nil {
 		t.Fatalf("Join: %v", err)
 	}

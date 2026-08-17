@@ -16,9 +16,18 @@ server-authoritative design cannot offer: **a participant may edit while
 disconnected** and reconcile on return, and **the server may be restarted or
 replaced** without anyone losing work.
 
-Mounted on [`grpc-transports/websocket`](https://github.com/grpc-transports/websocket)
-the same service reaches a browser, and the client here builds for `js/wasm`, so
-**a browser tab and the server run the same code down to the merge**.
+The client builds for `js/wasm`, so **a browser tab and the server run the same
+code down to the merge** — over either of two carriers, from one server:
+
+| carrier | for | browser client, gzipped |
+|---|---|---|
+| `collab.WebSocket` — the session's own framing | anywhere, browsers included | **919 KB** |
+| `collab.GRPC` — over gRPC | native peers | 4 461 KB |
+
+Everything a session carries is already bytes `crdt` encoded and will check on
+arrival, so protobuf describes fields nobody reads through it — and compiled to
+wasm its machinery cannot be linked away. For scale, the CRDT alone is 633 KB.
+Outside a browser none of that matters, which is why gRPC is still there.
 
 ## Using it
 

@@ -1,3 +1,5 @@
+//go:build !js
+
 package collab
 
 import (
@@ -182,6 +184,21 @@ type subscriber struct {
 // Session is the service method: one bidirectional stream, one participant, one
 // document.
 func (s *Server) Session(stream collabpb.Collab_SessionServer) error {
+	return s.session(stream)
+}
+
+// A carrier is what the session logic needs of a transport, and it is all it
+// needs: messages in, messages out, and a context that ends when the connection
+// does. The gRPC stream satisfies it as it stands; so does a WebSocket carrying
+// the framing in wire.go, which is what a browser uses because protobuf costs
+// more than the whole CRDT it would be carrying.
+type carrier interface {
+	Recv() (*collabpb.ClientMessage, error)
+	Send(*collabpb.ServerMessage) error
+	Context() context.Context
+}
+
+func (s *Server) session(stream carrier) error {
 	ctx := stream.Context()
 	first, err := stream.Recv()
 	if err != nil {
@@ -271,7 +288,7 @@ func receivedMessage(msg *collabpb.ClientMessage, err error) received {
 
 // pump is the only goroutine that writes to a stream, because grpc-go allows
 // exactly one.
-func pump(stream collabpb.Collab_SessionServer, sub *subscriber) error {
+func pump(stream carrier, sub *subscriber) error {
 	for msg := range sub.out {
 		if err := stream.Send(msg); err != nil {
 			return err

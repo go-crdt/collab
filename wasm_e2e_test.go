@@ -4,6 +4,7 @@ package collab_test
 
 import (
 	"encoding/json"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,10 +29,16 @@ import (
 // the same transport a browser would use, edit at the same time. All three must
 // end up with the same text, and no one's character may be lost.
 
-// serveWebSocket starts a Collab server reachable over ws://, and returns its
-// address.
-func serveWebSocket(t *testing.T) string {
+// serveWebSocket starts one Collab server behind two carriers and returns an
+// address for each: gRPC tunnelled over a WebSocket, and the session's own
+// framing over a plain one.
+//
+// One server, two doors. Which door a participant came through is not something
+// the document can tell, and that is the claim these tests are here to check.
+func serveWebSocket(t *testing.T) (grpcAddr, thinURL string) {
 	t.Helper()
+	srv := collab.NewServer(collab.Config{})
+
 	lis, err := wstransport.ListenWebSocket("127.0.0.1:0", wstransport.ServerConfig{
 		OriginPatterns: []string{"*"},
 	})
@@ -39,13 +46,16 @@ func serveWebSocket(t *testing.T) string {
 		t.Fatalf("ListenWebSocket: %v", err)
 	}
 	gs := grpc.NewServer()
-	collabpb.RegisterCollabServer(gs, collab.NewServer(collab.Config{}))
+	collabpb.RegisterCollabServer(gs, srv)
 	go func() { _ = gs.Serve(lis) }()
+
+	thin := httptest.NewServer(srv.ServeWebSocket("*"))
 	t.Cleanup(func() {
+		thin.Close()
 		gs.Stop()
 		_ = lis.Close()
 	})
-	return lis.Addr().String()
+	return lis.Addr().String(), "ws" + strings.TrimPrefix(thin.URL, "http")
 }
 
 // dialWebSocket connects to the server the way a native participant would.
@@ -67,15 +77,26 @@ func dialWebSocket(t *testing.T, addr string) *grpc.ClientConn {
 // A native participant over the real WebSocket transport, with no WebAssembly
 // involved — the half of the proof that does not need Node.
 func TestOverWebSocket(t *testing.T) {
-	addr := serveWebSocket(t)
-	conn := dialWebSocket(t, addr)
+	grpcAddr, thinURL := serveWebSocket(t)
 
-	ada := join(t, conn, collab.ClientConfig{Document: "ws", Site: 1})
-	grace := join(t, conn, collab.ClientConfig{Document: "ws", Site: 2})
+	// One participant through each door, editing one document.
+	ada := join(t, dialWebSocket(t, grpcAddr), collab.ClientConfig{Document: "ws", Site: 1})
+	grace, err := collab.Join(t.Context(), collab.WebSocket(thinURL),
+		collab.ClientConfig{Document: "ws", Site: 2})
+	if err != nil {
+		t.Fatalf("joining over the thin carrier: %v", err)
+	}
+	t.Cleanup(func() { _ = grace.Close() })
+
 	if err := body(t, ada).Insert(0, "over a websocket"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	awaitText(t, grace, "over a websocket")
+	// And back the other way, so neither carrier is only ever listening.
+	if err := body(t, grace).Insert(16, ", both ways"); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	awaitText(t, ada, "over a websocket, both ways")
 }
 
 // TestWasmConverges is the acceptance gate: two WebAssembly participants and one
@@ -110,15 +131,17 @@ func TestWasmConverges(t *testing.T) {
 		t.Fatalf("building the WebAssembly client failed: %v\n%s", err, out)
 	}
 
-	addr := serveWebSocket(t)
-	native := join(t, dialWebSocket(t, addr), collab.ClientConfig{Document: "shared", Site: 1})
+	grpcAddr, thinURL := serveWebSocket(t)
+	// The native participant comes in over gRPC and the WebAssembly ones over the
+	// framing a browser can afford, which is what makes this a test of both.
+	native := join(t, dialWebSocket(t, grpcAddr), collab.ClientConfig{Document: "shared", Site: 1})
 	if err := body(t, native).Insert(0, "A"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 
 	cmd := exec.Command(node, filepath.Join("wasmtest", "run.mjs"))
 	cmd.Env = append(os.Environ(),
-		"URL=ws://"+addr,
+		"URL="+thinURL,
 		"DOCUMENT=shared",
 		"WASM="+wasmPath,
 		"WASM_EXEC="+wasmExec,
