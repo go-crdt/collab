@@ -106,7 +106,7 @@ func TestAuthorizeFromTheUpgradeCookie(t *testing.T) {
 
 	// Ada opens her own document, and a second participant of hers joins it.
 	ada := join(t, dialAs(t, addr, "ada"), collab.ClientConfig{Document: "ada/notes", Site: 1})
-	if err := ada.Insert(0, "mine"); err != nil {
+	if err := body(t, ada).Insert(0, "mine"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	second := join(t, dialAs(t, addr, "ada"), collab.ClientConfig{Document: "ada/notes", Site: 2})
@@ -121,10 +121,10 @@ func TestAuthorizeFromTheUpgradeCookie(t *testing.T) {
 
 	// Grace's own document is hers.
 	hers := join(t, dialAs(t, addr, "grace"), collab.ClientConfig{Document: "grace/notes", Site: 4})
-	if err := hers.Insert(0, "also mine"); err != nil {
+	if err := body(t, hers).Insert(0, "also mine"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	if got, want := hers.Text(), "also mine"; got != want {
+	if got, want := text(t, hers), "also mine"; got != want {
 		t.Fatalf("Text() = %q, want %q", got, want)
 	}
 

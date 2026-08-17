@@ -10,6 +10,12 @@ package collab.v1;
 
 option go_package = "github.com/go-crdt/collab/collabpb";
 
+// A document is not one structure. It holds named parts — the text of a file,
+// the comments anchored into it, the messages beside it, the cells of a sheet —
+// and they travel together: one snapshot, one version, one decision about who
+// may open it. Keeping them apart would mean several snapshots persisted at
+// several moments, with no instant at which the set of them agrees.
+
 // Collab is one bidirectional stream per participant per document.
 service Collab {
   // Session carries a participant's whole involvement with one document: it
@@ -46,10 +52,12 @@ message Join {
   // every other participant's. See crdt.DeriveSiteID.
   uint64 site = 2;
 
-  // have is the participant's encoded version vector, sent when rejoining a
-  // document it already holds. The server then replies with only the operations
-  // that are missing, instead of the whole document. Empty means "send
-  // everything".
+  // have is the participant's encoded version, sent when rejoining a document
+  // it already holds. The server then replies with only the operations that are
+  // missing, instead of the whole document. Empty means "send everything".
+  //
+  // A document is a set of named parts, so this is a version per part —
+  // crdt.CompositeVersion, not one vector.
   bytes have = 3;
 }
 
@@ -65,15 +73,20 @@ message Welcome {
   // presence is the state of everyone already in the document.
   repeated bytes presence = 3;
 
-  // version is the server's encoded version vector. A participant answers with
-  // whatever the server is missing, which is what lets work done while
+  // version is the server's encoded version, per part. A participant answers
+  // with whatever the server is missing, which is what lets work done while
   // disconnected reach everyone else rather than being stranded.
   bytes version = 4;
 }
 
-// Operations carries a batch of CRDT operations, encoded by crdt.AppendOps.
-// Applying them is idempotent and order-independent, so this message needs no
-// sequencing of its own.
+// Operations carries operations addressed to the parts of a document, encoded
+// by crdt.AppendPartOps. Applying them is idempotent and order-independent, so
+// this message needs no sequencing of its own.
+//
+// The part each operation belongs to travels inside those bytes rather than in
+// a field here, which is why holding several structures in one document changed
+// nothing about this message. It is also what lets one message carry an edit to
+// the text and an edit to a comment on it: they arrive together or not at all.
 message Operations {
   bytes operations = 1;
 }

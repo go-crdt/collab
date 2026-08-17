@@ -231,7 +231,7 @@ func TestAFailedSaveIsRetried(t *testing.T) {
 	store := &failingStore{inner: collab.NewMemoryStore(), saveErr: errors.New("disk full")}
 	srv, conn := serve(t, collab.Config{Store: store})
 	ada := join(t, conn, collab.ClientConfig{Document: "doc", Site: 1})
-	if err := ada.Insert(0, "work"); err != nil {
+	if err := body(t, ada).Insert(0, "work"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 
@@ -256,11 +256,15 @@ func TestAFailedSaveIsRetried(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	doc, err := crdt.Load(9, saved)
+	doc, err := crdt.LoadComposite(9, saved)
 	if err != nil {
 		t.Fatalf("the retried snapshot is unreadable: %v", err)
 	}
-	if got, want := doc.String(), "work"; got != want {
+	kept, err := doc.Text("body")
+	if err != nil {
+		t.Fatalf("Text: %v", err)
+	}
+	if got, want := kept.String(), "work"; got != want {
 		t.Fatalf("the retried snapshot holds %q, want %q", got, want)
 	}
 }
@@ -308,7 +312,7 @@ func TestSimultaneousOpensShareOneDocument(t *testing.T) {
 			t.Errorf("second Join: %v", err)
 			return
 		}
-		if err := second.Insert(0, "second"); err != nil {
+		if err := body(t, second).Insert(0, "second"); err != nil {
 			t.Errorf("second Insert: %v", err)
 		}
 		t.Cleanup(func() { _ = second.Close() })
@@ -357,7 +361,7 @@ func TestAParticipantThatCannotKeepUpIsDropped(t *testing.T) {
 			t.Fatal("an idle participant was never dropped")
 		default:
 		}
-		if err := busy.Insert(0, strings.Repeat("x", 64)); err != nil {
+		if err := body(t, busy).Insert(0, strings.Repeat("x", 64)); err != nil {
 			t.Fatalf("Insert: %v", err)
 		}
 	}
@@ -507,7 +511,7 @@ func TestSessionEndsOnBadServerMessages(t *testing.T) {
 				t.Fatal("the session ended without saying why")
 			}
 			// An edit after the session ended is refused, with the reason.
-			if err := c.Insert(0, "x"); err == nil {
+			if err := body(t, c).Insert(0, "x"); err == nil {
 				t.Fatal("an edit was accepted after the session ended")
 			}
 		})
@@ -518,7 +522,7 @@ func TestSessionEndsOnBadServerMessages(t *testing.T) {
 func TestEditingAfterClose(t *testing.T) {
 	_, conn := serve(t, collab.Config{})
 	c := join(t, conn, collab.ClientConfig{Document: "doc", Site: 1})
-	if err := c.Insert(0, "before"); err != nil {
+	if err := body(t, c).Insert(0, "before"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	if err := c.Close(); err != nil {
@@ -532,8 +536,8 @@ func TestEditingAfterClose(t *testing.T) {
 		name string
 		run  func() error
 	}{
-		{"insert", func() error { return c.Insert(0, "after") }},
-		{"delete", func() error { return c.Delete(0, 1) }},
+		{"insert", func() error { return body(t, c).Insert(0, "after") }},
+		{"delete", func() error { return body(t, c).Delete(0, 1) }},
 		{"cursor", func() error { return c.SetCursor(awareness.Cursor{}, nil) }},
 	} {
 		if err := tt.run(); err == nil {
@@ -560,24 +564,25 @@ func TestOutOfRangeEditsAreLocal(t *testing.T) {
 	ada := join(t, conn, collab.ClientConfig{Document: "doc", Site: 1})
 	witness := join(t, conn, collab.ClientConfig{Document: "doc", Site: 2})
 
-	if err := ada.Insert(5, "x"); !errors.Is(err, crdt.ErrOutOfRange) {
+	if err := body(t, ada).Insert(5, "x"); !errors.Is(err, crdt.ErrOutOfRange) {
 		t.Fatalf("Insert past the end = %v, want ErrOutOfRange", err)
 	}
-	if err := ada.Delete(0, 1); !errors.Is(err, crdt.ErrOutOfRange) {
+	if err := body(t, ada).Delete(0, 1); !errors.Is(err, crdt.ErrOutOfRange) {
 		t.Fatalf("Delete past the end = %v, want ErrOutOfRange", err)
 	}
 	// An edit that changes nothing sends nothing, and the session is unharmed.
-	if err := ada.Insert(0, ""); err != nil {
+	if err := body(t, ada).Insert(0, ""); err != nil {
 		t.Fatalf("empty Insert: %v", err)
 	}
-	if err := ada.Insert(0, "fine"); err != nil {
+	if err := body(t, ada).Insert(0, "fine"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	awaitText(t, witness, "fine")
 	if err := ada.Err(); err != nil {
 		t.Fatalf("Err() = %v, want nil", err)
 	}
-	if got := ada.Version(); got.Get(1) == 0 {
+	part := crdt.Part{Kind: crdt.PartText, Name: "body"}
+	if got := ada.Version(); got[part].Get(1) == 0 {
 		t.Fatalf("Version() = %v, want the local edits to be recorded", got)
 	}
 }
@@ -591,7 +596,7 @@ func TestChangesCoalesce(t *testing.T) {
 	grace := join(t, conn, collab.ClientConfig{Document: "doc", Site: 2})
 
 	for i := range 20 {
-		if err := ada.Insert(i, "x"); err != nil {
+		if err := body(t, ada).Insert(i, "x"); err != nil {
 			t.Fatalf("Insert: %v", err)
 		}
 	}
@@ -702,7 +707,7 @@ func TestAuthorize(t *testing.T) {
 
 	t.Run("allowed", func(t *testing.T) {
 		c := join(t, conn, collab.ClientConfig{Document: "open", Site: 7})
-		if err := c.Insert(0, "welcome"); err != nil {
+		if err := body(t, c).Insert(0, "welcome"); err != nil {
 			t.Fatalf("Insert: %v", err)
 		}
 	})
@@ -758,7 +763,7 @@ func TestAuthorize(t *testing.T) {
 func TestASiteCanOnlyBeInADocumentOnce(t *testing.T) {
 	_, conn := serve(t, collab.Config{})
 	first := join(t, conn, collab.ClientConfig{Document: "doc", Site: 5})
-	if err := first.Insert(0, "AAAA"); err != nil {
+	if err := body(t, first).Insert(0, "AAAA"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	witness := join(t, conn, collab.ClientConfig{Document: "doc", Site: 9})
@@ -777,10 +782,10 @@ func TestASiteCanOnlyBeInADocumentOnce(t *testing.T) {
 	}
 
 	// The one that took the identity has the document and can use it.
-	if got, want := second.Text(), "AAAA"; got != want {
+	if got, want := text(t, second), "AAAA"; got != want {
 		t.Fatalf("the arriving session sees %q, want %q", got, want)
 	}
-	if err := second.Insert(4, "BBBB"); err != nil {
+	if err := body(t, second).Insert(4, "BBBB"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	awaitText(t, witness, "AAAABBBB")
@@ -801,7 +806,7 @@ func TestASiteCanOnlyBeInADocumentOnce(t *testing.T) {
 
 	// The same site in a different document is a different participant, and fine.
 	elsewhere := join(t, conn, collab.ClientConfig{Document: "other", Site: 5})
-	if err := elsewhere.Insert(0, "fine"); err != nil {
+	if err := body(t, elsewhere).Insert(0, "fine"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 }

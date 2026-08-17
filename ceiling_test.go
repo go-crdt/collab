@@ -25,7 +25,7 @@ func TestAnOperationAboveTheClockCeilingIsRefused(t *testing.T) {
 
 	// Ada is editing, and a second participant is watching.
 	ada := join(t, conn, collab.ClientConfig{Document: "doc", Site: 1})
-	if err := ada.Insert(0, "text"); err != nil {
+	if err := body(t, ada).Insert(0, "text"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	watcher := join(t, conn, collab.ClientConfig{Document: "doc", Site: 2})
@@ -61,11 +61,11 @@ func TestAnOperationAboveTheClockCeilingIsRefused(t *testing.T) {
 
 	// The document is untouched, nothing was passed on, and the participants who
 	// were already there can still write and still see each other.
-	if err := ada.Insert(4, " more"); err != nil {
+	if err := body(t, ada).Insert(4, " more"); err != nil {
 		t.Fatalf("Insert after the refused operation: %v", err)
 	}
 	awaitText(t, watcher, "text more")
-	if err := watcher.Insert(0, "still here: "); err != nil {
+	if err := body(t, watcher).Insert(0, "still here: "); err != nil {
 		t.Fatalf("the watcher could not write: %v", err)
 	}
 	awaitText(t, ada, "still here: text more")

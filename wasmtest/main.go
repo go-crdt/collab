@@ -25,6 +25,13 @@ import (
 // from the native participant and one from each of the two here.
 const total = 3
 
+// body is the text part everyone in this test edits. The name was accepted when
+// the handle was made, so it cannot fail here.
+func body(c *collab.Client) *collab.Text {
+	h, _ := c.Text("body")
+	return h
+}
+
 func main() {
 	text, err := run()
 	result := map[string]any{"ok": err == nil}
@@ -74,7 +81,7 @@ func run() ([2]string, error) {
 	// Both type at the start at the same time, which is the case that needs the
 	// merge to agree.
 	for i, c := range clients {
-		if err := c.Insert(0, string(rune('B'+i))); err != nil {
+		if err := body(c).Insert(0, string(rune('B'+i))); err != nil {
 			return texts, err
 		}
 	}
@@ -83,18 +90,18 @@ func run() ([2]string, error) {
 		if err := await(ctx, c); err != nil {
 			return texts, err
 		}
-		texts[i] = c.Text()
+		texts[i] = body(c).String()
 	}
 	return texts, nil
 }
 
 // await blocks until a participant holds every character, or the context ends.
 func await(ctx context.Context, c *collab.Client) error {
-	for c.Len() < total {
+	for body(c).Len() < total {
 		select {
 		case <-c.Changes():
 		case <-c.Done():
-			if c.Len() < total {
+			if body(c).Len() < total {
 				return c.Err()
 			}
 		case <-ctx.Done():

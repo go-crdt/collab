@@ -72,7 +72,7 @@ func TestOverWebSocket(t *testing.T) {
 
 	ada := join(t, conn, collab.ClientConfig{Document: "ws", Site: 1})
 	grace := join(t, conn, collab.ClientConfig{Document: "ws", Site: 2})
-	if err := ada.Insert(0, "over a websocket"); err != nil {
+	if err := body(t, ada).Insert(0, "over a websocket"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 	awaitText(t, grace, "over a websocket")
@@ -112,7 +112,7 @@ func TestWasmConverges(t *testing.T) {
 
 	addr := serveWebSocket(t)
 	native := join(t, dialWebSocket(t, addr), collab.ClientConfig{Document: "shared", Site: 1})
-	if err := native.Insert(0, "A"); err != nil {
+	if err := body(t, native).Insert(0, "A"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
 
@@ -143,9 +143,9 @@ func TestWasmConverges(t *testing.T) {
 	// The native participant has to reach the same text the two WebAssembly ones
 	// did — that is what "the same merge logic everywhere" means.
 	await(t, native, "convergence with the WebAssembly participants", func() bool {
-		return native.Len() == 3
+		return body(t, native).Len() == 3
 	})
-	got := native.Text()
+	got := text(t, native)
 	if wasm.First != got || wasm.Second != got {
 		t.Fatalf("replicas disagree:\n  native      %q\n  wasm first  %q\n  wasm second %q",
 			got, wasm.First, wasm.Second)
