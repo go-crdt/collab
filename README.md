@@ -29,6 +29,36 @@ arrival, so protobuf describes fields nobody reads through it — and compiled t
 wasm its machinery cannot be linked away. For scale, the CRDT alone is 633 KB.
 Outside a browser none of that matters, which is why gRPC is still there.
 
+## From a page
+
+The editor this was built for is TypeScript and cannot call Go, so `./wasm`
+compiles to a binding a page uses directly. Offsets are UTF-16 code units
+throughout — the units a JavaScript string counts in — and an offset splitting a
+character is refused rather than rounded:
+
+```js
+const session = await collab.join({ url, document: "project:default", site });
+
+const body  = await session.text("file:main.tex");
+const chat  = await session.list("chat");
+const cells = await session.map("cells");
+
+await body.insert(0, "bonjour");
+await cells.set("B7", new TextEncoder().encode("42"));
+
+await session.onChange(parts => {
+  for (const part of parts) {
+    if (part.kind === "text") applyEdits(part.text);   // {pos, removed, insert}
+    if (part.kind === "map")  reread(part.keys);       // the keys that changed
+    if (part.kind === "list") rereadWhole(part.name);  // a list says only that it moved
+  }
+});
+```
+
+Types are in [`wasm/collab.d.ts`](wasm/collab.d.ts). A value is `Uint8Array` in
+both directions, never a string and never JSON: the CRDT does not interpret it
+and neither does the binding.
+
 ## Using it
 
 Server — any `grpc.Server`, any carrier:

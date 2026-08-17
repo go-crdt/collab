@@ -158,6 +158,12 @@ jobs:
       - run: GOOS=js GOARCH=wasm go build ./...
       - name: Three replicas, two runtimes
         run: go test -v -run 'TestWasmConverges|TestOverWebSocket' ./...
+      # And the surface the consumer actually has. loom's editor is TypeScript
+      # and cannot call Go, so the binding in ./wasm is what has to work: a page
+      # joining a document a native participant is already editing, driven
+      # through globalThis.collab and nothing else.
+      - name: A page and a native participant
+        run: go test -v -run TestTheJavaScriptAPIConverges ./...
 
   arch-native:
     name: arch ${{ matrix.label }}

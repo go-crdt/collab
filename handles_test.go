@@ -130,6 +130,81 @@ func TestTheHandlesDoWhatTheySay(t *testing.T) {
 	})
 }
 
+// Everything a page is handed is addressed in UTF-16 code units, because a page
+// counts in them and cannot be asked to convert. A document with a character
+// outside the basic plane is the only one where the two counts differ, so it is
+// the only one worth testing on.
+func TestTheHandleAnswersInTheUnitsAPageCounts(t *testing.T) {
+	_, conn := serve(t, collab.Config{})
+	ada := join(t, conn, collab.ClientConfig{Document: "doc", Site: 1})
+	grace := join(t, conn, collab.ClientConfig{Document: "doc", Site: 2})
+
+	// "a😀b": three characters, four code units, and the "b" is at rune 2 and
+	// unit 3.
+	if err := body(t, ada).Insert(0, "a😀b"); err != nil {
+		t.Fatal(err)
+	}
+	adaBody := body(t, ada)
+
+	anchor, err := adaBody.AnchorUTF16(3)
+	if err != nil {
+		t.Fatalf("AnchorUTF16(3): %v", err)
+	}
+	if runeAnchor, err := adaBody.Anchor(2); err != nil || runeAnchor != anchor {
+		t.Fatalf("AnchorUTF16(3) = %v, want Anchor(2) = %v (err %v)", anchor, runeAnchor, err)
+	}
+	if pos, ok := adaBody.PositionUTF16(anchor); pos != 3 || !ok {
+		t.Errorf("PositionUTF16 = (%d, %v), want (3, true)", pos, ok)
+	}
+	if _, ok := adaBody.PositionUTF16(crdt.ID{Site: 9, Seq: 9}); ok {
+		t.Error("PositionUTF16 claims to know an anchor from another document")
+	}
+
+	// An offset landing between the emoji's two units names a place no cursor
+	// was ever in, and is refused rather than moved to one of its sides.
+	if _, err := adaBody.AnchorUTF16(2); !errors.Is(err, crdt.ErrSurrogateBoundary) {
+		t.Errorf("AnchorUTF16 inside a character = %v, want ErrSurrogateBoundary", err)
+	}
+	if _, err := adaBody.AnchorUTF16(9); !errors.Is(err, crdt.ErrOutOfRange) {
+		t.Errorf("AnchorUTF16 past the end = %v, want ErrOutOfRange", err)
+	}
+
+	// A deleted character still has a position — where the text closed up to —
+	// and it is reported in the same units.
+	if err := adaBody.DeleteUTF16(3, 1); err != nil {
+		t.Fatal(err)
+	}
+	if pos, ok := adaBody.PositionUTF16(anchor); pos != 3 || !ok {
+		t.Errorf("PositionUTF16 of a deleted character = (%d, %v), want (3, true)", pos, ok)
+	}
+	if adaBody.Visible(anchor) {
+		t.Error("Visible says a deleted character is still in the text")
+	}
+
+	// Two authors, so the runs are worth splitting: grace writes an emoji of her
+	// own in front, which moves everything ada wrote two units along.
+	awaitText(t, grace, "a😀")
+	if err := body(t, grace).InsertUTF16(0, "🙂"); err != nil {
+		t.Fatal(err)
+	}
+	awaitText(t, ada, "🙂a😀")
+
+	runs := adaBody.AuthorRunsUTF16()
+	if len(runs) != 2 {
+		t.Fatalf("AuthorRunsUTF16() = %+v, want one run per author", runs)
+	}
+	if runs[0] != (crdt.AuthorRun{Pos: 0, Len: 2, Site: 2}) {
+		t.Errorf("grace's run is %+v, want {Pos:0 Len:2 Site:2}", runs[0])
+	}
+	if runs[1] != (crdt.AuthorRun{Pos: 2, Len: 3, Site: 1}) {
+		t.Errorf("ada's run is %+v, want {Pos:2 Len:3 Site:1}", runs[1])
+	}
+	// The rune-counted answer is the one that differs, which is the whole point.
+	if got := adaBody.AuthorRuns(); got[1].Pos != 1 || got[1].Len != 2 {
+		t.Errorf("AuthorRuns() = %+v, want ada's run at rune 1 for 2 runes", got)
+	}
+}
+
 // A key or a value a part could not hold is refused where the caller asked for
 // it, and the session carries on.
 func TestAHandleRefusesWhatThePartWouldRefuse(t *testing.T) {
