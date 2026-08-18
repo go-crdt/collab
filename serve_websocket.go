@@ -7,7 +7,6 @@ import (
 	"net/http"
 
 	"github.com/coder/websocket"
-	"github.com/go-crdt/collab/collabpb"
 )
 
 // ServeWebSocket returns an http.Handler that runs sessions over WebSockets —
@@ -58,8 +57,15 @@ func closing(err error) (websocket.StatusCode, string) {
 	return websocket.StatusPolicyViolation, reason
 }
 
-// A wsCarrier presents a WebSocket to the session logic as the gRPC stream
-// presents itself, so the two carriers share every line of that logic.
+// A wsCarrier presents a WebSocket to the session logic, which speaks the wire
+// format in wire.go — so this is a socket and a framing check, and nothing
+// else.
+//
+// It used to convert every message into a protobuf one and back again, because
+// the session logic was written in protobuf. That cost a translation each way
+// on the only path a browser takes, and it cost far more than the work: it made
+// the server type depend on the generated code, which is what kept the session
+// logic out of the browser at all.
 type wsCarrier struct {
 	ctx  context.Context
 	conn *websocket.Conn
@@ -67,56 +73,19 @@ type wsCarrier struct {
 
 func (c *wsCarrier) Context() context.Context { return c.ctx }
 
-func (c *wsCarrier) Recv() (*collabpb.ClientMessage, error) {
+func (c *wsCarrier) Recv() (byte, any, error) {
 	typ, raw, err := c.conn.Read(c.ctx)
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 	if typ != websocket.MessageBinary {
-		return nil, ErrProtocol
+		return 0, nil, ErrProtocol
 	}
-	kind, msg, err := decodeClient(raw)
-	if err != nil {
-		return nil, err
-	}
-	out := &collabpb.ClientMessage{}
-	switch kind {
-	case kindJoin:
-		m := msg.(joinMsg)
-		out.Body = &collabpb.ClientMessage_Join{Join: &collabpb.Join{
-			Document: m.Document, Site: m.Site, Have: m.Have,
-		}}
-	case kindOperation:
-		out.Body = &collabpb.ClientMessage_Operations{
-			Operations: &collabpb.Operations{Operations: msg.(opsMsg).Operations},
-		}
-	default:
-		out.Body = &collabpb.ClientMessage_Presence{
-			Presence: &collabpb.Presence{Update: msg.(presenceMsg).Update},
-		}
-	}
-	return out, nil
+	return decodeClient(raw)
 }
 
-func (c *wsCarrier) Send(msg *collabpb.ServerMessage) error {
-	var raw []byte
-	var err error
-	switch body := msg.GetBody().(type) {
-	case *collabpb.ServerMessage_Welcome:
-		w := body.Welcome
-		raw, err = encodeServer(kindWelcome, welcomeMsg{
-			Snapshot:   w.GetSnapshot(),
-			Operations: w.GetOperations(),
-			Version:    w.GetVersion(),
-			Presence:   w.GetPresence(),
-		})
-	case *collabpb.ServerMessage_Operations:
-		raw, err = encodeServer(kindOperation, opsMsg{Operations: body.Operations.GetOperations()})
-	case *collabpb.ServerMessage_Presence:
-		raw, err = encodeServer(kindPresence, presenceMsg{Update: body.Presence.GetUpdate()})
-	default:
-		err = ErrProtocol
-	}
+func (c *wsCarrier) Send(kind byte, msg any) error {
+	raw, err := encodeServer(kind, msg)
 	if err != nil {
 		return err
 	}

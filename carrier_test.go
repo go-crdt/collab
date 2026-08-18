@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/coder/websocket"
-	"github.com/go-crdt/collab/collabpb"
 )
 
 // A carrier fails in ways a session has to survive telling apart: a server that
@@ -211,12 +210,18 @@ func TestAnOriginTheServerDoesNotAllowIsRefused(t *testing.T) {
 	_ = conn.CloseNow()
 }
 
-// A server message of a kind that does not exist is refused rather than written
-// as something else. Nothing produces one; the branch exists so that nothing
-// ever can.
-func TestTheServerCarrierRefusesAMessageWithNoBody(t *testing.T) {
-	c := &wsCarrier{ctx: t.Context()}
-	if err := c.Send(&collabpb.ServerMessage{}); !errors.Is(err, ErrProtocol) {
-		t.Fatalf("Send with no body = %v, want ErrProtocol", err)
+// A message of a kind that does not exist is refused rather than written as
+// something else. Nothing produces one; the branches exist so that nothing ever
+// can, and there are two of them now: the WebSocket carrier refuses through the
+// wire encoder it shares with the client, and the gRPC one refuses in its own
+// conversion.
+func TestACarrierRefusesAMessageOfNoKind(t *testing.T) {
+	ws := &wsCarrier{ctx: t.Context()}
+	if err := ws.Send(0xfe, opsMsg{}); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("the WebSocket carrier sent a message of no kind: %v", err)
+	}
+	g := &grpcCarrier{}
+	if err := g.Send(0xfe, opsMsg{}); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("the gRPC carrier sent a message of no kind: %v", err)
 	}
 }

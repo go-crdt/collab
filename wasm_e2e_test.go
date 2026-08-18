@@ -46,7 +46,7 @@ func serveWebSocket(t *testing.T) (grpcAddr, thinURL string) {
 		t.Fatalf("ListenWebSocket: %v", err)
 	}
 	gs := grpc.NewServer()
-	collabpb.RegisterCollabServer(gs, srv)
+	collabpb.RegisterCollabServer(gs, collab.GRPCService(srv))
 	go func() { _ = gs.Serve(lis) }()
 
 	thin := httptest.NewServer(srv.ServeWebSocket("*"))

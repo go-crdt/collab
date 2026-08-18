@@ -91,3 +91,87 @@ func (c *grpcConn) Recv() (byte, any, error) {
 }
 
 func (c *grpcConn) Close() error { return c.stream.CloseSend() }
+
+// GRPCServer presents a Server as the generated gRPC service.
+//
+// It exists because the Server itself no longer does. The session logic speaks
+// the wire format in wire.go — four small types, hand-written — and that is
+// what let it stop depending on the generated protobuf code. The reason is a
+// measurement: compiling the server for the browser with protobuf attached
+// takes the WebAssembly binding from 5.3 MB to 19.3, because gRPC and protobuf
+// come with it. A browser holding a document for a colleague on another
+// continent cannot pay that, and it is the same reason wire.go exists at all.
+//
+// So gRPC is a binding rather than a foundation: this type converts, and the
+// document logic never sees a protobuf message.
+type GRPCServer struct {
+	collabpb.UnimplementedCollabServer
+	inner *Server
+}
+
+// GRPC presents a Server over gRPC. Register the result with
+// [collabpb.RegisterCollabServer] on any grpc.Server.
+func GRPCService(s *Server) *GRPCServer { return &GRPCServer{inner: s} }
+
+// Session is the service method: one bidirectional stream, one participant, one
+// document.
+func (g *GRPCServer) Session(stream collabpb.Collab_SessionServer) error {
+	return g.inner.session(&grpcCarrier{stream: stream})
+}
+
+// A grpcCarrier presents a gRPC stream to the session logic, converting between
+// the generated messages and the wire types on the way through.
+type grpcCarrier struct {
+	stream collabpb.Collab_SessionServer
+}
+
+func (c *grpcCarrier) Context() context.Context { return c.stream.Context() }
+
+func (c *grpcCarrier) Recv() (byte, any, error) {
+	in, err := c.stream.Recv()
+	if err != nil {
+		return 0, nil, err
+	}
+	switch body := in.GetBody().(type) {
+	case *collabpb.ClientMessage_Join:
+		j := body.Join
+		return kindJoin, joinMsg{Document: j.GetDocument(), Site: j.GetSite(), Have: j.GetHave()}, nil
+	case *collabpb.ClientMessage_Operations:
+		return kindOperation, opsMsg{Operations: body.Operations.GetOperations()}, nil
+	case *collabpb.ClientMessage_Presence:
+		return kindPresence, presenceMsg{Update: body.Presence.GetUpdate()}, nil
+	default:
+		// A message the generated code allows and this does not understand,
+		// which the session logic refuses as "not a join" or "not operations".
+		return 0, nil, nil
+	}
+}
+
+func (c *grpcCarrier) Send(kind byte, msg any) error {
+	switch kind {
+	case kindWelcome:
+		w := msg.(welcomeMsg)
+		return c.stream.Send(&collabpb.ServerMessage{
+			Body: &collabpb.ServerMessage_Welcome{Welcome: &collabpb.Welcome{
+				Snapshot:   w.Snapshot,
+				Operations: w.Operations,
+				Version:    w.Version,
+				Presence:   w.Presence,
+			}},
+		})
+	case kindOperation:
+		return c.stream.Send(&collabpb.ServerMessage{
+			Body: &collabpb.ServerMessage_Operations{
+				Operations: &collabpb.Operations{Operations: msg.(opsMsg).Operations},
+			},
+		})
+	case kindPresence:
+		return c.stream.Send(&collabpb.ServerMessage{
+			Body: &collabpb.ServerMessage_Presence{
+				Presence: &collabpb.Presence{Update: msg.(presenceMsg).Update},
+			},
+		})
+	default:
+		return ErrProtocol
+	}
+}
