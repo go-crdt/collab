@@ -1,4 +1,4 @@
-//go:build !js
+//go:build (js && wasm) || !js
 
 package collab
 
@@ -11,8 +11,6 @@ import (
 
 	"github.com/go-crdt/crdt"
 	"github.com/go-crdt/crdt/awareness"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // DefaultBacklog is how many messages may be queued for one participant before
@@ -203,7 +201,10 @@ func (s *Server) open(ctx context.Context, name string) (*document, error) {
 		select {
 		case <-wait:
 		case <-ctx.Done():
-			return nil, status.FromContextError(ctx.Err()).Err()
+			// The context's own error, which every binding already knows how
+			// to say: gRPC maps a cancellation and a deadline to its own codes
+			// without being told.
+			return nil, ctx.Err()
 		}
 	}
 
@@ -212,12 +213,12 @@ func (s *Server) open(ctx context.Context, name string) (*document, error) {
 	// registered wins.
 	snapshot, err := s.store.Load(ctx, name)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "collab: reading document %q: %v", name, err)
+		return nil, fail(errInternal, "collab: reading document %q: %v", name, err)
 	}
 	doc := crdt.NewComposite(serverSite)
 	if len(snapshot) > 0 {
 		if doc, err = crdt.LoadComposite(serverSite, snapshot); err != nil {
-			return nil, status.Errorf(codes.Internal, "collab: stored document %q is unreadable: %v", name, err)
+			return nil, fail(errInternal, "collab: stored document %q is unreadable: %v", name, err)
 		}
 	}
 
@@ -318,9 +319,9 @@ func (s *Server) session(stream carrier) error {
 	join, ok := first.(joinMsg)
 	switch {
 	case kind != kindJoin || !ok:
-		return status.Error(codes.InvalidArgument, "collab: a session must open with a join")
+		return fail(errInvalid, "collab: a session must open with a join")
 	case join.Document == "":
-		return status.Error(codes.InvalidArgument, "collab: a join must name a document")
+		return fail(errInvalid, "collab: a join must name a document")
 	}
 
 	if s.authorize != nil {
@@ -378,14 +379,14 @@ func (s *Server) session(stream carrier) error {
 	}
 }
 
-// refusal reports why a participant was not allowed in. A status error passes
-// through with the code its author chose; anything else is PermissionDenied,
-// with the reason kept, since that is what refusing a document means.
+// refusal reports why a participant was not allowed in.
+//
+// What Authorize returned is kept rather than replaced, because a caller may
+// have said how it wants to be reported — a gRPC status error passes through
+// with the code its author chose, which the gRPC binding recovers by
+// unwrapping. Anything else is a refusal and nothing more.
 func refusal(err error) error {
-	if _, ok := status.FromError(err); ok {
-		return err
-	}
-	return status.Error(codes.PermissionDenied, err.Error())
+	return &sessionError{kind: errRefused, msg: err.Error(), cause: err}
 }
 
 // received is one result from the stream: a message, or the error that ended it.
@@ -409,11 +410,9 @@ func pump(stream carrier, sub *subscriber) error {
 	}
 	switch {
 	case sub.dropped.Load():
-		return status.Error(codes.ResourceExhausted,
-			"collab: this participant fell too far behind; rejoin to be caught up")
+		return fail(errExhausted, "collab: this participant fell too far behind; rejoin to be caught up")
 	case sub.displaced.Load():
-		return status.Error(codes.Aborted,
-			"collab: another session took this replica identity")
+		return fail(errAborted, "collab: another session took this replica identity")
 	}
 	return nil
 }
@@ -447,8 +446,7 @@ func (d *document) join(j joinMsg) (*subscriber, error) {
 	// characters quietly.
 	site := crdt.SiteID(j.Site)
 	if site == serverSite {
-		return nil, status.Errorf(codes.InvalidArgument,
-			"collab: site %d is the server's own replica", serverSite)
+		return nil, fail(errInvalid, "collab: site %d is the server's own replica", serverSite)
 	}
 	for other := range d.subs {
 		if other.site == site {
@@ -464,7 +462,7 @@ func (d *document) join(j joinMsg) (*subscriber, error) {
 	} else {
 		var held crdt.CompositeVersion
 		if err := held.UnmarshalBinary(have); err != nil {
-			return nil, status.Error(codes.InvalidArgument, "collab: malformed version")
+			return nil, fail(errInvalid, "collab: malformed version")
 		}
 		// These operations came from this document, so they are valid by
 		// construction and cannot fail to encode.
@@ -523,18 +521,17 @@ func (d *document) handle(sub *subscriber, kind byte, msg any) error {
 	case kindOperation:
 		ops, ok := msg.(opsMsg)
 		if !ok {
-			return status.Error(codes.InvalidArgument, "collab: malformed operations")
+			return fail(errInvalid, "collab: malformed operations")
 		}
 		return d.applyOperations(sub, ops.Operations)
 	case kindPresence:
 		p, ok := msg.(presenceMsg)
 		if !ok {
-			return status.Error(codes.InvalidArgument, "collab: malformed presence")
+			return fail(errInvalid, "collab: malformed presence")
 		}
 		return d.applyPresence(sub, p.Update)
 	default:
-		return status.Error(codes.InvalidArgument,
-			"collab: only operations and presence may follow a join")
+		return fail(errInvalid, "collab: only operations and presence may follow a join")
 	}
 }
 
@@ -569,7 +566,7 @@ func (d *document) applyOperations(from *subscriber, raw []byte) error {
 		err = d.doc.Apply(batches...)
 	}
 	if err != nil {
-		return status.Error(codes.InvalidArgument, "collab: unusable operations")
+		return fail(errInvalid, "collab: unusable operations")
 	}
 	// This saves a little for a participant that reconnects and pushes work the
 	// server already had. It is required for two servers that follow each
@@ -591,7 +588,7 @@ func (d *document) applyOperations(from *subscriber, raw []byte) error {
 func (d *document) applyPresence(from *subscriber, raw []byte) error {
 	var update awareness.Update
 	if err := update.UnmarshalBinary(raw); err != nil {
-		return status.Error(codes.InvalidArgument, "collab: malformed presence")
+		return fail(errInvalid, "collab: malformed presence")
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
