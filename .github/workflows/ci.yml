@@ -164,6 +164,18 @@ jobs:
       # through globalThis.collab and nothing else.
       - name: A page and a native participant
         run: go test -v -run TestTheJavaScriptAPIConverges ./...
+      # And the code that only exists in a browser, run in one.
+      #
+      # This lane built for js/wasm and ran nothing under it, so anything
+      # guarded by that tag — the WebSocket a page opens, the data channel two
+      # pages share — was compiled and never executed. Building is not running,
+      # and the difference is where a browser-only path goes wrong.
+      - name: The browser build's own tests
+        run: |
+          GOOS=js GOARCH=wasm go test -v \
+            -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./... | tee js.log
+          grep -q 'two browsers, no server' js.log || {
+            echo "::error::the browser-to-browser session did not run"; exit 1; }
 
   arch-native:
     name: arch ${{ matrix.label }}
