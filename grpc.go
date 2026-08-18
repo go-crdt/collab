@@ -4,9 +4,12 @@ package collab
 
 import (
 	"context"
+	"errors"
 
 	"github.com/go-crdt/collab/collabpb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // GRPC returns a transport that opens sessions on a gRPC connection.
@@ -116,7 +119,41 @@ func GRPCService(s *Server) *GRPCServer { return &GRPCServer{inner: s} }
 // Session is the service method: one bidirectional stream, one participant, one
 // document.
 func (g *GRPCServer) Session(stream collabpb.Collab_SessionServer) error {
-	return g.inner.session(&grpcCarrier{stream: stream})
+	return asStatus(g.inner.session(&grpcCarrier{stream: stream}))
+}
+
+// asStatus says in gRPC's vocabulary what the session said in its own.
+//
+// The session does not know what gRPC is, which is the point: naming an error
+// with grpc/status pulls in the protobuf runtime, and protobuf registers its
+// descriptors in init, so a linker cannot drop it. That cost three and a half
+// megabytes on the WebAssembly build — for the privilege of naming an error.
+//
+// A refusal keeps whatever Authorize returned, so a caller that answered with a
+// status error gets the code it chose. That was documented before this and is
+// documented still; it is recovered by unwrapping rather than by the session
+// carrying a status it has no use for.
+func asStatus(err error) error {
+	var se *sessionError
+	if !errors.As(err, &se) {
+		return err
+	}
+	if se.kind == errRefused {
+		if s, ok := status.FromError(se.cause); ok && se.cause != nil {
+			return s.Err()
+		}
+		return status.Error(codes.PermissionDenied, se.msg)
+	}
+	code := codes.Internal
+	switch se.kind {
+	case errInvalid:
+		code = codes.InvalidArgument
+	case errExhausted:
+		code = codes.ResourceExhausted
+	case errAborted:
+		code = codes.Aborted
+	}
+	return status.Error(code, se.msg)
 }
 
 // A grpcCarrier presents a gRPC stream to the session logic, converting between

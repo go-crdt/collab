@@ -7,9 +7,6 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // Eviction's careful paths are the ones a session only meets when the timing is
@@ -81,8 +78,9 @@ func TestOpeningAnEvictedDocumentGivesUpWithTheCaller(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := s.open(ctx, "doc"); status.Code(err) != codes.Canceled {
-		t.Fatalf("open with a cancelled caller = %v, want Canceled", err)
+	// The context's own error, which every binding already knows how to say.
+	if _, err := s.open(ctx, "doc"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("open with a cancelled caller = %v, want context.Canceled", err)
 	}
 }
 
@@ -158,8 +156,9 @@ func TestJoiningGivesUpWithTheCaller(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, _, err := s.openAndJoin(ctx, joinMsg{Document: "doc", Site: 1})
-	if status.Code(err) != codes.Canceled {
-		t.Fatalf("openAndJoin with a cancelled caller = %v, want Canceled", err)
+	// The context's own error, which every binding already knows how to say.
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("openAndJoin with a cancelled caller = %v, want context.Canceled", err)
 	}
 }
 
@@ -179,8 +178,9 @@ func TestJoiningReportsADocumentThatWillNotOpen(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close(context.Background()) })
 
 	_, _, err := s.openAndJoin(context.Background(), joinMsg{Document: "doc", Site: 1})
-	if status.Code(err) != codes.Internal {
-		t.Fatalf("openAndJoin against a broken store = %v, want Internal", err)
+	var se *sessionError
+	if !errors.As(err, &se) || se.kind != errInternal {
+		t.Fatalf("openAndJoin against a broken store = %v, want an internal failure", err)
 	}
 }
 
@@ -191,7 +191,11 @@ func TestJoiningReportsARefusalAsItIs(t *testing.T) {
 
 	_, _, err := s.openAndJoin(context.Background(),
 		joinMsg{Document: "doc", Site: uint64(serverSite)})
-	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("joining as the server's own replica = %v, want InvalidArgument", err)
+	// The session says what happened in its own words; the binding says it in
+	// gRPC's. This is the session, so it is asked what it says — and the
+	// translation is checked where it happens, in TestTheGRPCBindingNamesEveryRefusal.
+	var se *sessionError
+	if !errors.As(err, &se) || se.kind != errInvalid {
+		t.Fatalf("joining as the server's own replica = %v, want an invalid-argument refusal", err)
 	}
 }

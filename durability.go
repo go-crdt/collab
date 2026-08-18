@@ -1,4 +1,4 @@
-//go:build !js
+//go:build (js && wasm) || !js
 
 package collab
 
@@ -6,8 +6,6 @@ import (
 	"context"
 	"errors"
 	"time"
-
-	"google.golang.org/grpc/status"
 )
 
 // A document was persisted when its last participant left, and otherwise only
@@ -153,7 +151,8 @@ func (s *Server) openAndJoin(ctx context.Context, join joinMsg) (*document, *sub
 		}
 		return doc, sub, nil
 	}
-	return nil, nil, status.FromContextError(ctx.Err()).Err()
+	// The context's own error, which every binding already knows how to say.
+	return nil, nil, ctx.Err()
 }
 
 // leftAt is when the last participant left, which is what eviction measures
