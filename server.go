@@ -536,12 +536,39 @@ func (d *document) applyOperations(from *subscriber, raw []byte) error {
 	// Decoding and merging share one rejection: both mean the same thing to the
 	// participant, and ParsePartOps already guarantees what Apply would check, so
 	// splitting them would leave a branch no input can reach.
+	// What the server knew before, so that operations it already had can be
+	// recognised and not passed on again.
+	//
+	// The test is the version vector and not whether the document looks
+	// different, and the difference between those two is worth writing down
+	// because the wrong one passes most tests. Two participants setting the
+	// same key to the same value concurrently produce two operations; one wins
+	// the tie-break and the other changes nothing anybody can see — but it is
+	// still an operation, it still belongs in the version vector, and a replica
+	// that never hears it cannot reproduce the same snapshot. Not passing it on
+	// leaves the two permanently disagreeing, which is what
+	// TestAFieldOfACommentFlipsOnItsOwn caught when this was written the other
+	// way.
+	//
+	// Advancing the version is exactly "the server learned something", which is
+	// exactly when there is something to tell anybody.
+	before := d.doc.Version()
 	batches, err := crdt.ParsePartOps(raw)
 	if err == nil {
 		err = d.doc.Apply(batches...)
 	}
 	if err != nil {
 		return status.Error(codes.InvalidArgument, "collab: unusable operations")
+	}
+	// This saves a little for a participant that reconnects and pushes work the
+	// server already had. It is required for two servers that follow each
+	// other: an operation from a participant of one reaches the other, is
+	// broadcast there to everything but the link it came in on — which includes
+	// the link back — and returns to where it started. Applying it a second
+	// time advances nothing, and without this it would be passed on again, and
+	// again. Idempotent is not the same as terminating.
+	if d.doc.Version().Equal(before) {
+		return nil
 	}
 	d.dirty = true
 	d.broadcast(from, operationsMessage(raw))
