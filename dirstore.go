@@ -127,7 +127,14 @@ func (s *DirStore) Load(_ context.Context, document string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("collab: reading document %q: %w", document, err)
 	}
-	return raw, nil
+	// Documents written before this store compressed them are passed through,
+	// so a store that has been running keeps working and migrates itself one
+	// save at a time.
+	snapshot, err := unpack(raw)
+	if err != nil {
+		return nil, fmt.Errorf("collab: reading document %q: %w", document, err)
+	}
+	return snapshot, nil
 }
 
 // Save records the snapshot, replacing any previous one.
@@ -141,6 +148,7 @@ func (s *DirStore) Save(_ context.Context, document string, snapshot []byte) err
 	if err != nil {
 		return err
 	}
+	packed := pack(snapshot)
 	tmp, err := createTemp(s.dir, tempPrefix+"*")
 	if err != nil {
 		return fmt.Errorf("collab: writing document %q: %w", document, err)
@@ -149,7 +157,7 @@ func (s *DirStore) Save(_ context.Context, document string, snapshot []byte) err
 	// Anything that goes wrong from here leaves a file nobody asked for.
 	defer func() { _ = removeFile(name) }()
 
-	if _, err := tmp.Write(snapshot); err != nil {
+	if _, err := tmp.Write(packed); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("collab: writing document %q: %w", document, err)
 	}

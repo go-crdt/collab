@@ -257,3 +257,106 @@ func TestADirStoreSaysWhatItCannotDo(t *testing.T) {
 	}
 	_ = store
 }
+
+// A document is compressed on disk, and one written before it was is not.
+//
+// The second half is the one that matters: a store that has been running has
+// files in it that nobody is going to migrate, and they have to keep reading.
+// They do, and they become compressed the next time they are saved — which is
+// checked here rather than assumed, by saving one and watching the bytes on
+// disk change shape while what comes back does not.
+func TestADocumentIsCompressedOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	store, err := collab.NewDirStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+
+	// Something with the repetition a real document has: a column of similar
+	// identities is what compresses, not prose.
+	var snapshot []byte
+	for i := range 4000 {
+		snapshot = append(snapshot, byte(i), byte(i>>8), 0, 0, 'x')
+	}
+
+	if err := store.Save(ctx, "project:doc", snapshot); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Load(ctx, "project:doc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, snapshot) {
+		t.Fatal("a document did not come back as it went in")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one file, found %d", len(entries))
+	}
+	onDisk, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(onDisk) >= len(snapshot) {
+		t.Fatalf("the file is %d bytes for a %d-byte document: it was not compressed",
+			len(onDisk), len(snapshot))
+	}
+	t.Logf("%d bytes on disk for a %d-byte document, %.1f×",
+		len(onDisk), len(snapshot), float64(len(snapshot))/float64(len(onDisk)))
+
+	// A document written by a build that did not compress: the snapshot, as it
+	// is, under the name this store would give it.
+	old := filepath.Join(dir, entries[0].Name())
+	if err := os.WriteFile(old, snapshot, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	back, err := store.Load(ctx, "project:doc")
+	if err != nil {
+		t.Fatalf("a document written before compression does not load: %v", err)
+	}
+	if !bytes.Equal(back, snapshot) {
+		t.Fatal("a document written before compression did not read back as itself")
+	}
+
+	// And saving it again compresses it, with nothing to migrate.
+	if err := store.Save(ctx, "project:doc", snapshot); err != nil {
+		t.Fatal(err)
+	}
+	again, err := os.ReadFile(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again) >= len(snapshot) {
+		t.Fatal("saving an uncompressed document again did not compress it")
+	}
+}
+
+// A file that claims to be compressed and is not must fail rather than be
+// handed back as though it were a document.
+func TestALoadRefusesARuinedCompressedDocument(t *testing.T) {
+	dir := t.TempDir()
+	store, err := collab.NewDirStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	if err := store.Save(ctx, "project:doc", []byte("something to store")); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := os.ReadDir(dir)
+	path := filepath.Join(dir, entries[0].Name())
+	stored, _ := os.ReadFile(path)
+	// Keep the marker, ruin what follows it.
+	ruined := append(append([]byte{}, stored[:5]...), 0xff, 0xff, 0xff, 0xff)
+	if err := os.WriteFile(path, ruined, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load(ctx, "project:doc"); err == nil {
+		t.Fatal("a ruined compressed document loaded")
+	}
+}
