@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/go-crdt/collab/collabpb"
 	"github.com/go-crdt/crdt"
 )
 
@@ -72,7 +71,7 @@ func (s *Server) Follow(ctx context.Context, peer Transport, document string, as
 	// The local replica first, so the link can say what it already has and be
 	// sent only the difference. Over a link between datacentres that is the
 	// difference between a keystroke and a document.
-	local, sub, err := s.openAndJoin(ctx, &collabpb.Join{Document: document, Site: uint64(as)})
+	local, sub, err := s.openAndJoin(ctx, joinMsg{Document: document, Site: uint64(as)})
 	if err != nil {
 		return err
 	}
@@ -124,8 +123,8 @@ func (s *Server) Follow(ctx context.Context, peer Transport, document string, as
 					sent <- nil
 					return
 				}
-				if ops := msg.GetOperations(); ops != nil {
-					if err := conn.Send(kindOperation, opsMsg{Operations: ops.GetOperations()}); err != nil {
+				if msg.kind == kindOperation {
+					if err := conn.Send(msg.kind, msg.msg); err != nil {
 						sent <- err
 						return
 					}

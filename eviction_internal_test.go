@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-crdt/collab/collabpb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -95,13 +94,13 @@ func TestJoiningRetriesAnEviction(t *testing.T) {
 	going, finish := evicting(t, s, "doc")
 
 	// join refuses it outright, which is what openAndJoin acts on.
-	if _, err := going.join(&collabpb.Join{Document: "doc", Site: 1}); !errors.Is(err, errEvicted) {
+	if _, err := going.join(joinMsg{Document: "doc", Site: 1}); !errors.Is(err, errEvicted) {
 		t.Fatalf("joining an evicted document = %v, want errEvicted", err)
 	}
 
 	joined := make(chan *document, 1)
 	go func() {
-		d, sub, err := s.openAndJoin(context.Background(), &collabpb.Join{Document: "doc", Site: 1})
+		d, sub, err := s.openAndJoin(context.Background(), joinMsg{Document: "doc", Site: 1})
 		if err != nil {
 			t.Error(err)
 			return
@@ -128,7 +127,7 @@ func TestASessionEvictedBetweenOpeningAndJoiningAsksAgain(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close(context.Background()) })
 	s.EvictBetweenOpenAndJoin(context.Background(), time.Minute)
 
-	doc, sub, err := s.openAndJoin(context.Background(), &collabpb.Join{Document: "doc", Site: 1})
+	doc, sub, err := s.openAndJoin(context.Background(), joinMsg{Document: "doc", Site: 1})
 	if err != nil {
 		t.Fatalf("openAndJoin: %v", err)
 	}
@@ -158,7 +157,7 @@ func TestJoiningGivesUpWithTheCaller(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _, err := s.openAndJoin(ctx, &collabpb.Join{Document: "doc", Site: 1})
+	_, _, err := s.openAndJoin(ctx, joinMsg{Document: "doc", Site: 1})
 	if status.Code(err) != codes.Canceled {
 		t.Fatalf("openAndJoin with a cancelled caller = %v, want Canceled", err)
 	}
@@ -179,7 +178,7 @@ func TestJoiningReportsADocumentThatWillNotOpen(t *testing.T) {
 	s := NewServer(Config{Store: brokenStore{}})
 	t.Cleanup(func() { _ = s.Close(context.Background()) })
 
-	_, _, err := s.openAndJoin(context.Background(), &collabpb.Join{Document: "doc", Site: 1})
+	_, _, err := s.openAndJoin(context.Background(), joinMsg{Document: "doc", Site: 1})
 	if status.Code(err) != codes.Internal {
 		t.Fatalf("openAndJoin against a broken store = %v, want Internal", err)
 	}
@@ -191,7 +190,7 @@ func TestJoiningReportsARefusalAsItIs(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close(context.Background()) })
 
 	_, _, err := s.openAndJoin(context.Background(),
-		&collabpb.Join{Document: "doc", Site: uint64(serverSite)})
+		joinMsg{Document: "doc", Site: uint64(serverSite)})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("joining as the server's own replica = %v, want InvalidArgument", err)
 	}

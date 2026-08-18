@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/go-crdt/collab/collabpb"
 	"github.com/go-crdt/crdt"
 	"github.com/go-crdt/crdt/awareness"
 	"google.golang.org/grpc/codes"
@@ -95,8 +94,6 @@ type Config struct {
 // Documents stay in memory once opened, so a long-lived server holds every
 // document it has served. Call [Server.Flush] to persist them.
 type Server struct {
-	collabpb.UnimplementedCollabServer
-
 	store     Store
 	backlog   int
 	authorize func(ctx context.Context, document string, site crdt.SiteID) error
@@ -284,7 +281,7 @@ type document struct {
 // A subscriber is one participant's queue of outbound messages.
 type subscriber struct {
 	site      crdt.SiteID
-	out       chan *collabpb.ServerMessage
+	out       chan wireMsg
 	dropped   atomic.Bool
 	displaced atomic.Bool
 	closed    bool // guarded by document.mu
@@ -292,37 +289,42 @@ type subscriber struct {
 
 // Session is the service method: one bidirectional stream, one participant, one
 // document.
-func (s *Server) Session(stream collabpb.Collab_SessionServer) error {
-	return s.session(stream)
-}
-
 // A carrier is what the session logic needs of a transport, and it is all it
 // needs: messages in, messages out, and a context that ends when the connection
 // does. The gRPC stream satisfies it as it stands; so does a WebSocket carrying
 // the framing in wire.go, which is what a browser uses because protobuf costs
 // more than the whole CRDT it would be carrying.
 type carrier interface {
-	Recv() (*collabpb.ClientMessage, error)
-	Send(*collabpb.ServerMessage) error
+	// Recv reads one message from the participant, as a kind and one of the
+	// message types in wire.go.
+	Recv() (kind byte, msg any, err error)
+	// Send writes one message to the participant, the same way.
+	Send(kind byte, msg any) error
 	Context() context.Context
+}
+
+// wireMsg is one message on its way out, held in a participant's queue.
+type wireMsg struct {
+	kind byte
+	msg  any
 }
 
 func (s *Server) session(stream carrier) error {
 	ctx := stream.Context()
-	first, err := stream.Recv()
+	kind, first, err := stream.Recv()
 	if err != nil {
 		return err
 	}
-	join := first.GetJoin()
+	join, ok := first.(joinMsg)
 	switch {
-	case join == nil:
+	case kind != kindJoin || !ok:
 		return status.Error(codes.InvalidArgument, "collab: a session must open with a join")
-	case join.GetDocument() == "":
+	case join.Document == "":
 		return status.Error(codes.InvalidArgument, "collab: a join must name a document")
 	}
 
 	if s.authorize != nil {
-		if err := s.authorize(ctx, join.GetDocument(), crdt.SiteID(join.GetSite())); err != nil {
+		if err := s.authorize(ctx, join.Document, crdt.SiteID(join.Site)); err != nil {
 			return refusal(err)
 		}
 	}
@@ -349,9 +351,9 @@ func (s *Server) session(stream carrier) error {
 	received := make(chan received)
 	go func() {
 		for {
-			msg, err := stream.Recv()
+			kind, msg, err := stream.Recv()
 			select {
-			case received <- receivedMessage(msg, err):
+			case received <- receivedMessage(kind, msg, err):
 			case <-done:
 				return
 			}
@@ -369,7 +371,7 @@ func (s *Server) session(stream carrier) error {
 			if in.err != nil {
 				return in.err
 			}
-			if err := doc.handle(sub, in.msg); err != nil {
+			if err := doc.handle(sub, in.kind, in.msg); err != nil {
 				return err
 			}
 		}
@@ -388,19 +390,20 @@ func refusal(err error) error {
 
 // received is one result from the stream: a message, or the error that ended it.
 type received struct {
-	msg *collabpb.ClientMessage
-	err error
+	kind byte
+	msg  any
+	err  error
 }
 
-func receivedMessage(msg *collabpb.ClientMessage, err error) received {
-	return received{msg: msg, err: err}
+func receivedMessage(kind byte, msg any, err error) received {
+	return received{kind: kind, msg: msg, err: err}
 }
 
 // pump is the only goroutine that writes to a stream, because grpc-go allows
 // exactly one.
 func pump(stream carrier, sub *subscriber) error {
 	for msg := range sub.out {
-		if err := stream.Send(msg); err != nil {
+		if err := stream.Send(msg.kind, msg.msg); err != nil {
 			return err
 		}
 	}
@@ -423,7 +426,7 @@ func pump(stream carrier, sub *subscriber) error {
 // participant: [Server.session] retries.
 var errEvicted = errors.New("collab: the document was evicted; ask again")
 
-func (d *document) join(j *collabpb.Join) (*subscriber, error) {
+func (d *document) join(j joinMsg) (*subscriber, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.evicted {
@@ -442,7 +445,7 @@ func (d *document) join(j *collabpb.Join) (*subscriber, error) {
 	// until a TCP timeout it cannot see. Displacing also makes a genuine clash
 	// loud — two tabs would take turns evicting each other — rather than losing
 	// characters quietly.
-	site := crdt.SiteID(j.GetSite())
+	site := crdt.SiteID(j.Site)
 	if site == serverSite {
 		return nil, status.Errorf(codes.InvalidArgument,
 			"collab: site %d is the server's own replica", serverSite)
@@ -455,8 +458,8 @@ func (d *document) join(j *collabpb.Join) (*subscriber, error) {
 		}
 	}
 
-	welcome := &collabpb.Welcome{}
-	if have := j.GetHave(); len(have) == 0 {
+	welcome := welcomeMsg{}
+	if have := j.Have; len(have) == 0 {
 		welcome.Snapshot = d.doc.Snapshot()
 	} else {
 		var held crdt.CompositeVersion
@@ -477,10 +480,10 @@ func (d *document) join(j *collabpb.Join) (*subscriber, error) {
 	welcome.Version, _ = d.doc.Version().MarshalBinary()
 
 	sub := &subscriber{
-		site: crdt.SiteID(j.GetSite()),
-		out:  make(chan *collabpb.ServerMessage, d.backlog+1),
+		site: crdt.SiteID(j.Site),
+		out:  make(chan wireMsg, d.backlog+1),
 	}
-	sub.out <- &collabpb.ServerMessage{Body: &collabpb.ServerMessage_Welcome{Welcome: welcome}}
+	sub.out <- wireMsg{kind: kindWelcome, msg: welcome}
 	d.subs[sub] = struct{}{}
 	// Somebody is here, so this document is not idle.
 	d.emptySince = time.Time{}
@@ -515,12 +518,20 @@ func (d *document) leave(ctx context.Context, sub *subscriber) {
 }
 
 // handle applies one message from a participant.
-func (d *document) handle(sub *subscriber, msg *collabpb.ClientMessage) error {
-	switch body := msg.GetBody().(type) {
-	case *collabpb.ClientMessage_Operations:
-		return d.applyOperations(sub, body.Operations.GetOperations())
-	case *collabpb.ClientMessage_Presence:
-		return d.applyPresence(sub, body.Presence.GetUpdate())
+func (d *document) handle(sub *subscriber, kind byte, msg any) error {
+	switch kind {
+	case kindOperation:
+		ops, ok := msg.(opsMsg)
+		if !ok {
+			return status.Error(codes.InvalidArgument, "collab: malformed operations")
+		}
+		return d.applyOperations(sub, ops.Operations)
+	case kindPresence:
+		p, ok := msg.(presenceMsg)
+		if !ok {
+			return status.Error(codes.InvalidArgument, "collab: malformed presence")
+		}
+		return d.applyPresence(sub, p.Update)
 	default:
 		return status.Error(codes.InvalidArgument,
 			"collab: only operations and presence may follow a join")
@@ -596,7 +607,7 @@ func (d *document) applyPresence(from *subscriber, raw []byte) error {
 //
 // A queue that is full means a participant is not reading; it is disconnected
 // rather than allowed to hold up everyone else, and rejoins to be caught up.
-func (d *document) broadcast(from *subscriber, msg *collabpb.ServerMessage) {
+func (d *document) broadcast(from *subscriber, msg wireMsg) {
 	for sub := range d.subs {
 		if sub == from || sub.closed {
 			continue
@@ -650,16 +661,10 @@ func (d *document) persist(ctx context.Context) error {
 	return nil
 }
 
-func operationsMessage(raw []byte) *collabpb.ServerMessage {
-	return &collabpb.ServerMessage{
-		Body: &collabpb.ServerMessage_Operations{
-			Operations: &collabpb.Operations{Operations: raw},
-		},
-	}
+func operationsMessage(raw []byte) wireMsg {
+	return wireMsg{kind: kindOperation, msg: opsMsg{Operations: raw}}
 }
 
-func presenceMessage(raw []byte) *collabpb.ServerMessage {
-	return &collabpb.ServerMessage{
-		Body: &collabpb.ServerMessage_Presence{Presence: &collabpb.Presence{Update: raw}},
-	}
+func presenceMessage(raw []byte) wireMsg {
+	return wireMsg{kind: kindPresence, msg: presenceMsg{Update: raw}}
 }

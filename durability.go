@@ -7,7 +7,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/go-crdt/collab/collabpb"
 	"google.golang.org/grpc/status"
 )
 
@@ -130,9 +129,9 @@ func (s *Server) evictIdle(ctx context.Context, idle time.Duration) {
 // Once is enough. Eviction takes a document nobody is in, and a session that
 // has joined one is in it — so the replica handed back by the second attempt
 // cannot go idle while this session is joining it.
-func (s *Server) openAndJoin(ctx context.Context, join *collabpb.Join) (*document, *subscriber, error) {
+func (s *Server) openAndJoin(ctx context.Context, join joinMsg) (*document, *subscriber, error) {
 	for ctx.Err() == nil {
-		doc, err := s.open(ctx, join.GetDocument())
+		doc, err := s.open(ctx, join.Document)
 		if err != nil {
 			return nil, nil, err
 		}

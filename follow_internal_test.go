@@ -279,3 +279,54 @@ func TestFollowEndsPromptlyWhenItCannotSendOnwards(t *testing.T) {
 		t.Fatalf("Follow took %v to notice a failed send", took)
 	}
 }
+
+// A link the document lets go of ends, rather than waiting on a queue nobody
+// will fill again.
+//
+// The document drops a participant that stops reading, and a link is a
+// participant: its queue is closed and it has to notice. Without that it would
+// sit on a closed channel while the peer, which has done nothing wrong, waits
+// for edits that will never arrive.
+func TestFollowEndsWhenTheDocumentDropsIt(t *testing.T) {
+	peer := &brokenPeer{firstMsg: welcomeWith(welcomeMsg{})}
+
+	s := NewServer(Config{Store: NewMemoryStore()})
+	t.Cleanup(func() { _ = s.Close(context.Background()) })
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.Follow(ctx, peer, "doc", 42) }()
+
+	// Wait for the link to be in the document, then drop it as the document
+	// would drop a participant that had stopped reading.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		doc, err := s.open(t.Context(), "doc")
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc.mu.Lock()
+		n := len(doc.subs)
+		if n > 0 {
+			for sub := range doc.subs {
+				delete(doc.subs, sub)
+				doc.close(sub)
+			}
+		}
+		doc.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the link never joined the document")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the link did not end when the document dropped it")
+	}
+}

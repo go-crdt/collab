@@ -72,7 +72,7 @@ func serveOverWebSocket(t *testing.T) string {
 		},
 	})
 	gs := grpc.NewServer(grpc.Creds(wstransport.ServerCredentials()))
-	collabpb.RegisterCollabServer(gs, srv)
+	collabpb.RegisterCollabServer(gs, collab.GRPCService(srv))
 	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(func() {
 		gs.Stop()

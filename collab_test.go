@@ -56,7 +56,7 @@ func serve(t *testing.T, cfg collab.Config) (*collab.Server, *grpc.ClientConn) {
 	srv := collab.NewServer(cfg)
 	lis := bufconn.Listen(1 << 20)
 	gs := grpc.NewServer()
-	collabpb.RegisterCollabServer(gs, srv)
+	collabpb.RegisterCollabServer(gs, collab.GRPCService(srv))
 	go func() { _ = gs.Serve(lis) }()
 
 	conn, err := grpc.NewClient("passthrough:///collab",
