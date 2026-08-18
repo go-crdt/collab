@@ -621,3 +621,104 @@ func TestEditingInTheUnitsABrowserCounts(t *testing.T) {
 		t.Fatalf("LenUTF16() = %d, want %d", got, want)
 	}
 }
+
+// Operations a server already has are not passed on again.
+//
+// A participant that reconnects pushes what it did while it was away, and is
+// allowed to push work the server already has. Sending that back out to
+// everybody costs the fan-out for nothing.
+//
+// It matters more than that, and the reason is why this test exists. Two
+// servers that follow each other each hold a link to the other, and a link is
+// a participant. An operation from a participant of one reaches the other, is
+// broadcast there to everything but the link it arrived on — which includes
+// the link back — and returns to where it came from. Applying it a second time
+// changes nothing, because that is what a CRDT is; passing it on a second time
+// starts a loop that never stops. Idempotent is not the same as terminating.
+func TestAServerDoesNotEchoOperationsItAlreadyHas(t *testing.T) {
+	_, conn := serve(t, collab.Config{Store: collab.NewMemoryStore()})
+
+	// A writer over the raw protocol, so the same operations can be sent twice.
+	writer, err := collabpb.NewCollabClient(conn).Session(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Send(joinMessage("doc", 1, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Recv(); err != nil { // the welcome
+		t.Fatal(err)
+	}
+
+	// One insert, built here so the same bytes can be sent twice. A replica of
+	// its own, so what it produces is what a participant would have produced.
+	made := crdt.NewComposite(7)
+	text, err := made.Text("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops, err := text.Insert(0, "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := crdt.AppendPartOps(nil, []crdt.PartOps{{
+		Part: crdt.Part{Kind: crdt.PartText, Name: "body"}, Text: ops,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	watcher, err := collabpb.NewCollabClient(conn).Session(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := watcher.Send(joinMessage("doc", 2, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := watcher.Recv(); err != nil { // the welcome
+		t.Fatal(err)
+	}
+
+	heard := make(chan *collabpb.ServerMessage, 8)
+	go func() {
+		for {
+			msg, err := watcher.Recv()
+			if err != nil {
+				close(heard)
+				return
+			}
+			heard <- msg
+		}
+	}()
+
+	send := func() {
+		if err := writer.Send(&collabpb.ClientMessage{
+			Body: &collabpb.ClientMessage_Operations{
+				Operations: &collabpb.Operations{Operations: raw},
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	send()
+	select {
+	case msg, ok := <-heard:
+		if !ok || msg.GetOperations() == nil {
+			t.Fatal("the watcher was not told about the first send")
+		}
+	case <-time.After(settle):
+		t.Fatal("the watcher never heard the first send")
+	}
+
+	// The same operations again. The server has them; nobody should hear.
+	send()
+	select {
+	case msg, ok := <-heard:
+		if ok {
+			t.Fatalf("the watcher was told again: %v", msg.Body)
+		}
+		t.Fatal("the watcher's session ended")
+	case <-time.After(2 * time.Second):
+	}
+}
