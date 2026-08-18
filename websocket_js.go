@@ -27,6 +27,8 @@ func (t *wsTransport) open(ctx context.Context) (carrierConn, error) {
 	}
 	c := &jsConn{
 		ws:     ctor.New(t.url),
+		decode: decodeServer,
+		encode: encodeClient,
 		ready:  make(chan struct{}),
 		closed: make(chan struct{}),
 		woken:  make(chan struct{}, 1),
@@ -86,7 +88,15 @@ func (t *wsTransport) open(ctx context.Context) (carrierConn, error) {
 // handed over on a channel: a callback that blocked would block the page, which
 // is not a thing a page may do.
 type jsConn struct {
-	ws     js.Value
+	ws js.Value
+	// decode turns a received frame into a kind and a message. A participant
+	// reads what a server sends and a server reads what a participant sends,
+	// and the two framings are not the same — so the direction is a field
+	// rather than a second copy of everything below it.
+	decode func([]byte) (byte, any, error)
+	// encode is its opposite.
+	encode func(byte, any) ([]byte, error)
+
 	ready  chan struct{}
 	closed chan struct{}
 	woken  chan struct{}
@@ -151,7 +161,7 @@ func (c *jsConn) wake() {
 }
 
 func (c *jsConn) Send(kind byte, msg any) error {
-	raw, err := encodeClient(kind, msg)
+	raw, err := c.encode(kind, msg)
 	if err != nil {
 		return err
 	}
@@ -174,7 +184,7 @@ func (c *jsConn) Recv() (byte, any, error) {
 			raw := c.queue[0]
 			c.queue = c.queue[1:]
 			c.mu.Unlock()
-			return decodeServer(raw)
+			return c.decode(raw)
 		}
 		err := c.err
 		c.mu.Unlock()
