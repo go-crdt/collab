@@ -294,6 +294,49 @@ func TestICEConfiguration(t *testing.T) {
 	}
 }
 
+// A credentialed TURN relay is given through ICEServersAuth, appended after the
+// plain URL list, and carries username/credential — which a bare URL cannot. An
+// entry with no credentials sends neither field rather than empty strings.
+func TestICEConfigurationWithCredentials(t *testing.T) {
+	config := iceConfiguration(PeerConfig{
+		ICEServers: []string{"stun:stun.l.google.com:19302"},
+		ICEServersAuth: []ICEServerAuth{
+			{URLs: []string{"turn:turn.eu.example:3478", "turns:turn.eu.example:5349"}, Username: "u", Credential: "secret"},
+			{URLs: []string{"stun:stun.eu.example:3478"}}, // no credentials
+		},
+	})
+	servers := config.Get("iceServers")
+	if servers.Length() != 3 {
+		t.Fatalf("one URL + two auth servers should make three, got %d", servers.Length())
+	}
+	// The plain STUN URL comes first, as a single string.
+	if got := servers.Index(0).Get("urls").String(); got != "stun:stun.l.google.com:19302" {
+		t.Fatalf("first server urls = %q", got)
+	}
+	// The credentialed TURN relay: an array of URLs plus username + credential.
+	turn := servers.Index(1)
+	if n := turn.Get("urls").Length(); n != 2 {
+		t.Fatalf("turn relay should carry two urls, got %d", n)
+	}
+	if got := turn.Get("urls").Index(0).String(); got != "turn:turn.eu.example:3478" {
+		t.Fatalf("turn first url = %q", got)
+	}
+	if got := turn.Get("username").String(); got != "u" {
+		t.Fatalf("turn username = %q", got)
+	}
+	if got := turn.Get("credential").String(); got != "secret" {
+		t.Fatalf("turn credential = %q", got)
+	}
+	// The credential-free auth entry sets neither username nor credential.
+	bare := servers.Index(2)
+	if !bare.Get("username").IsUndefined() || !bare.Get("credential").IsUndefined() {
+		t.Fatalf("a credential-free auth entry must not set username/credential")
+	}
+	if got := bare.Get("urls").Index(0).String(); got != "stun:stun.eu.example:3478" {
+		t.Fatalf("bare auth url = %q", got)
+	}
+}
+
 // Without an RTCPeerConnection there is nothing to build on, and a page is told
 // so before it offers to connect rather than after.
 func TestNewPeerWithoutWebRTC(t *testing.T) {

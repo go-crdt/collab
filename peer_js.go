@@ -61,6 +61,21 @@ import (
 // address that both can reach.
 type PeerConfig struct {
 	ICEServers []string
+	// ICEServersAuth adds STUN/TURN servers that carry long-term credentials —
+	// what a TURN relay needs to authenticate and what the plain ICEServers URL
+	// list cannot express. Both lists are used together, ICEServers first.
+	ICEServersAuth []ICEServerAuth
+}
+
+// ICEServerAuth is one STUN/TURN server with long-term credentials. URLs holds
+// one or more server URLs that share the same Username and Credential — the form
+// a TURN relay needs. It is the credentialed counterpart of a bare ICEServers
+// URL, mirroring one { urls, username, credential } entry of an
+// RTCPeerConnection's iceServers.
+type ICEServerAuth struct {
+	URLs       []string
+	Username   string
+	Credential string
 }
 
 // A Peer is one browser's side of a WebRTC connection, from before a channel
@@ -385,17 +400,35 @@ func describe(s signal) js.Value {
 	return d
 }
 
-// iceConfiguration builds the RTCPeerConnection configuration. An empty list
-// leaves iceServers unset, which is a working configuration on one network.
+// iceConfiguration builds the RTCPeerConnection configuration. The plain URL
+// list and the credentialed servers are appended in that order; when neither is
+// given iceServers is left unset, which is a working configuration on one
+// network. A credentialed entry sets "username"/"credential" only when non-empty
+// so a bare STUN URL given through ICEServersAuth is not sent empty strings.
 func iceConfiguration(cfg PeerConfig) js.Value {
 	config := js.Global().Get("Object").New()
-	if len(cfg.ICEServers) > 0 {
-		servers := js.Global().Get("Array").New()
-		for _, url := range cfg.ICEServers {
-			server := js.Global().Get("Object").New()
-			server.Set("urls", url)
-			servers.Call("push", server)
+	servers := js.Global().Get("Array").New()
+	for _, url := range cfg.ICEServers {
+		server := js.Global().Get("Object").New()
+		server.Set("urls", url)
+		servers.Call("push", server)
+	}
+	for _, s := range cfg.ICEServersAuth {
+		server := js.Global().Get("Object").New()
+		urls := js.Global().Get("Array").New()
+		for _, u := range s.URLs {
+			urls.Call("push", u)
 		}
+		server.Set("urls", urls)
+		if s.Username != "" {
+			server.Set("username", s.Username)
+		}
+		if s.Credential != "" {
+			server.Set("credential", s.Credential)
+		}
+		servers.Call("push", server)
+	}
+	if servers.Length() > 0 {
 		config.Set("iceServers", servers)
 	}
 	return config
