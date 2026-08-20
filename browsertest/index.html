@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>collab WebRTC peer proof</title>
+  </head>
+  <body>
+    <!-- The Go toolchain's own loader, copied beside the wasm by the test. -->
+    <script src="wasm_exec.js"></script>
+    <script>
+      (async () => {
+        try {
+          const go = new Go();
+          const result = await WebAssembly.instantiateStreaming(
+            fetch("client.wasm"),
+            go.importObject,
+          );
+          // Resolves when the wasm main() returns, by which point it has left
+          // its verdict on globalThis.__result.
+          await go.run(result.instance);
+        } catch (err) {
+          console.log("DONE page failed to run the wasm: " + err);
+          globalThis.__result = { ok: false, detail: "wasm did not run: " + err };
+        }
+      })();
+    </script>
+  </body>
+</html>

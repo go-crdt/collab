@@ -35,6 +35,11 @@ import (
 // code, a link — and a library that chose one would be choosing for everybody.
 // This takes a data channel that is already open.
 //
+// Opening one is the step before, and [Peer] is a thin cover over the browser's
+// own RTCPeerConnection for it: a non-trickle offer or answer, one blob to paste
+// each way, and the open channel handed back. It stops short of carrying the
+// blob between the two, which is the product decision above.
+//
 // # Which side is the server
 //
 // One of them holds the document and answers the other, which is what a Server
