@@ -217,6 +217,34 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+      # This has not hung here. It hung in go-crdt/crdt, on the same runner
+      # image and the same one-line install, for the better part of an hour and
+      # more than once — and bounding it is what identified the culprit: three
+      # attempts of ten minutes each produced not one line of output from
+      # apt-get update, while the install itself was never reached. The cure is
+      # copied rather than waited for.
+      #
+      # The runner image already ships apt's package lists, so the install
+      # usually needs no refresh at all. It is tried on the lists that are there
+      # first, and they are only refreshed if that was not enough. apt is also
+      # told to give up on a stuck mirror rather than sit on it, which is what
+      # made the outer timeout the only thing stopping it.
+      - name: Install qemu-user-static
+        run: |
+          apt=(-y -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          if timeout 240 sudo apt-get install "${apt[@]}" qemu-user-static; then
+            exit 0
+          fi
+          for attempt in 1 2; do
+            echo "::warning::the runner's package lists were not enough; refreshing them (attempt $attempt)"
+            timeout 240 sudo apt-get update "${apt[@]}" || true
+            sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
+            sudo dpkg --configure -a || true
+            if timeout 240 sudo apt-get install "${apt[@]}" qemu-user-static; then
+              exit 0
+            fi
+          done
+          echo "::error::qemu-user-static could not be installed"
+          exit 1
       - name: Test under qemu (${{ matrix.goarch }})
         run: GOARCH=${{ matrix.goarch }} go test -exec=${{ matrix.qemu }} ./...
