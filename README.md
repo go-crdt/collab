@@ -230,6 +230,29 @@ It is a module of its own, so importing `collab` does not drag a database driver
 into anyone's build. Its tests run against a real PostgreSQL — CI fails the job
 if one is missing rather than skipping it.
 
+[`collab/gitstore`](gitstore) keeps documents in a git repository, so a document
+can be versioned and released the way everything else is. One commit holds both
+the state, which carries identities and authorship and the comments anchored to
+characters, and the rendered text, which is what makes the repository readable
+by a person. A release is a tag on a commit that already exists. It is also a
+federation channel: two servers sharing a repository diverge, git reports a
+conflict on the state file, and `gitstore.Merge` resolves it without anybody
+having to choose a side.
+
+`MultiStore` writes to several stores at once and reads from all of them:
+
+```go
+srv := collab.NewServer(collab.Config{
+    Store: collab.NewMultiStore(database, repository),
+})
+```
+
+Reading merges rather than picking, because a save that failed halfway leaves
+the stores holding different documents and taking the first would drop whatever
+only the second had — `MergeSnapshots` is what makes that free. Adding a store
+to a running server therefore backfills it. A store that cannot be read fails
+the load rather than serving a document quietly missing a paragraph.
+
 ## Status
 
 Version 0.1. **100% statement coverage**, race-clean, six-arch CI, and the
