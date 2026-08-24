@@ -1,6 +1,7 @@
 package gitstore
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io/fs"
@@ -880,4 +881,31 @@ func TestWhatAMergeRefuses(t *testing.T) {
 // something in the way.
 func mkdirIn(s *Store, name string, perm os.FileMode) error {
 	return os.MkdirAll(filepath.Join(s.repo.root(), name), perm)
+}
+
+// The move to collab.MergeSnapshots changed one thing about Merge, and a
+// behaviour that changed is a behaviour worth pinning: an empty side used to be
+// an error and is now how a store says it has never held the document.
+func TestMergingWithASideThatWasNeverHeld(t *testing.T) {
+	held := paper(t, 1, "one").Snapshot()
+
+	for _, c := range []struct {
+		name         string
+		ours, theirs []byte
+		want         []byte
+	}{
+		{"they have never held it", held, nil, held},
+		{"we have never held it", nil, held, held},
+		{"neither has", nil, nil, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := Merge(c.ours, c.theirs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, c.want) {
+				t.Fatalf("got %d bytes, want %d", len(got), len(c.want))
+			}
+		})
+	}
 }
