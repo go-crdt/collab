@@ -137,6 +137,58 @@ jobs:
           awk -v t="$cov" 'BEGIN { exit !(t+0 >= 100.0) }' || {
             echo "::error::coverage ${cov}% < 100%"; exit 1; }
 
+
+  # The git store keeps documents in a git repository. Nothing here needs a
+  # server: git is a filesystem format, so the tests build real repositories in
+  # temporary directories and read them back.
+  #
+  # The coverage gate is SPLIT, and deliberately so. gitstore.go is the logic —
+  # what a document is, where it goes, how a release is a tag on a commit that
+  # already exists — and it is held to the org's 100%. gogit.go is the adapter,
+  # a wrapper per call whose uncovered lines are `if err != nil { wrap }` around
+  # go-git; reaching those THROUGH go-git means corrupting a repository in the
+  # particular way that displeases one version of one library, which tests the
+  # dependency and not this project. They are reached through the repository
+  # interface instead, by a test that says "staging fails" and means it — so
+  # the adapter's number is REPORTED here, never gated, and lowering the gate to
+  # cover it would be the one thing this split exists to avoid.
+  git-store:
+    name: git store
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gitstore
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: Test + 100% coverage gate on the logic
+        run: |
+          go test -coverpkg=github.com/go-crdt/collab/gitstore -coverprofile=cover.out ./...
+          go tool cover -func=cover.out | tail -n 40
+          # Statement counts live in the profile itself: each line is
+          #   file.go:from,to numberOfStatements timesExecuted
+          # so a per-file percentage is a sum over the lines naming that file.
+          pct() {
+            awk -v want="$1" '
+              $1 ~ want {
+                n = split($0, a, " "); stmts = a[n-1]; count = a[n]
+                total += stmts; if (count + 0 > 0) covered += stmts
+              }
+              END { if (total == 0) print "0.0"; else printf "%.1f", covered * 100 / total }
+            ' cover.out
+          }
+          logic=$(pct 'gitstore/gitstore[.]go:')
+          adapter=$(pct 'gitstore/gogit[.]go:')
+          echo "logic (gitstore.go):  ${logic}%"
+          echo "adapter (gogit.go):   ${adapter}%  — reported, not gated"
+          # A file that matched nothing would report 0.0 and fail, so a rename
+          # cannot silently empty this gate.
+          awk -v t="$logic" 'BEGIN { exit !(t+0 >= 100.0) }' || {
+            echo "::error::the logic is at ${logic}% and the gate is 100%"; exit 1; }
   # The point of the whole design is that a browser runs the same merge logic as
   # the server. This job proves it: two participants compiled to WebAssembly and
   # run by Node, editing concurrently with a native one through a real WebSocket,
