@@ -695,3 +695,177 @@ func TestTheRepositoryGoingAway(t *testing.T) {
 		t.Fatal("a repository that is gone listed its documents")
 	}
 }
+
+// Two instances sharing a repository, which is what federation over a git
+// remote would be.
+//
+// They diverge, because working separately is what that means. Git then reports
+// a conflict on the state file, and that conflict is the one in this design
+// that never needs a person.
+func TestTwoInstancesSharingARepository(t *testing.T) {
+	// Paris and Lyon each hold the document and each edit it, having agreed on
+	// an opening line and then heard nothing from each other.
+	opening := crdt.NewComposite(crdt.DeriveSiteID([]byte("ada@paris.ac.example")))
+	body, err := opening.Text("file:paper.tex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := body.Insert(0, "On rivers."); err != nil {
+		t.Fatal(err)
+	}
+	shared := opening.Snapshot()
+
+	paris, err := crdt.LoadComposite(crdt.DeriveSiteID([]byte("ada@paris.ac.example")), shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lyon, err := crdt.LoadComposite(crdt.DeriveSiteID([]byte("grace@lyon.ac.example")), shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parisBody, _ := paris.Text("file:paper.tex")
+	lyonBody, _ := lyon.Text("file:paper.tex")
+	if _, err := parisBody.Insert(parisBody.Len(), " They run downhill."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lyonBody.Insert(0, "PS. "); err != nil {
+		t.Fatal(err)
+	}
+
+	// Whichever side resolves the conflict, both reach the same commit — which
+	// is what a merge driver has to be true of, or the two instances have
+	// merely disagreed somewhere new.
+	oneWay, err := Merge(paris.Snapshot(), lyon.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherWay, err := Merge(lyon.Snapshot(), paris.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(oneWay) != string(otherWay) {
+		t.Fatalf("the two sides resolved the same conflict differently: %d bytes and %d",
+			len(oneWay), len(otherWay))
+	}
+
+	// And it holds what both wrote.
+	merged, err := crdt.LoadComposite(1, oneWay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _ := merged.Text("file:paper.tex")
+	if got := text.String(); got != "PS. On rivers. They run downhill." {
+		t.Fatalf("the merge reads %q", got)
+	}
+
+	// Merging again changes nothing, so a pull that finds nothing new commits
+	// nothing.
+	again, err := Merge(oneWay, otherWay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(again) != string(oneWay) {
+		t.Fatal("merging the same two snapshots twice gave two answers")
+	}
+}
+
+// Reconcile is what a pull does with the other instance's state, and the text
+// is written again rather than merged — so a conflict marker never reaches a
+// document.
+func TestReconcileRegeneratesTheTextRatherThanMergingIt(t *testing.T) {
+	ctx := t.Context()
+	s := store(t)
+
+	shared := paper(t, 1, "On rivers.")
+	if err := s.Save(ctx, "d", shared.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+
+	// The other instance did something else to the same sentence.
+	theirs, err := crdt.LoadComposite(2, shared.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirBody, _ := theirs.Text("file:paper.tex")
+	if _, err := theirBody.Insert(0, "PS. "); err != nil {
+		t.Fatal(err)
+	}
+
+	// And this one carried on too, so both sides moved.
+	ourBody, _ := shared.Text("file:paper.tex")
+	if _, err := ourBody.Insert(ourBody.Len(), " They run downhill."); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(ctx, "d", shared.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Reconcile(ctx, "d", theirs.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+
+	files := gitShow(t, s, "HEAD")
+	for name, content := range files {
+		if !strings.HasSuffix(name, "paper.tex") {
+			continue
+		}
+		if strings.Contains(content, "<<<<<<<") || strings.Contains(content, ">>>>>>>") {
+			t.Fatalf("a conflict marker reached the document: %q", content)
+		}
+		if content != "PS. On rivers. They run downhill." {
+			t.Fatalf("the reconciled text is %q", content)
+		}
+		return
+	}
+	t.Fatalf("no paper.tex in %v", keys(files))
+}
+
+// A document this instance has never seen is simply taken.
+func TestReconcilingSomethingThisInstanceDoesNotHave(t *testing.T) {
+	ctx := t.Context()
+	s := store(t)
+	theirs := paper(t, 2, "written elsewhere")
+	if err := s.Reconcile(ctx, "new-here", theirs.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := s.Load(ctx, "new-here")
+	if err != nil || raw == nil {
+		t.Fatalf("Load = %d bytes, %v", len(raw), err)
+	}
+	back, err := crdt.LoadComposite(1, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _ := back.Text("file:paper.tex")
+	if text.String() != "written elsewhere" {
+		t.Fatalf("it reads %q", text.String())
+	}
+}
+
+// What a merge refuses: bytes that are not a snapshot, on either side, and a
+// snapshot promising operations it does not carry.
+func TestWhatAMergeRefuses(t *testing.T) {
+	ctx := t.Context()
+	good := paper(t, 1, "one").Snapshot()
+	if _, err := Merge([]byte("not a snapshot"), good); err == nil {
+		t.Fatal("our side was not a snapshot and merged anyway")
+	}
+	if _, err := Merge(good, []byte("not a snapshot")); err == nil {
+		t.Fatal("their side was not a snapshot and merged anyway")
+	}
+	s := store(t)
+	if err := s.Save(ctx, "d", good); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reconcile(ctx, "d", []byte("not a snapshot")); err == nil {
+		t.Fatal("a pull of nonsense was committed")
+	}
+	if err := s.Reconcile(ctx, "", good); err != ErrNoDocument {
+		t.Fatalf("Reconcile with no document = %v", err)
+	}
+	// What is stored is untouched by any of that.
+	raw, err := s.Load(ctx, "d")
+	if err != nil || string(raw) != string(good) {
+		t.Fatalf("the stored document changed: %d bytes, %v", len(raw), err)
+	}
+}

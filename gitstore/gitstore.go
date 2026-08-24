@@ -499,3 +499,67 @@ func (s *Store) Documents() ([]string, error) {
 
 // Store is a collab.Store, and this is where that is checked.
 var _ collab.Store = (*Store)(nil)
+
+// Merge combines two snapshots of one document into one that holds everything
+// both hold.
+//
+// It is what makes a git repository a channel between instances rather than
+// only a record. Two servers sharing a repository will diverge — that is what
+// working separately means — and git will then report a conflict on the state
+// file, which is the one conflict in this design that never needs a person: a
+// snapshot is a set of operations, and the merge of two sets of operations is
+// what this package does for a living.
+//
+// The rendered text is not merged and must not be. It is derived, so whichever
+// side of a conflict is taken is wrong: it is written again from the merged
+// state, and a conflict marker never reaches a document.
+//
+// Merging is symmetric to the byte — Merge(a, b) and Merge(b, a) encode
+// identically — because the snapshot encoding is canonical and both hold the
+// same operations. That is what a merge driver needs: two instances resolving
+// the same conflict independently must reach the same commit, or they have
+// merely disagreed somewhere new.
+func Merge(ours, theirs []byte) ([]byte, error) {
+	// The site is never used to mint anything: nothing here writes an
+	// operation of its own, it only carries operations that already exist.
+	mine, err := crdt.LoadComposite(1, ours)
+	if err != nil {
+		return nil, fmt.Errorf("gitstore: reading our side: %w", err)
+	}
+	yours, err := crdt.LoadComposite(1, theirs)
+	if err != nil {
+		return nil, fmt.Errorf("gitstore: reading their side: %w", err)
+	}
+	if err := mine.Apply(yours.OpsSince(mine.Version())...); err != nil {
+		return nil, fmt.Errorf("gitstore: merging: %w", err)
+	}
+	if n := mine.Pending(); n != 0 {
+		// Their snapshot promised operations it did not carry, which is not a
+		// snapshot this package writes.
+		return nil, fmt.Errorf("gitstore: merging: %d operations are waiting for ones "+
+			"their snapshot did not carry", n)
+	}
+	return mine.Snapshot(), nil
+}
+
+// Reconcile merges another instance's snapshot of a document into this one's
+// and commits the result, text and all.
+//
+// It is the operation a pull performs after git has said the state file
+// conflicts: not "take one side", which would throw away whatever the other
+// instance did, but "hold both", which is the only answer that loses nothing.
+func (s *Store) Reconcile(ctx context.Context, document string, theirs []byte) error {
+	ours, err := s.Load(ctx, document)
+	if err != nil {
+		return err
+	}
+	if ours == nil {
+		// Nothing here yet: theirs is the document.
+		return s.Save(ctx, document, theirs)
+	}
+	merged, err := Merge(ours, theirs)
+	if err != nil {
+		return fmt.Errorf("gitstore: reconciling %q: %w", document, err)
+	}
+	return s.Save(ctx, document, merged)
+}
