@@ -57,15 +57,49 @@ import (
 // It does not reconnect. A link that drops stays dropped, and the error is
 // returned to whoever called Follow, because the policy for coming back —
 // immediately, with a backoff, never — belongs to the operator and not to a
-// library. It does not discover peers. It does not replicate presence: cursors
-// are ephemeral and a link that carried them would have to decide what a cursor
-// in another datacentre means when the link is a second behind.
+// library. [Server.FollowWithRetry] does not overturn that: it is one such
+// policy, written down and opted into by an operator whose answer is "with a
+// backoff", and Follow behaves exactly as it did for everyone else. It does not
+// discover peers. It does not replicate presence: cursors are ephemeral and a
+// link that carried them would have to decide what a cursor in another
+// datacentre means when the link is a second behind.
 func (s *Server) Follow(ctx context.Context, peer Transport, document string, as crdt.SiteID) error {
+	return s.follow(ctx, peer, document, as, nil)
+}
+
+// followable is what a link is refused for before anything is opened: a mistake
+// in the call, rather than a peer that could not be reached.
+//
+// The two are worth telling apart, and this is where the distinction is made
+// once. A peer that is down is worth trying again; a document with no name and
+// a link claiming the server's own replica are worth trying again never, and a
+// loop that cannot tell the difference spends the rest of the process's life
+// re-asking a question whose answer cannot change. [Server.FollowWithRetry]
+// asks this once, before its loop, so those two can never enter it.
+func followable(document string, as crdt.SiteID) error {
 	if document == "" {
 		return errors.New("collab: Follow needs a document name")
 	}
 	if as == serverSite {
 		return fmt.Errorf("collab: site %d is the server's own replica", serverSite)
+	}
+	return nil
+}
+
+// follow is Follow with the one seam a reconnecting link needs: established is
+// called, on this goroutine, once the session is up and the local replica holds
+// what the peer sent to catch it up.
+//
+// Nothing outside can tell that moment from any other. A link that ran for six
+// hours and a link the peer accepted and dropped in the same breath both come
+// back here as an error and nothing else, and a retry loop that cannot tell
+// them apart resets its backoff on the second — which is a hot loop against a
+// peer that is failing fast, written by somebody who thought they had written a
+// backoff. So the loop is told when a session was really established, and that
+// is the only thing it resets on.
+func (s *Server) follow(ctx context.Context, peer Transport, document string, as crdt.SiteID, established func()) error {
+	if err := followable(document, as); err != nil {
+		return err
 	}
 
 	// The local replica first, so the link can say what it already has and be
@@ -101,6 +135,14 @@ func (s *Server) Follow(ctx context.Context, peer Transport, document string, as
 	}
 	if err := local.adopt(ctx, sub, welcome); err != nil {
 		return err
+	}
+
+	// The session is up and the local replica holds what it was missing. This
+	// is the only place that can be said, and it is said before either loop
+	// starts so that a link which is about to be dropped has still, truthfully,
+	// been established once.
+	if established != nil {
+		established()
 	}
 
 	// Outbound: everything the local document is told, told to the peer. The
