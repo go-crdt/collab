@@ -1,3 +1,5 @@
+<p align="center"><img src="https://raw.githubusercontent.com/go-crdt/brand/main/social/go-crdt.png" alt="go-crdt/collab" width="720"></p>
+
 # collab — the wire for collaborative editing
 
 [![CI](https://github.com/go-crdt/collab/actions/workflows/ci.yml/badge.svg)](https://github.com/go-crdt/collab/actions/workflows/ci.yml)
