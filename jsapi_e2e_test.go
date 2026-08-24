@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-crdt/collab"
 	"github.com/go-crdt/crdt/awareness"
@@ -100,7 +101,7 @@ func TestTheJavaScriptAPIConverges(t *testing.T) {
 	// its round, then makes two edits whose offsets differ between runes and
 	// units — appending after an astral character, and deleting one — because
 	// what those are reported as is the thing being tested.
-	awaitFor(t, native, "the page's round", settleJS, func() bool {
+	awaitPage(t, native, "the page's round", finished, &page, func() bool {
 		return nativeBody.String() == "😀A" && nativeChat.Len() == 1 && nativeCells.Len() == 1
 	})
 	if err := nativeBody.Insert(nativeBody.Len(), "Z"); err != nil {
@@ -125,7 +126,7 @@ func TestTheJavaScriptAPIConverges(t *testing.T) {
 	// The page writes one last character and waits to be told it was seen, which
 	// is how it knows authorship has settled: one run per author, and the run
 	// boundaries are what a view colours by.
-	awaitFor(t, native, "the page's last character", settleJS, func() bool {
+	awaitPage(t, native, "the page's last character", finished, &page, func() bool {
 		return nativeBody.String() == "AZ!"
 	})
 	if err := nativeCells.Set("done", []byte("1")); err != nil {
@@ -168,4 +169,36 @@ func TestTheJavaScriptAPIConverges(t *testing.T) {
 	}
 	t.Logf("the page and a native participant converged on %q", result.Text)
 	t.Logf("refusals the page saw: %v", result.Refusals)
+}
+
+// awaitPage waits for something only the page can produce, and gives up the
+// moment there is no page left to produce it. Both waits in the choreography
+// above are for an edit the page has yet to make, so a page that has exited —
+// because an assertion in e2e.mjs failed — will never satisfy them, and waiting
+// out settleJS only delays the report by a minute before blaming the native
+// participant for a timeout.
+//
+// Worse, the page's own message is thrown away by that route: it is printed
+// only where the exit is collected, which a timeout never reaches. That is why
+// every failure in issue #41 said a native participant timed out and nothing
+// about the assertion that actually failed, and why the fix to the timeout
+// message alone would not have shown it either.
+func awaitPage(t *testing.T, c *collab.Client, what string, finished <-chan error, page *strings.Builder, want func() bool) {
+	t.Helper()
+	deadline := time.After(settleJS)
+	for !want() {
+		select {
+		case <-c.Changes():
+		case err := <-finished:
+			// Reading page is safe here and only here: Wait has returned, so
+			// the goroutines copying into it are done.
+			t.Fatalf("the page exited before %s (%v):\n%s", what, err, page.String())
+		case <-c.Done():
+			if !want() {
+				t.Fatalf("session ended before %s: %v\n%s", what, c.Err(), describe(t, c))
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s\n%s", what, describe(t, c))
+		}
+	}
 }

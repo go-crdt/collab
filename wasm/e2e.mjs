@@ -178,8 +178,20 @@ async function run(collab) {
 
   // The native participant now appends and then deletes the emoji, so that the
   // page is told about two edits whose offsets differ between runes and units.
+  // It also publishes where its cursor is, and that travels as its own message
+  // rather than alongside the operations, so the document being in step says
+  // nothing about whether the presence has landed. Waiting only for the text,
+  // the list and the map and then reading peers() is a race the page loses
+  // whenever the two messages are pulled apart — which is what made this the
+  // flakiest test in the repository. Wait for the participant as well as for
+  // its edits, and the assertions below are about what arrived rather than
+  // about how quickly it did.
   await waitFor(
-    () => body.toString() === "AZ" && cells.size === 2 && chat.length === 2,
+    () =>
+      body.toString() === "AZ" &&
+      cells.size === 2 &&
+      chat.length === 2 &&
+      session.peers().length === 2,
     "the native participant's round",
   );
 
