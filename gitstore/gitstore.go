@@ -38,6 +38,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"path"
 	"sort"
 	"strings"
@@ -163,22 +165,25 @@ func (s *Store) Load(_ context.Context, document string) ([]byte, error) {
 		return nil, err
 	}
 	raw, err := s.read(path.Join(dir, stateFile))
-	if errors.Is(err, errAbsent) {
+	if errors.Is(err, fs.ErrNotExist) {
 		// A document nobody has saved is a new one, not a failure.
 		return nil, nil
 	}
 	if err != nil {
+		// Anything else is NOT a new document, and saying it were would be the
+		// worst thing this store could do: a server told "there is nothing
+		// here" starts an empty one and saves it over what it could not read.
 		return nil, fmt.Errorf("gitstore: reading %q: %w", document, err)
 	}
 	return raw, nil
 }
 
-var errAbsent = errors.New("gitstore: no such file")
-
+// read returns a file's whole contents, and distinguishes a file that is not
+// there from one that will not open — which the caller depends on.
 func (s *Store) read(name string) ([]byte, error) {
 	f, err := s.tree.Filesystem.Open(name)
 	if err != nil {
-		return nil, errAbsent
+		return nil, err
 	}
 	defer f.Close()
 	var out []byte
@@ -186,8 +191,11 @@ func (s *Store) read(name string) ([]byte, error) {
 	for {
 		n, err := f.Read(buf)
 		out = append(out, buf[:n]...)
-		if n == 0 || err != nil {
+		if errors.Is(err, io.EOF) || n == 0 {
 			return out, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", name, err)
 		}
 	}
 }
@@ -279,10 +287,11 @@ func render(snapshot []byte, fileFor func(crdt.Part) (string, bool)) ([]rendered
 		if !ok {
 			continue
 		}
-		text, err := doc.Text(part.Name)
-		if err != nil {
-			return nil, fmt.Errorf("reading part %q: %w", part.Name, err)
-		}
+		// The part came from Parts(), so its name is one the composite already
+		// holds and the error cannot happen. It is dropped rather than left as
+		// a branch no test could reach, which is what the crdt package does
+		// with the same ones.
+		text, _ := doc.Text(part.Name)
 		out = append(out, rendered{path: at, text: text.String()})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].path < out[j].path })

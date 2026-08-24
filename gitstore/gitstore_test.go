@@ -2,8 +2,11 @@ package gitstore
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +14,7 @@ import (
 	"github.com/go-crdt/collab"
 	"github.com/go-crdt/crdt"
 	"github.com/go-crdt/crdt/structured"
+	git "github.com/go-git/go-git/v5"
 )
 
 // a document to save: one file of text, one comment anchored into it, and a
@@ -541,5 +545,153 @@ func TestWhatCannotBeOpened(t *testing.T) {
 	}
 	if _, err := New(file); err == nil {
 		t.Fatal("a file was opened as a repository")
+	}
+}
+
+// A document that cannot be read is not a new document.
+//
+// Saying it were is the worst thing this store could do: a server told "there
+// is nothing here" starts an empty one and saves it over what it could not read.
+func TestAnUnreadableDocumentIsNotANewOne(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads anything, so there is no unreadable file to make")
+	}
+	ctx := t.Context()
+	s := store(t)
+	doc := paper(t, 1, "please do not lose me")
+	if err := s.Save(ctx, "d", doc.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+
+	dir, err := dirFor("d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := filepath.Join(s.tree.Filesystem.Root(), dir, stateFile)
+	if err := os.Chmod(at, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(at, 0o644) })
+
+	raw, err := s.Load(ctx, "d")
+	if err == nil {
+		t.Fatalf("a document that will not open read as a new one: %d bytes", len(raw))
+	}
+	if raw != nil {
+		t.Fatalf("it also handed back %d bytes", len(raw))
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("an unreadable document was reported as absent: %v", err)
+	}
+}
+
+// A bare repository has nowhere to write.
+func TestABareRepositoryIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := git.PlainInit(dir, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(dir); err == nil {
+		t.Fatal("a bare repository was opened as a store")
+	}
+}
+
+// A release name that is already taken says so rather than moving the tag.
+func TestAReleaseNameIsNotReused(t *testing.T) {
+	ctx := t.Context()
+	s := store(t)
+	doc := paper(t, 1, "one")
+	if err := s.Save(ctx, "d", doc.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Release(ctx, "v1", "first"); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := doc.Text("file:paper.tex")
+	if _, err := body.Insert(3, " more"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(ctx, "d", doc.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Release(ctx, "v1", "again"); err == nil {
+		t.Fatal("v1 was released twice; the first one would have moved")
+	}
+	// And v1 still names what it named.
+	raw, err := s.At("d", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := crdt.LoadComposite(2, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _ := back.Text("file:paper.tex")
+	if text.String() != "one" {
+		t.Fatalf("v1 now names %q", text.String())
+	}
+}
+
+// A hash that is a real object and not a commit.
+func TestAHashThatIsNotACommit(t *testing.T) {
+	ctx := t.Context()
+	s := store(t)
+	doc := paper(t, 1, "one")
+	if err := s.Save(ctx, "d", doc.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+	// The tree of HEAD is an object, and it is not a commit.
+	tree := strings.TrimSpace(run(t, s, "rev-parse", "HEAD^{tree}"))
+	if _, err := s.At("d", tree); err == nil {
+		t.Fatalf("a tree object %s resolved as a revision", tree)
+	}
+}
+
+// A file that is written and cannot then be read is not committed, and does not
+// half-commit either: staging it fails and the save says so.
+func TestAFileThatCannotBeStaged(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads anything")
+	}
+	ctx := t.Context()
+	s := store(t)
+	doc := paper(t, 1, "one")
+	if err := s.Save(ctx, "d", doc.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := dirFor("d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The directory itself refuses to be written into or read from.
+	at := filepath.Join(s.tree.Filesystem.Root(), dir)
+	if err := os.Chmod(at, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(at, 0o755) })
+
+	body, _ := doc.Text("file:paper.tex")
+	if _, err := body.Insert(3, " more"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(ctx, "d", doc.Snapshot()); err == nil {
+		t.Fatal("a save into a directory nothing can write succeeded")
+	}
+}
+
+// The repository can go away underneath a store, and reading it says so rather
+// than pretending there are no documents.
+func TestTheRepositoryGoingAway(t *testing.T) {
+	ctx := t.Context()
+	s := store(t)
+	doc := paper(t, 1, "one")
+	if err := s.Save(ctx, "d", doc.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(s.tree.Filesystem.Root()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Documents(); err == nil {
+		t.Fatal("a repository that is gone listed its documents")
 	}
 }
