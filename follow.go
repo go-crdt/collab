@@ -99,7 +99,7 @@ func (s *Server) Follow(ctx context.Context, peer Transport, document string, as
 	if kind != kindWelcome || !ok {
 		return ErrProtocol
 	}
-	if err := local.adopt(sub, welcome); err != nil {
+	if err := local.adopt(ctx, sub, welcome); err != nil {
 		return err
 	}
 
@@ -163,7 +163,7 @@ func (s *Server) Follow(ctx context.Context, peer Transport, document string, as
 		if !ok {
 			return ErrProtocol
 		}
-		if err := local.applyOperations(sub, ops.Operations); err != nil {
+		if err := local.applyOperations(ctx, sub, ops.Operations); err != nil {
 			return err
 		}
 	}
@@ -188,12 +188,12 @@ func (d *document) version() crdt.CompositeVersion {
 // branch. A snapshot arriving here is a peer that answered something other than
 // what was asked, which is a protocol error rather than a second path to
 // maintain.
-func (d *document) adopt(from *subscriber, w welcomeMsg) error {
+func (d *document) adopt(ctx context.Context, from *subscriber, w welcomeMsg) error {
 	if len(w.Snapshot) > 0 {
 		return ErrProtocol
 	}
 	if len(w.Operations) == 0 {
 		return nil
 	}
-	return d.applyOperations(from, w.Operations)
+	return d.applyOperations(ctx, from, w.Operations)
 }
