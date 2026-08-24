@@ -668,24 +668,25 @@ var _ collab.Store = (*Store)(nil)
 // same operations. That is what a merge driver needs: two instances resolving
 // the same conflict independently must reach the same commit, or they have
 // merely disagreed somewhere new.
+//
+// It is [collab.MergeSnapshots], which is where this now lives: the operation
+// is about snapshots and not about git, it needs nothing this module has, and
+// keeping a second copy here would mean two functions that have to agree
+// forever about what merging means. This one stays because it is the name this
+// package's own vocabulary uses, and because Reconcile and a pull both call it.
+//
+// One thing changed in the move, and for the better: either side may now be
+// empty, which is how a store says it has never held the document, and merging
+// with nothing gives back the other side. It used to be an error, which is why
+// Reconcile checks for it before calling. That check stays, because it also
+// saves reading a document back in order to hand it straight to Save, and
+// because saying what an absent document means is worth a line.
+//
+// A pull's check is a different one and must not be confused with it: it tests
+// the error, not the emptiness, because a state that will not open is not a
+// state this instance does not have.
 func Merge(ours, theirs []byte) ([]byte, error) {
-	// The site is never used to mint anything: nothing here writes an
-	// operation of its own, it only carries operations that already exist.
-	mine, err := crdt.LoadComposite(1, ours)
-	if err != nil {
-		return nil, fmt.Errorf("gitstore: reading our side: %w", err)
-	}
-	yours, err := crdt.LoadComposite(1, theirs)
-	if err != nil {
-		return nil, fmt.Errorf("gitstore: reading their side: %w", err)
-	}
-	// Neither error below can happen and neither is carried. Their snapshot
-	// loaded, so it is causally complete: OpsSince returns operations that
-	// validate, Apply accepts them, and nothing is left waiting for something
-	// their snapshot did not hold. Both would be branches no input can reach,
-	// which this family does not keep.
-	_ = mine.Apply(yours.OpsSince(mine.Version())...)
-	return mine.Snapshot(), nil
+	return collab.MergeSnapshots(ours, theirs)
 }
 
 // Reconcile merges another instance's snapshot of a document into this one's
