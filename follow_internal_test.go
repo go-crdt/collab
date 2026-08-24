@@ -259,7 +259,7 @@ func TestFollowEndsPromptlyWhenItCannotSendOnwards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := doc.applyOperations(nil, raw); err != nil {
+	if err := doc.applyOperations(t.Context(), nil, raw); err != nil {
 		t.Fatal(err)
 	}
 

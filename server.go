@@ -82,6 +82,32 @@ type Config struct {
 	// Returning a gRPC status error passes that status to the participant
 	// unchanged; any other error is reported as PermissionDenied.
 	Authorize func(ctx context.Context, document string, site crdt.SiteID) error
+
+	// AuthorizeOperations, if set, is asked about every batch a session sends,
+	// and refusing ends the session.
+	//
+	// Authorize runs once, when somebody joins, and decides whether that site
+	// may be in this document. That is the whole story for a participant: a
+	// participant speaks for itself, and the site it joined as is the site its
+	// operations carry.
+	//
+	// It is not the whole story for a link. [Server.Follow] joins as one site
+	// and then relays the work of everyone on the server it follows, so what
+	// arrives on a link names sites this server never authorised — thousands of
+	// them, belonging to an institution rather than to a person. Inside one
+	// deployment that is exactly right and there is nothing to decide. Between
+	// two, it is the decision: whether this link may speak for those sites.
+	//
+	// from is the site the session joined as. batches carry the operations it
+	// is asking to add, each naming the site that made it, so a policy can be
+	// written about the relationship between the two — "this link may carry
+	// operations for sites derived within lyon.ac.example" — which is what an
+	// interfederation has scopes for.
+	//
+	// It runs after the operations have been decoded and before any of them is
+	// applied, so a refused batch changes nothing. Returning a gRPC status
+	// error passes that status on unchanged, as Authorize does.
+	AuthorizeOperations func(ctx context.Context, document string, from crdt.SiteID, batches []crdt.PartOps) error
 }
 
 // A Server hosts documents. Register it with
@@ -92,9 +118,10 @@ type Config struct {
 // Documents stay in memory once opened, so a long-lived server holds every
 // document it has served. Call [Server.Flush] to persist them.
 type Server struct {
-	store     Store
-	backlog   int
-	authorize func(ctx context.Context, document string, site crdt.SiteID) error
+	store        Store
+	backlog      int
+	authorize    func(ctx context.Context, document string, site crdt.SiteID) error
+	authorizeOps func(ctx context.Context, document string, from crdt.SiteID, batches []crdt.PartOps) error
 
 	// now is time.Now, replaced in tests so that idleness can be reached
 	// without waiting for it.
@@ -127,6 +154,7 @@ func NewServer(cfg Config) *Server {
 		store:        cfg.Store,
 		backlog:      cfg.Backlog,
 		authorize:    cfg.Authorize,
+		authorizeOps: cfg.AuthorizeOperations,
 		now:          cfg.Clock,
 		onEvictError: cfg.OnEvictError,
 		stop:         make(chan struct{}),
@@ -228,14 +256,15 @@ func (s *Server) open(ctx context.Context, name string) (*document, error) {
 		return existing, nil
 	}
 	d := &document{
-		name:       name,
-		store:      s.store,
-		backlog:    s.backlog,
-		doc:        doc,
-		presence:   awareness.New(),
-		subs:       map[*subscriber]struct{}{},
-		now:        s.now,
-		emptySince: s.now(),
+		name:         name,
+		store:        s.store,
+		backlog:      s.backlog,
+		authorizeOps: s.authorizeOps,
+		doc:          doc,
+		presence:     awareness.New(),
+		subs:         map[*subscriber]struct{}{},
+		now:          s.now,
+		emptySince:   s.now(),
 	}
 	s.docs[name] = d
 	return d, nil
@@ -257,6 +286,9 @@ type document struct {
 	name    string
 	store   Store
 	backlog int
+	// authorizeOps decides whether a session may add what it is sending; see
+	// [Config.AuthorizeOperations]. Nil is "anything a session sends".
+	authorizeOps func(ctx context.Context, document string, from crdt.SiteID, batches []crdt.PartOps) error
 	// now is the server's clock, carried here so a test can move it.
 	now func() time.Time
 
@@ -372,7 +404,7 @@ func (s *Server) session(stream carrier) error {
 			if in.err != nil {
 				return in.err
 			}
-			if err := doc.handle(sub, in.kind, in.msg); err != nil {
+			if err := doc.handle(ctx, sub, in.kind, in.msg); err != nil {
 				return err
 			}
 		}
@@ -516,14 +548,14 @@ func (d *document) leave(ctx context.Context, sub *subscriber) {
 }
 
 // handle applies one message from a participant.
-func (d *document) handle(sub *subscriber, kind byte, msg any) error {
+func (d *document) handle(ctx context.Context, sub *subscriber, kind byte, msg any) error {
 	switch kind {
 	case kindOperation:
 		ops, ok := msg.(opsMsg)
 		if !ok {
 			return fail(errInvalid, "collab: malformed operations")
 		}
-		return d.applyOperations(sub, ops.Operations)
+		return d.applyOperations(ctx, sub, ops.Operations)
 	case kindPresence:
 		p, ok := msg.(presenceMsg)
 		if !ok {
@@ -538,12 +570,15 @@ func (d *document) handle(sub *subscriber, kind byte, msg any) error {
 // applyOperations merges a participant's edit and passes it on. The bytes are
 // relayed unchanged: applying them is idempotent and order-independent, so
 // there is nothing for the server to decide.
-func (d *document) applyOperations(from *subscriber, raw []byte) error {
+func (d *document) applyOperations(ctx context.Context, from *subscriber, raw []byte) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	// Decoding and merging share one rejection: both mean the same thing to the
 	// participant, and ParsePartOps already guarantees what Apply would check, so
-	// splitting them would leave a branch no input can reach.
+	// splitting them would leave a branch no input can reach. They are written
+	// apart here because [Config.AuthorizeOperations] runs between them — after
+	// the operations are known and before any is applied — and Apply's error is
+	// dropped rather than turned into that unreachable branch.
 	// What the server knew before, so that operations it already had can be
 	// recognised and not passed on again.
 	//
@@ -562,12 +597,23 @@ func (d *document) applyOperations(from *subscriber, raw []byte) error {
 	// exactly when there is something to tell anybody.
 	before := d.doc.Version()
 	batches, err := crdt.ParsePartOps(raw)
-	if err == nil {
-		err = d.doc.Apply(batches...)
-	}
 	if err != nil {
 		return fail(errInvalid, "collab: unusable operations")
 	}
+	// After decoding and before applying, so a refused batch changes nothing:
+	// what a link carries is not what it joined as, and between two
+	// deployments that difference is the decision. See
+	// [Config.AuthorizeOperations].
+	if d.authorizeOps != nil {
+		if err := d.authorizeOps(ctx, d.name, from.site, batches); err != nil {
+			return refusal(err)
+		}
+	}
+	// ParsePartOps guarantees what Apply would check, so this cannot fail. The
+	// comment above says decoding and merging share one rejection and that
+	// splitting them would leave a branch no input can reach; the hook has to
+	// run between the two, so the branch is dropped rather than left there.
+	_ = d.doc.Apply(batches...)
 	// This saves a little for a participant that reconnects and pushes work the
 	// server already had. It is required for two servers that follow each
 	// other: an operation from a participant of one reaches the other, is
