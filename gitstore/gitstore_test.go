@@ -374,7 +374,7 @@ func gitShow(t *testing.T, s *Store, rev string) map[string]string {
 // that wrote it believes.
 func run(t *testing.T, s *Store, args ...string) string {
 	t.Helper()
-	dir := s.tree.Filesystem.Root()
+	dir := s.repo.root()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
@@ -521,7 +521,7 @@ func TestADirectoryThisStoreDidNotMakeIsNotADocument(t *testing.T) {
 	if err := s.Save(ctx, "real", doc.Snapshot()); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.tree.Filesystem.MkdirAll("not-base64-at-all!", 0o755); err != nil {
+	if err := mkdirIn(s, "not-base64-at-all!", 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.write("loose-file", []byte("x")); err != nil {
@@ -567,7 +567,7 @@ func TestAnUnreadableDocumentIsNotANewOne(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	at := filepath.Join(s.tree.Filesystem.Root(), dir, stateFile)
+	at := filepath.Join(s.repo.root(), dir, stateFile)
 	if err := os.Chmod(at, 0o000); err != nil {
 		t.Fatal(err)
 	}
@@ -664,7 +664,7 @@ func TestAFileThatCannotBeStaged(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The directory itself refuses to be written into or read from.
-	at := filepath.Join(s.tree.Filesystem.Root(), dir)
+	at := filepath.Join(s.repo.root(), dir)
 	if err := os.Chmod(at, 0o000); err != nil {
 		t.Fatal(err)
 	}
@@ -688,7 +688,7 @@ func TestTheRepositoryGoingAway(t *testing.T) {
 	if err := s.Save(ctx, "d", doc.Snapshot()); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.RemoveAll(s.tree.Filesystem.Root()); err != nil {
+	if err := os.RemoveAll(s.repo.root()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Documents(); err == nil {
@@ -868,4 +868,10 @@ func TestWhatAMergeRefuses(t *testing.T) {
 	if err != nil || string(raw) != string(good) {
 		t.Fatalf("the stored document changed: %d bytes, %v", len(raw), err)
 	}
+}
+
+// mkdirIn makes a directory in the store's repository, for the tests that need
+// something in the way.
+func mkdirIn(s *Store, name string, perm os.FileMode) error {
+	return os.MkdirAll(filepath.Join(s.repo.root(), name), perm)
 }

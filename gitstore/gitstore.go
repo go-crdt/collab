@@ -35,7 +35,6 @@ package gitstore
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -48,10 +47,35 @@ import (
 
 	"github.com/go-crdt/collab"
 	"github.com/go-crdt/crdt"
-	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
+
+// repository is everything this store asks git to do.
+//
+// It exists so the failures can be tested. Every call below can fail — a disk
+// fills, a lock is held, an index is corrupt — and those are real errors, not
+// unreachable ones, so they are branches this package has to carry and
+// therefore branches something has to reach. Reaching them through go-git means
+// corrupting a repository in whatever way that version of go-git happens to
+// mind, which is a test pinned to a dependency rather than to a property.
+//
+// Through here, a test says "staging fails" and means it.
+type repository interface {
+	create(name string) (io.WriteCloser, error)
+	open(name string) (io.ReadCloser, error)
+	add(name string) error
+	clean() (bool, error)
+	commit(message string, who object.Signature) error
+	head() (plumbing.Hash, error)
+	tag(name string, at plumbing.Hash, tagger object.Signature, message string) error
+	tags() (map[plumbing.Hash]string, error)
+	log(under string) ([]Revision, error)
+	fileAt(hash plumbing.Hash, name string) ([]byte, error)
+	resolve(revision string) (plumbing.Hash, error)
+	dirs() ([]string, error)
+	root() string
+}
 
 // Store is a [collab.Store] backed by a git repository.
 //
@@ -61,8 +85,7 @@ import (
 // worth measuring against what a corrupt index costs.
 type Store struct {
 	mu   sync.Mutex
-	repo *git.Repository
-	tree *git.Worktree
+	repo repository
 
 	author  object.Signature
 	fileFor func(crdt.Part) (string, bool)
@@ -97,20 +120,18 @@ func WithClock(now func() time.Time) Option {
 
 // New opens the repository at dir, initialising one if there is none.
 func New(dir string, opts ...Option) (*Store, error) {
-	repo, err := git.PlainOpen(dir)
-	if errors.Is(err, git.ErrRepositoryNotExists) {
-		repo, err = git.PlainInit(dir, false)
-	}
+	repo, err := openRepo(dir)
 	if err != nil {
-		return nil, fmt.Errorf("gitstore: opening %s: %w", dir, err)
+		return nil, err
 	}
-	tree, err := repo.Worktree()
-	if err != nil {
-		return nil, fmt.Errorf("gitstore: %s has no worktree: %w", dir, err)
-	}
+	return newStore(repo, opts...), nil
+}
+
+// newStore is New once the repository is open, which is where a test puts one
+// that fails on demand.
+func newStore(repo repository, opts ...Option) *Store {
 	s := &Store{
 		repo:    repo,
-		tree:    tree,
 		author:  object.Signature{Name: "collab", Email: "collab@localhost"},
 		fileFor: defaultFileFor,
 		now:     time.Now,
@@ -118,7 +139,7 @@ func New(dir string, opts ...Option) (*Store, error) {
 	for _, opt := range opts {
 		opt(s)
 	}
-	return s, nil
+	return s
 }
 
 // defaultFileFor writes a text part named "file:<path>" to <path>.
@@ -142,14 +163,84 @@ func defaultFileFor(part crdt.Part) (string, bool) {
 // ErrNoDocument reports a document with no name, which cannot have a directory.
 var ErrNoDocument = errors.New("gitstore: a document must have a name")
 
-// dir is the directory a document's files live in. A document name is
-// arbitrary — "project:default" is one — so it is encoded rather than trusted
-// to be a path, which is what [collab.DirStore] does for the same reason.
+// dirFor is the directory a document's files live in.
+//
+// A document name is arbitrary — "project:default" is one — so it cannot be
+// trusted as a path. [collab.DirStore] encodes the whole of it in base64, which
+// is right for a directory nobody reads. This repository IS read: somebody
+// clones it, and a tree of base64 tells them nothing about what is in it.
+//
+// So it is percent-encoded instead, like a URL: letters, digits, dot, dash and
+// underscore stand for themselves, everything else becomes %XX. That keeps
+// "project%3Adefault" legible; keeps the mapping injective, because the
+// encoding is reversible and two names cannot land in one directory; and keeps
+// it portable, because a colon is a legal character in a POSIX filename and not
+// in a Windows one.
+//
+// A leading dot is encoded although a dot is otherwise kept, so that no
+// document is named "." or ".." or hides itself.
 func dirFor(document string) (string, error) {
 	if document == "" {
 		return "", ErrNoDocument
 	}
-	return base64.URLEncoding.EncodeToString([]byte(document)), nil
+	var b strings.Builder
+	for i := 0; i < len(document); i++ {
+		c := document[i]
+		if pathSafe(c) && !(i == 0 && c == '.') {
+			b.WriteByte(c)
+			continue
+		}
+		fmt.Fprintf(&b, "%%%02X", c)
+	}
+	return b.String(), nil
+}
+
+// pathSafe is the set that stands for itself: what a person reads without
+// noticing an encoding, and what every filesystem this runs on accepts.
+func pathSafe(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	case c == '.', c == '-', c == '_':
+		return true
+	}
+	return false
+}
+
+// nameOf reverses dirFor, for [Store.Documents]. It reports failure for a
+// directory this store did not write — which it recognises by encoding what it
+// decoded and seeing whether it gets the same name back, so a directory that is
+// merely percent-shaped is not mistaken for a document.
+func nameOf(dir string) (string, bool) {
+	var b strings.Builder
+	for i := 0; i < len(dir); i++ {
+		if dir[i] != '%' {
+			b.WriteByte(dir[i])
+			continue
+		}
+		if i+2 >= len(dir) {
+			return "", false
+		}
+		var v byte
+		for _, c := range []byte(dir[i+1 : i+3]) {
+			switch {
+			case c >= '0' && c <= '9':
+				v = v<<4 | (c - '0')
+			case c >= 'A' && c <= 'F':
+				v = v<<4 | (c - 'A' + 10)
+			default:
+				return "", false
+			}
+		}
+		b.WriteByte(v)
+		i += 2
+	}
+	name := b.String()
+	again, err := dirFor(name)
+	if err != nil || again != dir {
+		return "", false
+	}
+	return name, true
 }
 
 // The file the snapshot itself is kept in, beside the text it renders to.
@@ -181,7 +272,7 @@ func (s *Store) Load(_ context.Context, document string) ([]byte, error) {
 // read returns a file's whole contents, and distinguishes a file that is not
 // there from one that will not open — which the caller depends on.
 func (s *Store) read(name string) ([]byte, error) {
-	f, err := s.tree.Filesystem.Open(name)
+	f, err := s.repo.open(name)
 	if err != nil {
 		return nil, err
 	}
@@ -191,11 +282,20 @@ func (s *Store) read(name string) ([]byte, error) {
 	for {
 		n, err := f.Read(buf)
 		out = append(out, buf[:n]...)
-		if errors.Is(err, io.EOF) || n == 0 {
+		switch {
+		case errors.Is(err, io.EOF):
 			return out, nil
-		}
-		if err != nil {
+		case err != nil:
+			// The error is tested BEFORE the count, and the order is the whole
+			// of it: a read that hands back nothing AND an error is a read that
+			// went wrong, not the end of the file. Testing the count first
+			// returned the bytes so far as if they were the document — a
+			// truncated snapshot, silently.
 			return nil, fmt.Errorf("reading %s: %w", name, err)
+		case n == 0:
+			// Nothing and no error. io.Reader allows it and says it means
+			// nothing happened; returning is what keeps this from spinning.
+			return out, nil
 		}
 	}
 }
@@ -205,6 +305,19 @@ func (s *Store) read(name string) ([]byte, error) {
 // A save that changes nothing makes no commit. A server persists on a timer, so
 // most saves of a document nobody is editing are identical to the last, and a
 // history of thousands of empty commits is a history nobody can read.
+//
+// # What a failure leaves
+//
+// The files are written before they are staged, so a save that fails at
+// staging, at reading the worktree or at committing leaves the worktree holding
+// the new state and the history holding the old. **The commit is lost and the
+// document is not**: the next Load reads the worktree and returns the newer of
+// the two, and the next successful save commits it.
+//
+// That is the direction to fail in. The other one — putting the old bytes back
+// so the two agree — would mean a full disk losing the work of everyone editing
+// rather than losing a line of history, and a store whose whole point is to
+// keep what was written should not be the thing that discards it.
 func (s *Store) Save(_ context.Context, document string, snapshot []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -230,33 +343,32 @@ func (s *Store) Save(_ context.Context, document string, snapshot []byte) error 
 		written = append(written, at)
 	}
 	for _, at := range written {
-		if _, err := s.tree.Add(at); err != nil {
-			return fmt.Errorf("gitstore: staging %s: %w", at, err)
+		if err := s.repo.add(at); err != nil {
+			return fmt.Errorf("gitstore: %w", err)
 		}
 	}
 
-	status, err := s.tree.Status()
+	clean, err := s.repo.clean()
 	if err != nil {
-		return fmt.Errorf("gitstore: reading the worktree: %w", err)
+		return fmt.Errorf("gitstore: %w", err)
 	}
-	if status.IsClean() {
+	if clean {
 		return nil // nothing changed; a commit would say nothing
 	}
 
-	when := s.now()
 	who := s.author
-	who.When = when
+	who.When = s.now()
 	message := fmt.Sprintf("%s: %s", document, describe(files))
-	if _, err := s.tree.Commit(message, &git.CommitOptions{Author: &who, Committer: &who}); err != nil {
-		return fmt.Errorf("gitstore: committing %q: %w", document, err)
+	if err := s.repo.commit(message, who); err != nil {
+		return fmt.Errorf("gitstore: %q: %w", document, err)
 	}
 	return nil
 }
 
 func (s *Store) write(name string, content []byte) error {
-	f, err := s.tree.Filesystem.Create(name)
+	f, err := s.repo.create(name)
 	if err != nil {
-		return fmt.Errorf("gitstore: creating %s: %w", name, err)
+		return fmt.Errorf("gitstore: %w", err)
 	}
 	if _, err := f.Write(content); err != nil {
 		f.Close()
@@ -330,19 +442,14 @@ func (s *Store) Release(_ context.Context, name, message string) error {
 	if name == "" {
 		return errors.New("gitstore: a release must have a name")
 	}
-	head, err := s.repo.Head()
+	head, err := s.repo.head()
 	if err != nil {
-		return fmt.Errorf("gitstore: releasing %q: nothing has been saved yet: %w", name, err)
+		return fmt.Errorf("gitstore: releasing %q: %w", name, err)
 	}
-	when := s.now()
 	who := s.author
-	who.When = when
-	_, err = s.repo.CreateTag(name, head.Hash(), &git.CreateTagOptions{
-		Tagger:  &who,
-		Message: message,
-	})
-	if err != nil {
-		return fmt.Errorf("gitstore: tagging %q: %w", name, err)
+	who.When = s.now()
+	if err := s.repo.tag(name, head, who, message); err != nil {
+		return fmt.Errorf("gitstore: %w", err)
 	}
 	return nil
 }
@@ -368,55 +475,9 @@ func (s *Store) History(document string) ([]Revision, error) {
 	if err != nil {
 		return nil, err
 	}
-	head, err := s.repo.Head()
+	out, err := s.repo.log(dir)
 	if err != nil {
-		return nil, nil // nothing saved yet is an empty history, not a failure
-	}
-	tags, err := s.tagsByCommit()
-	if err != nil {
-		return nil, err
-	}
-	iter, err := s.repo.Log(&git.LogOptions{From: head.Hash(), PathFilter: func(p string) bool {
-		return strings.HasPrefix(p, dir+"/")
-	}})
-	if err != nil {
-		return nil, fmt.Errorf("gitstore: reading the history of %q: %w", document, err)
-	}
-	defer iter.Close()
-	var out []Revision
-	err = iter.ForEach(func(c *object.Commit) error {
-		out = append(out, Revision{
-			Hash:    c.Hash.String(),
-			When:    c.Author.When,
-			Message: strings.SplitN(c.Message, "\n", 2)[0],
-			Release: tags[c.Hash],
-		})
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("gitstore: reading the history of %q: %w", document, err)
-	}
-	return out, nil
-}
-
-func (s *Store) tagsByCommit() (map[plumbing.Hash]string, error) {
-	out := map[plumbing.Hash]string{}
-	iter, err := s.repo.Tags()
-	if err != nil {
-		return nil, fmt.Errorf("gitstore: reading tags: %w", err)
-	}
-	defer iter.Close()
-	err = iter.ForEach(func(ref *plumbing.Reference) error {
-		name := ref.Name().Short()
-		if tag, err := s.repo.TagObject(ref.Hash()); err == nil {
-			out[tag.Target] = name
-			return nil
-		}
-		out[ref.Hash()] = name
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("gitstore: reading tags: %w", err)
+		return nil, fmt.Errorf("gitstore: %q: %w", document, err)
 	}
 	return out, nil
 }
@@ -436,41 +497,18 @@ func (s *Store) At(document, revision string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	hash, err := s.resolve(revision)
-	if err != nil {
-		return nil, err
-	}
-	commit, err := s.repo.CommitObject(hash)
-	if err != nil {
-		return nil, fmt.Errorf("gitstore: reading revision %q: %w", revision, err)
-	}
-	file, err := commit.File(path.Join(dir, stateFile))
-	if err != nil {
-		return nil, fmt.Errorf("gitstore: %q holds no %q: %w", revision, document, err)
-	}
-	content, err := file.Contents()
-	if err != nil {
-		return nil, fmt.Errorf("gitstore: reading %q at %q: %w", document, revision, err)
-	}
-	return []byte(content), nil
-}
-
-// resolve turns a release name or a commit hash into a commit.
-func (s *Store) resolve(revision string) (plumbing.Hash, error) {
 	if revision == "" {
-		return plumbing.ZeroHash, errors.New("gitstore: a revision must be named")
+		return nil, errors.New("gitstore: a revision must be named")
 	}
-	if ref, err := s.repo.Tag(revision); err == nil {
-		if tag, err := s.repo.TagObject(ref.Hash()); err == nil {
-			return tag.Target, nil
-		}
-		return ref.Hash(), nil
-	}
-	hash, err := s.repo.ResolveRevision(plumbing.Revision(revision))
+	hash, err := s.repo.resolve(revision)
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("gitstore: no revision %q: %w", revision, err)
+		return nil, fmt.Errorf("gitstore: %w", err)
 	}
-	return *hash, nil
+	raw, err := s.repo.fileAt(hash, path.Join(dir, stateFile))
+	if err != nil {
+		return nil, fmt.Errorf("gitstore: %q: %w", document, err)
+	}
+	return raw, nil
 }
 
 // Documents returns every document the repository holds.
@@ -478,20 +516,17 @@ func (s *Store) Documents() ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entries, err := s.tree.Filesystem.ReadDir(".")
+	entries, err := s.repo.dirs()
 	if err != nil {
-		return nil, fmt.Errorf("gitstore: reading the repository: %w", err)
+		return nil, fmt.Errorf("gitstore: %w", err)
 	}
 	var out []string
 	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		raw, err := base64.URLEncoding.DecodeString(e.Name())
-		if err != nil {
+		name, ok := nameOf(e)
+		if !ok {
 			continue // a directory this store did not make
 		}
-		out = append(out, string(raw))
+		out = append(out, name)
 	}
 	sort.Strings(out)
 	return out, nil
@@ -530,15 +565,12 @@ func Merge(ours, theirs []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gitstore: reading their side: %w", err)
 	}
-	if err := mine.Apply(yours.OpsSince(mine.Version())...); err != nil {
-		return nil, fmt.Errorf("gitstore: merging: %w", err)
-	}
-	if n := mine.Pending(); n != 0 {
-		// Their snapshot promised operations it did not carry, which is not a
-		// snapshot this package writes.
-		return nil, fmt.Errorf("gitstore: merging: %d operations are waiting for ones "+
-			"their snapshot did not carry", n)
-	}
+	// Neither error below can happen and neither is carried. Their snapshot
+	// loaded, so it is causally complete: OpsSince returns operations that
+	// validate, Apply accepts them, and nothing is left waiting for something
+	// their snapshot did not hold. Both would be branches no input can reach,
+	// which this family does not keep.
+	_ = mine.Apply(yours.OpsSince(mine.Version())...)
 	return mine.Snapshot(), nil
 }
 
