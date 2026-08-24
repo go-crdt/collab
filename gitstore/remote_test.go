@@ -597,8 +597,10 @@ func TestARepositoryThatAlreadyExistsKeepsItsOwnBranch(t *testing.T) {
 	// read from HEAD, so the store simply works on master.
 	dir := t.TempDir()
 	runIn(t, dir, "init", "--initial-branch=master")
-	runIn(t, dir, "commit", "--allow-empty", "-m", "older than this package",
-		"--author=Ada <ada@example>")
+	// The identity is given on the command rather than left to the machine's
+	// git configuration, which a CI runner does not have.
+	runIn(t, dir, "-c", "user.name=Ada", "-c", "user.email=ada@example",
+		"commit", "--allow-empty", "-m", "older than this package")
 
 	s, err := New(dir, WithAuthor("here", "here@example"), WithClock(stamps()),
 		WithRemote(Remote{URL: url}))
