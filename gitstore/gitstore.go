@@ -31,6 +31,20 @@
 // A release is a decision, so it is a tag: [Store.Release] names a commit that
 // already exists. What is tagged is a state somebody chose, and it restores
 // exactly, because the snapshot is in the commit beside the text.
+//
+// # Two instances
+//
+// A repository both of them can reach is a channel between them and not only a
+// record of what they did. [Store.Push] sends what this instance committed,
+// [Store.Pull] brings back what another one did and merges it, and what the two
+// of them disagree about is the state file — the one conflict in this design
+// that never needs a person, because a snapshot is a set of operations and
+// merging two sets of operations is what this package does for a living.
+//
+// The latency is a pull interval rather than a link, and what it costs is a
+// repository both instances may reach rather than two servers up and reachable
+// at once. A store with no remote does none of it and is exactly what it was
+// before there was anything to configure.
 package gitstore
 
 import (
@@ -49,6 +63,7 @@ import (
 	"github.com/go-crdt/crdt"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 )
 
 // repository is everything this store asks git to do.
@@ -75,6 +90,17 @@ type repository interface {
 	resolve(revision string) (plumbing.Hash, error)
 	dirs() ([]string, error)
 	root() string
+
+	// And what it takes to share the repository with another instance. A
+	// fetch and a push can fail for everything the local ones can and for the
+	// network besides, so they belong behind the same seam: a test that says
+	// "the push does not arrive" should not have to unplug anything.
+	push(ctx context.Context, url string, auth transport.AuthMethod) error
+	fetch(ctx context.Context, url string, auth transport.AuthMethod) (plumbing.Hash, error)
+	contains(hash plumbing.Hash) (bool, error)
+	documentsAt(hash plumbing.Hash) ([]string, error)
+	adopt(from plumbing.Hash) error
+	mergeCommit(message string, who object.Signature, other plumbing.Hash) error
 }
 
 // Store is a [collab.Store] backed by a git repository.
@@ -83,6 +109,12 @@ type repository interface {
 // one worktree race on the index — so every operation here takes one lock. A
 // server saves a document every few seconds, so what that costs is nothing
 // worth measuring against what a corrupt index costs.
+//
+// A push and a fetch are held under that same lock, and they are the one thing
+// here that waits on somebody else's machine. A remote that hangs therefore
+// hangs the store, which is why every remote operation takes a context and
+// nothing in this package invents one: how long a document may go unsaved
+// because a git host is slow is a decision, and it belongs to whoever passes it.
 type Store struct {
 	mu   sync.Mutex
 	repo repository
@@ -90,6 +122,13 @@ type Store struct {
 	author  object.Signature
 	fileFor func(crdt.Part) (string, bool)
 	now     func() time.Time
+	remote  Remote
+
+	// unsent is whether this instance holds something the remote has not
+	// acknowledged. It is what makes a save that changed nothing the retry for
+	// a push that did not arrive, and what keeps every other such save from
+	// opening a connection to say nothing.
+	unsent bool
 }
 
 // An Option changes how a store writes.
@@ -116,6 +155,37 @@ func WithFiles(fileFor func(crdt.Part) (string, bool)) Option {
 // WithClock replaces the clock, for a test that needs commits at known times.
 func WithClock(now func() time.Time) Option {
 	return func(s *Store) { s.now = now }
+}
+
+// A Remote is the repository this one federates through: where [Store.Push]
+// sends what was committed here and where [Store.Pull] finds what was
+// committed elsewhere.
+//
+// A zero Remote is no remote, and a store without one writes locally and does
+// exactly what it did before any of this existed. Federating is something an
+// operator turns on, not something a store does because it can.
+type Remote struct {
+	// URL is anything go-git can reach: an https or ssh address, or the path
+	// of a repository on this machine. Empty means there is no remote.
+	URL string
+
+	// Auth is asked what to authenticate as, and may be nil, which means
+	// nothing — see [Store.Push] for why this package does not go looking.
+	Auth func(context.Context) (transport.AuthMethod, error)
+
+	// PushFailed is told when a push made by a save does not reach the remote,
+	// and may be nil, which drops it.
+	//
+	// A save does not fail for that — see [Store.Save] — so this is the only
+	// place the failure is heard. Whether it is logged, counted or paged on is
+	// the operator's, but a store that has not federated since yesterday
+	// should be saying so somewhere.
+	PushFailed func(error)
+}
+
+// WithRemote gives the store a repository to push to and pull from.
+func WithRemote(remote Remote) Option {
+	return func(s *Store) { s.remote = remote }
 }
 
 // New opens the repository at dir, initialising one if there is none.
@@ -300,7 +370,8 @@ func (s *Store) read(name string) ([]byte, error) {
 	}
 }
 
-// Save writes the snapshot and the text it renders to, and commits both.
+// Save writes the snapshot and the text it renders to, commits both, and — if
+// there is a remote — sends the commit on.
 //
 // A save that changes nothing makes no commit. A server persists on a timer, so
 // most saves of a document nobody is editing are identical to the last, and a
@@ -318,7 +389,32 @@ func (s *Store) read(name string) ([]byte, error) {
 // so the two agree — would mean a full disk losing the work of everyone editing
 // rather than losing a line of history, and a store whose whole point is to
 // keep what was written should not be the thing that discards it.
-func (s *Store) Save(_ context.Context, document string, snapshot []byte) error {
+//
+// # What a failed push leaves
+//
+// A push that does not arrive does not fail the save, and the commit is not
+// undone either. The two failures are not the same kind: a save that cannot
+// write has not stored the document, and a push that cannot reach the remote
+// has stored it and not yet shared it. Reporting the second as the first would
+// make an unreachable peer look like a full disk, and what a server does about
+// those two is not the same thing — one of them is a reason to stop.
+//
+// Argued from what the caller could do instead: nothing that helps. The commit
+// is here, it is on this instance's branch, and git pushes a branch rather than
+// a commit, so the next push that gets through carries this one and everything
+// after it — with nothing queued, nothing replayed and nothing to reconcile in
+// the meantime. Which is why a save that changed nothing and made no commit
+// still pushes when a commit here has not reached the remote: that save is the
+// retry, and it is the only one there needs to be. A save with nothing owed
+// says nothing to anybody, because a server persists on a timer and a
+// connection every few seconds to report that a document is unchanged is how a
+// remote becomes something an operator switches off.
+//
+// What must not happen is that it goes unheard, so [Remote.PushFailed] is told.
+// A store whose remote has been unreachable since yesterday is still storing
+// documents perfectly and has stopped federating, and only somebody's log can
+// say so.
+func (s *Store) Save(ctx context.Context, document string, snapshot []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -326,43 +422,59 @@ func (s *Store) Save(_ context.Context, document string, snapshot []byte) error 
 	if err != nil {
 		return err
 	}
-	files, err := render(snapshot, s.fileFor)
+	files, err := s.place(document, dir, snapshot)
 	if err != nil {
-		return fmt.Errorf("gitstore: %q: %w", document, err)
-	}
-
-	written := []string{path.Join(dir, stateFile)}
-	if err := s.write(written[0], snapshot); err != nil {
 		return err
-	}
-	for _, f := range files {
-		at := path.Join(dir, f.path)
-		if err := s.write(at, []byte(f.text)); err != nil {
-			return err
-		}
-		written = append(written, at)
-	}
-	for _, at := range written {
-		if err := s.repo.add(at); err != nil {
-			return fmt.Errorf("gitstore: %w", err)
-		}
 	}
 
 	clean, err := s.repo.clean()
 	if err != nil {
 		return fmt.Errorf("gitstore: %w", err)
 	}
-	if clean {
-		return nil // nothing changed; a commit would say nothing
+	if !clean { // when it is clean nothing changed, and a commit would say nothing
+		who := s.author
+		who.When = s.now()
+		message := fmt.Sprintf("%s: %s", document, describe(files))
+		if err := s.repo.commit(message, who); err != nil {
+			return fmt.Errorf("gitstore: %q: %w", document, err)
+		}
+		s.unsent = true
+	}
+	s.federate(ctx)
+	return nil
+}
+
+// place writes a document's snapshot and the text it renders to into the
+// worktree and stages both, and reports the text it wrote.
+//
+// It is what a save and a pull have in common: the same files from the same
+// bytes, so a document written by a merge is written exactly as one written by
+// an edit and the two cannot drift into different repositories.
+func (s *Store) place(document, dir string, snapshot []byte) ([]string, error) {
+	files, err := render(snapshot, s.fileFor)
+	if err != nil {
+		return nil, fmt.Errorf("gitstore: %q: %w", document, err)
 	}
 
-	who := s.author
-	who.When = s.now()
-	message := fmt.Sprintf("%s: %s", document, describe(files))
-	if err := s.repo.commit(message, who); err != nil {
-		return fmt.Errorf("gitstore: %q: %w", document, err)
+	written := []string{path.Join(dir, stateFile)}
+	if err := s.write(written[0], snapshot); err != nil {
+		return nil, err
 	}
-	return nil
+	texts := make([]string, 0, len(files))
+	for _, f := range files {
+		at := path.Join(dir, f.path)
+		if err := s.write(at, []byte(f.text)); err != nil {
+			return nil, err
+		}
+		written = append(written, at)
+		texts = append(texts, f.path)
+	}
+	for _, at := range written {
+		if err := s.repo.add(at); err != nil {
+			return nil, fmt.Errorf("gitstore: %w", err)
+		}
+	}
+	return texts, nil
 }
 
 func (s *Store) write(name string, content []byte) error {
@@ -412,21 +524,16 @@ func render(snapshot []byte, fileFor func(crdt.Part) (string, bool)) ([]rendered
 
 // describe says what a commit is about, in the subject line, without pretending
 // to summarise an edit nobody recorded.
-func describe(files []rendered) string {
-	switch len(files) {
+func describe(names []string) string {
+	switch len(names) {
 	case 0:
 		return "state"
 	case 1:
-		return files[0].path
+		return names[0]
+	case 2, 3:
+		return strings.Join(names, ", ")
 	}
-	names := make([]string, 0, len(files))
-	for _, f := range files {
-		names = append(names, f.path)
-	}
-	if len(names) > 3 {
-		return fmt.Sprintf("%s and %d more", strings.Join(names[:3], ", "), len(names)-3)
-	}
-	return strings.Join(names, ", ")
+	return fmt.Sprintf("%s and %d more", strings.Join(names[:3], ", "), len(names)-3)
 }
 
 // Release tags the state as it stands now, which is what a version somebody
@@ -435,7 +542,12 @@ func describe(files []rendered) string {
 // It tags the commit the last [Store.Save] made rather than making one of its
 // own: a release is a name for a state that already exists, and inventing a
 // commit for it would put a state in the history that nobody was ever editing.
-func (s *Store) Release(_ context.Context, name, message string) error {
+//
+// It pushes on the same terms a save does, because a release nobody else can
+// name is not one, and because one rule for the whole store is easier to rely
+// on than two: the tag is here whatever the network did, every push carries
+// every tag, so the next push that arrives carries this one.
+func (s *Store) Release(ctx context.Context, name, message string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -451,6 +563,8 @@ func (s *Store) Release(_ context.Context, name, message string) error {
 	if err := s.repo.tag(name, head, who, message); err != nil {
 		return fmt.Errorf("gitstore: %w", err)
 	}
+	s.unsent = true
+	s.federate(ctx)
 	return nil
 }
 
@@ -594,4 +708,188 @@ func (s *Store) Reconcile(ctx context.Context, document string, theirs []byte) e
 		return fmt.Errorf("gitstore: reconciling %q: %w", document, err)
 	}
 	return s.Save(ctx, document, merged)
+}
+
+// --- the remote
+
+// ErrNoRemote reports an operation that needs a remote on a store that has
+// none. It is not federation failing; it is being asked to federate by
+// something that was never told where.
+var ErrNoRemote = errors.New("gitstore: no remote is configured")
+
+// Push sends everything committed here to the remote.
+//
+// It pushes a branch and the tags on it rather than a commit, so whatever has
+// accumulated locally goes in one go and a push that failed yesterday costs
+// nothing to recover from beyond the next one arriving.
+//
+// A push that is not a fast-forward fails rather than forcing. That means
+// another instance has committed something this one has not seen, and the
+// answer to that is [Store.Pull] — which merges, which is the operation this
+// whole package exists for — and not overwriting a history somebody else is
+// also writing.
+func (s *Store) Push(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.push(ctx)
+}
+
+// push is Push with the lock already held, because a save pushes too.
+func (s *Store) push(ctx context.Context) error {
+	if s.remote.URL == "" {
+		return ErrNoRemote
+	}
+	auth, err := s.credentials(ctx)
+	if err != nil {
+		return err
+	}
+	if err := s.repo.push(ctx, s.remote.URL, auth); err != nil {
+		// The URL is not in the message. It is the operator's, it is in their
+		// configuration, and it is one of the two places a password is written
+		// down in plain text — an error that ends up in a log should not be
+		// the other.
+		return fmt.Errorf("gitstore: pushing to the remote: %w", err)
+	}
+	s.unsent = false
+	return nil
+}
+
+// credentials asks the operator what to authenticate as.
+//
+// Nil is an answer, and a common one: a remote that wants nothing and an ssh
+// agent that has already been asked both come to the same thing. Nothing here
+// reads an environment variable or looks for a token file, because that would
+// be this package picking an identity on somebody's behalf and then acting as
+// them. Whose credentials these are is a decision, so it is theirs.
+//
+// It is asked on every operation rather than once, because credentials expire:
+// a token good for an hour outlives neither a server nor a document, and a
+// store that captured one at startup would federate until it quietly did not.
+func (s *Store) credentials(ctx context.Context) (transport.AuthMethod, error) {
+	if s.remote.Auth == nil {
+		return nil, nil
+	}
+	auth, err := s.remote.Auth(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gitstore: credentials for the remote: %w", err)
+	}
+	return auth, nil
+}
+
+// federate sends what this instance has committed and the remote has not
+// acknowledged, and does not fail the operation that called it when it cannot.
+// See [Store.Save] for why that is the direction.
+//
+// It says nothing when there is nothing owed. A server persists on a timer, so
+// most saves change nothing and make no commit, and opening a connection to a
+// git host every few seconds to say so would make a remote something an
+// operator turns off again.
+func (s *Store) federate(ctx context.Context) {
+	if s.remote.URL == "" || !s.unsent {
+		return
+	}
+	if err := s.push(ctx); err != nil && s.remote.PushFailed != nil {
+		s.remote.PushFailed(err)
+	}
+}
+
+// Pull brings back what other instances committed and merges it into this one.
+//
+// It fetches the remote's branch and, if that holds anything this instance
+// does not, merges every document there into the copy here and records the
+// result as one commit with two parents. The second parent is the whole point:
+// it is what puts their history into this branch, and a branch that does not
+// hold theirs cannot be pushed. So the commit is made even when the documents
+// come out unchanged — what it records is not that anything moved but that
+// this instance now holds what the other one wrote.
+//
+// Nothing is checked out. Git's own merge would write over the worktree, and
+// the worktree here may be holding a save whose commit was lost — see
+// [Store.Save] — so taking a tree from anywhere else would discard exactly what
+// that failure direction exists to protect. The merged state is written from
+// this side instead, and the text is written again with it, so a conflict
+// marker never reaches a document.
+//
+// It does not push the merge afterwards. Whether the other instances see it now
+// or at the next save is a policy, and the operator is the one with the loop.
+func (s *Store) Pull(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.remote.URL == "" {
+		return ErrNoRemote
+	}
+	auth, err := s.credentials(ctx)
+	if err != nil {
+		return err
+	}
+	theirs, err := s.repo.fetch(ctx, s.remote.URL, auth)
+	if err != nil {
+		return fmt.Errorf("gitstore: fetching from the remote: %w", err)
+	}
+	if theirs.IsZero() {
+		return nil // a remote nobody has pushed to holds nothing to merge
+	}
+	held, err := s.repo.contains(theirs)
+	if err != nil {
+		return fmt.Errorf("gitstore: %w", err)
+	}
+	if held {
+		// Their commit is already in this history, so a merge would say that
+		// this instance holds what it plainly holds.
+		return nil
+	}
+	if err := s.repo.adopt(theirs); err != nil {
+		return fmt.Errorf("gitstore: %w", err)
+	}
+	dirs, err := s.repo.documentsAt(theirs)
+	if err != nil {
+		return fmt.Errorf("gitstore: %w", err)
+	}
+	var merged []string
+	for _, dir := range dirs {
+		document, ok := nameOf(dir)
+		if !ok {
+			continue // a directory this store did not write
+		}
+		if err := s.pull(document, dir, theirs); err != nil {
+			return err
+		}
+		merged = append(merged, document)
+	}
+	who := s.author
+	who.When = s.now()
+	if err := s.repo.mergeCommit("merge "+describe(merged), who, theirs); err != nil {
+		return fmt.Errorf("gitstore: %w", err)
+	}
+	s.unsent = true
+	return nil
+}
+
+// pull merges one document as another instance last committed it into the copy
+// here, and writes the state and the text again from the result.
+//
+// There is always a copy here to merge with by the time this runs, including
+// for a document this instance has never seen: adopt has already put every file
+// of theirs that was missing into the worktree, so the two sides of a document
+// only they have are the same bytes — and merging a snapshot with itself is the
+// identity, which is the same thing said twice rather than a case to carry.
+func (s *Store) pull(document, dir string, from plumbing.Hash) error {
+	theirs, err := s.repo.fileAt(from, path.Join(dir, stateFile))
+	if err != nil {
+		return fmt.Errorf("gitstore: %q: %w", document, err)
+	}
+	// A state that will not open is not a state this instance does not have —
+	// see [Store.Load]. Merging against nothing would write their side over a
+	// document this instance holds and cannot currently read.
+	ours, err := s.read(path.Join(dir, stateFile))
+	if err != nil {
+		return fmt.Errorf("gitstore: reading %q: %w", document, err)
+	}
+	merged, err := Merge(ours, theirs)
+	if err != nil {
+		return fmt.Errorf("gitstore: reconciling %q: %w", document, err)
+	}
+	_, err = s.place(document, dir, merged)
+	return err
 }
