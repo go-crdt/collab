@@ -28,10 +28,25 @@ type gitRepo struct {
 }
 
 // openRepo opens the repository at dir, initialising one if there is none.
+//
+// A repository that is already there is used exactly as it is, on whatever
+// branch its HEAD names — everything that pushes and fetches here reads the
+// branch from HEAD rather than assuming one, so an operator whose repository is
+// on master, or on anything else, is not affected by the line below.
+//
+// What the line below decides is only the branch a repository this package
+// creates from nothing starts on, and go-git's own default is master. That is
+// the wrong answer here: a store that is given a remote will almost always meet
+// a host whose default branch is main, and a first push would then put a master
+// branch beside it that nobody asked for and nobody reads. An operator who
+// wants something else creates the repository themselves, which is one command
+// and is respected.
 func openRepo(dir string) (*gitRepo, error) {
 	repo, err := git.PlainOpen(dir)
 	if errors.Is(err, git.ErrRepositoryNotExists) {
-		repo, err = git.PlainInit(dir, false)
+		repo, err = git.PlainInitWithOptions(dir, &git.PlainInitOptions{
+			InitOptions: git.InitOptions{DefaultBranch: plumbing.Main},
+		})
 	}
 	if err != nil {
 		return nil, fmt.Errorf("gitstore: opening %s: %w", dir, err)

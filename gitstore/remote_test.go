@@ -84,7 +84,7 @@ func TestTwoInstancesFederateThroughARepository(t *testing.T) {
 	if err := paris.Save(ctx, "project:paper", opening.Snapshot()); err != nil {
 		t.Fatal(err)
 	}
-	if got := runIn(t, url, "show", "master:project%3Apaper/paper.tex"); got != "On rivers." {
+	if got := runIn(t, url, "show", "main:project%3Apaper/paper.tex"); got != "On rivers." {
 		t.Fatalf("the shared repository holds %q", got)
 	}
 
@@ -158,7 +158,7 @@ func TestTwoInstancesFederateThroughARepository(t *testing.T) {
 	if got := textOf(t, lyon, "project:paper"); got != "PS. On rivers. They run downhill." {
 		t.Fatalf("lyon reads %q", got)
 	}
-	if got := runIn(t, url, "show", "master:project%3Apaper/paper.tex"); got != "PS. On rivers. They run downhill." {
+	if got := runIn(t, url, "show", "main:project%3Apaper/paper.tex"); got != "PS. On rivers. They run downhill." {
 		t.Fatalf("the shared repository reads %q", got)
 	}
 }
@@ -546,16 +546,17 @@ func TestWhatTheRepositoryItselfCanBeInNoStateFor(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The shared repository calls its branch something else. Which branch is
+	// The shared repository calls its branch something else — master, here, which
+	// is what a repository older than this package is on. Which branch is
 	// pushed and fetched is the one this repository is on, so there is nothing
 	// to line up with and saying so is the whole of what can be done.
-	runIn(t, url, "branch", "-m", "master", "main")
+	runIn(t, url, "branch", "-m", "main", "master")
 	newcomer := instance(t, "newcomer", url)
 	err := newcomer.Pull(ctx)
 	if err == nil {
 		t.Fatal("a pull found a branch the remote does not have")
 	}
-	if !strings.Contains(err.Error(), "master") {
+	if !strings.Contains(err.Error(), "main") {
 		t.Errorf("the error does not name the branch it wanted: %v", err)
 	}
 
@@ -567,5 +568,52 @@ func TestWhatTheRepositoryItselfCanBeInNoStateFor(t *testing.T) {
 	}
 	if err := here.Pull(ctx); err == nil || !strings.Contains(err.Error(), "detached") {
 		t.Fatalf("Pull on a detached head = %v", err)
+	}
+}
+
+func TestARepositoryThisPackageCreatesStartsOnMain(t *testing.T) {
+	ctx := t.Context()
+	url := bare(t)
+	here := instance(t, "here", url)
+	if err := here.Save(ctx, "d", paper(t, 1, "one").Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(run(t, here, "rev-parse", "--abbrev-ref", "HEAD")); got != "main" {
+		t.Fatalf("a repository this package created is on %q", got)
+	}
+	// And that is the branch the shared repository ends up with, rather than a
+	// master branch beside a main nobody asked for.
+	if got := strings.TrimSpace(runIn(t, url, "rev-parse", "--abbrev-ref", "main")); got != "main" {
+		t.Fatalf("the shared repository does not have a main branch: %q", got)
+	}
+}
+
+func TestARepositoryThatAlreadyExistsKeepsItsOwnBranch(t *testing.T) {
+	ctx := t.Context()
+	url := bare(t)
+
+	// A repository older than this package, on master, with a commit already on
+	// it. Nothing here renames anybody's branch: what is pushed and fetched is
+	// read from HEAD, so the store simply works on master.
+	dir := t.TempDir()
+	runIn(t, dir, "init", "--initial-branch=master")
+	// The identity is given on the command rather than left to the machine's
+	// git configuration, which a CI runner does not have.
+	runIn(t, dir, "-c", "user.name=Ada", "-c", "user.email=ada@example",
+		"commit", "--allow-empty", "-m", "older than this package")
+
+	s, err := New(dir, WithAuthor("here", "here@example"), WithClock(stamps()),
+		WithRemote(Remote{URL: url}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(ctx, "d", paper(t, 1, "one").Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(run(t, s, "rev-parse", "--abbrev-ref", "HEAD")); got != "master" {
+		t.Fatalf("an existing repository was moved to %q", got)
+	}
+	if got := strings.TrimSpace(runIn(t, url, "rev-parse", "--abbrev-ref", "master")); got != "master" {
+		t.Fatalf("the push did not go to master: %q", got)
 	}
 }
