@@ -1,6 +1,7 @@
 package gitstore
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"github.com/go-crdt/crdt"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 )
 
 // Every call this store makes to git can fail — a disk fills, a lock is held,
@@ -38,6 +40,16 @@ const (
 	atResolv breaks = "resolve"
 	atDirs   breaks = "dirs"
 	atWrite  breaks = "write" // the file opens and refuses the bytes
+
+	// And the ones that need somewhere else to be reachable, which is the
+	// whole reason they are here: a network is not something a test can be
+	// asked to unplug.
+	atPush     breaks = "push"
+	atFetch    breaks = "fetch"
+	atContains breaks = "contains"
+	atDocsAt   breaks = "documentsAt"
+	atAdopt    breaks = "adopt"
+	atMerge    breaks = "mergeCommit"
 )
 
 var errBroken = errors.New("the repository said no")
@@ -356,4 +368,46 @@ func TestAReaderThatSaysNothing(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Load spun on a reader that says nothing")
 	}
+}
+
+func (b *broken) push(ctx context.Context, url string, auth transport.AuthMethod) error {
+	if err := b.fails(atPush); err != nil {
+		return err
+	}
+	return b.repository.push(ctx, url, auth)
+}
+
+func (b *broken) fetch(ctx context.Context, url string, auth transport.AuthMethod) (plumbing.Hash, error) {
+	if err := b.fails(atFetch); err != nil {
+		return plumbing.ZeroHash, err
+	}
+	return b.repository.fetch(ctx, url, auth)
+}
+
+func (b *broken) contains(hash plumbing.Hash) (bool, error) {
+	if err := b.fails(atContains); err != nil {
+		return false, err
+	}
+	return b.repository.contains(hash)
+}
+
+func (b *broken) documentsAt(hash plumbing.Hash) ([]string, error) {
+	if err := b.fails(atDocsAt); err != nil {
+		return nil, err
+	}
+	return b.repository.documentsAt(hash)
+}
+
+func (b *broken) adopt(from plumbing.Hash) error {
+	if err := b.fails(atAdopt); err != nil {
+		return err
+	}
+	return b.repository.adopt(from)
+}
+
+func (b *broken) mergeCommit(message string, who object.Signature, other plumbing.Hash) error {
+	if err := b.fails(atMerge); err != nil {
+		return err
+	}
+	return b.repository.mergeCommit(message, who, other)
 }

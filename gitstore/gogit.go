@@ -1,6 +1,7 @@
 package gitstore
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -8,8 +9,11 @@ import (
 	"strings"
 
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 )
 
 // gitRepo is the repository interface over a real repository, and the only
@@ -198,4 +202,229 @@ func (g *gitRepo) dirs() ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// --- the remote
+
+// remoteName is what the fetched branch is filed under, in refs/remotes. It is
+// not written to the repository's config and it is not "origin": a repository
+// this store shares may well have an origin of its own, belonging to whoever
+// clones it, and taking that name would mean answering for somebody else's.
+const remoteName = "collab"
+
+// remoteFor is the remote as go-git wants it, built for the call and thrown
+// away after it.
+//
+// Nothing is written to .git/config. The URL and the credentials come from the
+// caller on every operation — a token expires, and an operator who moves the
+// repository should not have to undo a line this package wrote behind them —
+// so there is nothing worth persisting and a config nobody edited is a config
+// nobody has to reconcile.
+func (g *gitRepo) remoteFor(url string) *git.Remote {
+	return git.NewRemote(g.repo.Storer, &config.RemoteConfig{Name: remoteName, URLs: []string{url}})
+}
+
+// branch is the branch this repository is on, which is the one that is pushed
+// and the one that is fetched.
+func (g *gitRepo) branch() (plumbing.ReferenceName, error) {
+	ref, err := g.repo.Reference(plumbing.HEAD, false)
+	if err != nil {
+		return "", fmt.Errorf("reading HEAD: %w", err)
+	}
+	if ref.Type() != plumbing.SymbolicReference {
+		return "", fmt.Errorf("HEAD is detached at %s, so there is no branch to push", ref.Hash())
+	}
+	return ref.Target(), nil
+}
+
+// push sends this repository's branch and its tags to the remote.
+//
+// The tags go with the branch because a release is a tag and a release that
+// never leaves the machine is not one. Neither refspec is forced: a branch that
+// is not a fast-forward means somebody else has committed and this instance has
+// not pulled yet, and a tag that already names a different commit means two
+// instances decided different things about one release — which is a
+// disagreement between people, not between replicas, and the only thing a
+// program can usefully do with it is say so.
+func (g *gitRepo) push(ctx context.Context, url string, auth transport.AuthMethod) error {
+	branch, err := g.branch()
+	if err != nil {
+		return err
+	}
+	err = g.remoteFor(url).PushContext(ctx, &git.PushOptions{
+		RemoteName: remoteName,
+		RefSpecs: []config.RefSpec{
+			config.RefSpec(branch + ":" + branch),
+			"refs/tags/*:refs/tags/*",
+		},
+		Auth: auth,
+	})
+	if errors.Is(err, git.NoErrAlreadyUpToDate) {
+		return nil // the remote has it already, which is what a push is for
+	}
+	if err != nil {
+		return fmt.Errorf("pushing: %w", err)
+	}
+	return nil
+}
+
+// fetch brings the remote's branch and tags into this repository and returns
+// the commit the branch points at, or the zero hash if there is nothing there.
+//
+// The branch is fetched into refs/remotes, so nothing this instance has
+// committed is touched by a fetch; deciding what to do with what arrived is
+// [Store.Pull]'s, and it is a decision, not a ref update. Tags are fetched
+// forced, because a tag is a name for a release and the remote is where the
+// instances agree what a name means — and a local tag that disagreed with it
+// could not have been pushed in the first place.
+func (g *gitRepo) fetch(ctx context.Context, url string, auth transport.AuthMethod) (plumbing.Hash, error) {
+	branch, err := g.branch()
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+	tracking := plumbing.NewRemoteReferenceName(remoteName, branch.Short())
+	err = g.remoteFor(url).FetchContext(ctx, &git.FetchOptions{
+		RemoteName: remoteName,
+		RefSpecs: []config.RefSpec{
+			config.RefSpec("+" + branch + ":" + tracking),
+			"+refs/tags/*:refs/tags/*",
+		},
+		Auth: auth,
+	})
+	switch {
+	case err == nil, errors.Is(err, git.NoErrAlreadyUpToDate):
+	case errors.Is(err, transport.ErrEmptyRemoteRepository):
+		// A remote nobody has pushed to yet holds nothing to merge, which is
+		// the ordinary state of the first instance to start.
+		return plumbing.ZeroHash, nil
+	default:
+		return plumbing.ZeroHash, fmt.Errorf("fetching: %w", err)
+	}
+	ref, err := g.repo.Reference(tracking, true)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("the remote has no %s: %w", branch.Short(), err)
+	}
+	return ref.Hash(), nil
+}
+
+// contains reports whether this repository's history already holds a commit.
+func (g *gitRepo) contains(hash plumbing.Hash) (bool, error) {
+	head, err := g.head()
+	if err != nil {
+		return false, nil // nothing has been committed here, so it holds nothing
+	}
+	if head == hash {
+		return true, nil
+	}
+	ours, err := g.repo.CommitObject(head)
+	if err != nil {
+		return false, fmt.Errorf("reading %s: %w", head, err)
+	}
+	theirs, err := g.repo.CommitObject(hash)
+	if err != nil {
+		return false, fmt.Errorf("reading %s: %w", hash, err)
+	}
+	held, err := theirs.IsAncestor(ours)
+	if err != nil {
+		return false, fmt.Errorf("comparing %s with %s: %w", hash, head, err)
+	}
+	return held, nil
+}
+
+// documentsAt lists the directories a commit holds a document in, which is the
+// ones with a state file: a directory without one is not something this store
+// wrote, whatever it is called.
+func (g *gitRepo) documentsAt(hash plumbing.Hash) ([]string, error) {
+	commit, err := g.repo.CommitObject(hash)
+	if err != nil {
+		return nil, fmt.Errorf("reading revision %s: %w", hash, err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return nil, fmt.Errorf("reading revision %s: %w", hash, err)
+	}
+	var out []string
+	for _, e := range tree.Entries {
+		if e.Mode != filemode.Dir {
+			continue
+		}
+		sub, err := tree.Tree(e.Name)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s at %s: %w", e.Name, hash, err)
+		}
+		if _, err := sub.File(stateFile); err != nil {
+			continue
+		}
+		out = append(out, e.Name)
+	}
+	return out, nil
+}
+
+// adopt copies into the worktree every file a commit holds that this side does
+// not, and stages them.
+//
+// A merge commit's tree is built from the index, which holds this side's
+// content, so a file that exists only on the other side would be missing from
+// the merge — and a tree missing a file is git saying the merge deleted it.
+// Everything this store writes is written again from the merged state and so
+// is never missing; a repository is also where somebody puts a README, and a
+// pull must not be the thing that removes one.
+func (g *gitRepo) adopt(from plumbing.Hash) error {
+	commit, err := g.repo.CommitObject(from)
+	if err != nil {
+		return fmt.Errorf("reading revision %s: %w", from, err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return fmt.Errorf("reading revision %s: %w", from, err)
+	}
+	iter := tree.Files()
+	defer iter.Close()
+	return iter.ForEach(func(f *object.File) error {
+		if _, err := g.tree.Filesystem.Stat(f.Name); err == nil {
+			return nil // this side has one, and this side's is the one that stays
+		}
+		content, err := f.Contents()
+		if err != nil {
+			return fmt.Errorf("reading %s at %s: %w", f.Name, from, err)
+		}
+		out, err := g.create(f.Name)
+		if err != nil {
+			return err
+		}
+		if _, err := io.WriteString(out, content); err != nil {
+			out.Close()
+			return fmt.Errorf("writing %s: %w", f.Name, err)
+		}
+		if err := out.Close(); err != nil {
+			return fmt.Errorf("writing %s: %w", f.Name, err)
+		}
+		return g.add(f.Name)
+	})
+}
+
+// mergeCommit records the worktree as a commit with two parents, this side's
+// and the other's.
+//
+// The second parent is the point of the whole operation: it is what puts the
+// other instance's history into this branch, and a branch that does not hold
+// theirs cannot be pushed. It is made even when the tree is unchanged, because
+// what the commit records is not that the documents moved but that this
+// instance now holds what the other one committed.
+func (g *gitRepo) mergeCommit(message string, who object.Signature, other plumbing.Hash) error {
+	parents := []plumbing.Hash{}
+	if head, err := g.head(); err == nil {
+		parents = append(parents, head)
+	}
+	parents = append(parents, other)
+	_, err := g.tree.Commit(message, &git.CommitOptions{
+		Author:            &who,
+		Committer:         &who,
+		Parents:           parents,
+		AllowEmptyCommits: true,
+	})
+	if err != nil {
+		return fmt.Errorf("committing the merge: %w", err)
+	}
+	return nil
 }

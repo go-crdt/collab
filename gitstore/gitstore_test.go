@@ -374,7 +374,13 @@ func gitShow(t *testing.T, s *Store, rev string) map[string]string {
 // that wrote it believes.
 func run(t *testing.T, s *Store, args ...string) string {
 	t.Helper()
-	dir := s.repo.root()
+	return runIn(t, s.repo.root(), args...)
+}
+
+// runIn is run against any repository, which the remote tests need because the
+// repository two instances share is not either of their stores.
+func runIn(t *testing.T, dir string, args ...string) string {
+	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
@@ -441,18 +447,18 @@ func TestTheCallerDecidesWhatAFileIs(t *testing.T) {
 // What a commit is about, in the subject line, for each number of files.
 func TestWhatACommitSaysItIsAbout(t *testing.T) {
 	cases := []struct {
-		files []rendered
+		names []string
 		want  string
 	}{
 		{nil, "state"},
-		{[]rendered{{path: "a"}}, "a"},
-		{[]rendered{{path: "a"}, {path: "b"}}, "a, b"},
-		{[]rendered{{path: "a"}, {path: "b"}, {path: "c"}}, "a, b, c"},
-		{[]rendered{{path: "a"}, {path: "b"}, {path: "c"}, {path: "d"}}, "a, b, c and 1 more"},
+		{[]string{"a"}, "a"},
+		{[]string{"a", "b"}, "a, b"},
+		{[]string{"a", "b", "c"}, "a, b, c"},
+		{[]string{"a", "b", "c", "d"}, "a, b, c and 1 more"},
 	}
 	for _, c := range cases {
-		if got := describe(c.files); got != c.want {
-			t.Errorf("describe(%d files) = %q, want %q", len(c.files), got, c.want)
+		if got := describe(c.names); got != c.want {
+			t.Errorf("describe(%d names) = %q, want %q", len(c.names), got, c.want)
 		}
 	}
 }

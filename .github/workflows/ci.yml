@@ -142,6 +142,12 @@ jobs:
   # server: git is a filesystem format, so the tests build real repositories in
   # temporary directories and read them back.
   #
+  # That includes the remote. A bare repository in a temporary directory is a
+  # remote as far as go-git is concerned, reached over the same transport it
+  # reaches a host over, so the tests that push and pull have pushed and pulled
+  # rather than pretended to. What they need is the git binaries the runner
+  # already has, and no network at all.
+  #
   # The coverage gate is SPLIT, and deliberately so. gitstore.go is the logic —
   # what a document is, where it goes, how a release is a tag on a commit that
   # already exists — and it is held to the org's 100%. gogit.go is the adapter,
