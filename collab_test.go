@@ -5,7 +5,9 @@ package collab_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -43,12 +45,68 @@ func awaitFor(t *testing.T, c *collab.Client, what string, within time.Duration,
 		case <-c.Changes():
 		case <-c.Done():
 			if !want() {
-				t.Fatalf("session ended before %s: %v (text %q)", what, c.Err(), text(t, c))
+				t.Fatalf("session ended before %s: %v\n%s", what, c.Err(), describe(t, c))
 			}
 		case <-deadline:
-			t.Fatalf("timed out waiting for %s; text is %q", what, text(t, c))
+			t.Fatalf("timed out waiting for %s\n%s", what, describe(t, c))
 		}
 	}
+}
+
+// describe renders every part the client holds, which is what a test that timed
+// out needs to know and what it used to be told instead of.
+//
+// The message here read c.Text("body") whatever document the test was using.
+// TestTheJavaScriptAPIConverges uses "file:main.tex", so its every failure —
+// five of the seven in sixty CI runs — reported `text is ""` for a part that
+// test never writes to, and said nothing at all about what had arrived.
+func describe(t *testing.T, c *collab.Client) string {
+	t.Helper()
+	version := c.Version()
+	if len(version) == 0 {
+		return "  the client holds no part anything has been written to"
+	}
+	parts := make([]crdt.Part, 0, len(version))
+	for part := range version {
+		parts = append(parts, part)
+	}
+	sort.Slice(parts, func(i, j int) bool {
+		if parts[i].Kind != parts[j].Kind {
+			return parts[i].Kind < parts[j].Kind
+		}
+		return parts[i].Name < parts[j].Name
+	})
+	var b strings.Builder
+	for _, part := range parts {
+		switch part.Kind {
+		case crdt.PartText:
+			h, err := c.Text(part.Name)
+			if err != nil {
+				fmt.Fprintf(&b, "  text %q: %v\n", part.Name, err)
+				continue
+			}
+			fmt.Fprintf(&b, "  text %q: %q\n", part.Name, h.String())
+		case crdt.PartList:
+			h, err := c.List(part.Name)
+			if err != nil {
+				fmt.Fprintf(&b, "  list %q: %v\n", part.Name, err)
+				continue
+			}
+			fmt.Fprintf(&b, "  list %q: %d values\n", part.Name, h.Len())
+		default:
+			h, err := c.Map(part.Name)
+			if err != nil {
+				fmt.Fprintf(&b, "  map %q: %v\n", part.Name, err)
+				continue
+			}
+			fmt.Fprintf(&b, "  map %q: %d keys\n", part.Name, h.Len())
+		}
+	}
+	// A part nothing has been written to promises nothing and is not in a
+	// version, so it does not appear here. That is not a part going missing:
+	// it is a part holding nothing.
+	fmt.Fprintf(&b, "  peers: %d", len(c.Peers()))
+	return b.String()
 }
 
 // serve starts a Collab server on an in-memory connection and returns both,
