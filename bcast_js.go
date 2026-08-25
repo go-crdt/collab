@@ -156,6 +156,11 @@ func (s *Server) ServeBroadcastChannel(ctx context.Context, room string) error {
 // on the same room accordingly. window bounds the decision — pass
 // [DefaultElectionWindow] unless there is a reason not to. See [electRole] for
 // the rule that keeps two tabs opening together from both hosting.
+//
+// Prefer [OpenBroadcastSession], which keeps the elected bus and identity and so
+// leaves no window between electing and serving where an elected host is deaf.
+// This two-call shape reopens the bus to serve, which is exactly that window; it
+// is kept for a page that already knows its role.
 func HostOrJoin(ctx context.Context, room string, window time.Duration) (Role, error) {
 	b, err := newBCBus(room)
 	if err != nil {
@@ -163,4 +168,77 @@ func HostOrJoin(ctx context.Context, room string, window time.Duration) (Role, e
 	}
 	defer b.close()
 	return electRole(ctx, attach(b, randomID()), window)
+}
+
+// A BroadcastSession is a zero-config same-browser endpoint that has already
+// elected its role and is live: a host that is answering hellos, or a client that
+// has dialled its host — both on ONE BroadcastChannel and identity, kept from the
+// election through to serving. That is what closes the serve-gap: an elected host
+// answers the moment it wins, so a second tab opening while the first is still
+// wiring its [Server] is welcomed rather than left to elect itself a rival host.
+type BroadcastSession struct {
+	role Role
+	host *bcastHost  // set when RoleHost: already answering
+	conn carrierConn // set when RoleClient: already dialled
+	bus  *bcBus
+}
+
+// OpenBroadcastSession opens the room's BroadcastChannel, elects host or client on
+// it, and returns a live [BroadcastSession] holding that decision — the
+// gap-free replacement for [HostOrJoin] followed by a fresh bus. A host is
+// already answering hellos and beaconing; a client has already dialled its host.
+// ctx bounds the election (and, for a client, the dial); window is the election
+// window — pass [DefaultElectionWindow].
+//
+// A page that hosts builds its [Server] and calls [BroadcastSession.Serve]; a
+// page that joins calls [Join] with [BroadcastSession.Transport]. Either way ctx
+// is the session's lifetime — cancel it to tear down — and [BroadcastSession.Close]
+// releases the channel if the role is abandoned before serving or joining.
+func OpenBroadcastSession(ctx context.Context, room string, window time.Duration) (*BroadcastSession, error) {
+	b, err := newBCBus(room)
+	if err != nil {
+		return nil, err
+	}
+	role, host, conn, err := hostOrJoinBus(ctx, attach(b, randomID()), window)
+	if err != nil {
+		b.close()
+		return nil, err
+	}
+	return &BroadcastSession{role: role, host: host, conn: conn, bus: b}, nil
+}
+
+// Role is whether this tab elected to host the document or to join one.
+func (bs *BroadcastSession) Role() Role { return bs.role }
+
+// Serve holds the document for the room: it wires s into the answerer that has
+// been welcoming and buffering tabs since the election, so those tabs' sessions
+// begin at once, and blocks until the room is torn down (its ctx cancelled). It
+// returns [ErrHostSuperseded] if another tab with priority took over the room, on
+// which the caller should re-join rather than treat it as a failure. It is a
+// no-op error for a client session.
+func (bs *BroadcastSession) Serve(s *Server) error {
+	if bs.role != RoleHost || bs.host == nil {
+		return ErrProtocol
+	}
+	defer bs.bus.close()
+	bs.host.attachServer(s)
+	defer bs.host.close()
+	return bs.host.wait()
+}
+
+// Transport hands the already-dialled host connection to [Join] for a client
+// session, so joining reuses the carrier the election opened rather than dialling
+// again. It is nil-safe to call on a host session, returning a transport whose
+// open fails.
+func (bs *BroadcastSession) Transport() Transport { return &openedCarrier{c: bs.conn} }
+
+// Close releases the channel for a session abandoned before it served or joined
+// (a host that hit a setup error before [BroadcastSession.Serve]); once serving
+// or joined, the session's own teardown closes it.
+func (bs *BroadcastSession) Close() error {
+	if bs.host != nil {
+		bs.host.close()
+	}
+	bs.bus.close()
+	return nil
 }

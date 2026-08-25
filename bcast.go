@@ -84,6 +84,14 @@ const (
 	// ctlBye announces a tab leaving. It is broadcast so its host drops the
 	// session and its participants stop waiting on it.
 	ctlBye byte = 4
+	// ctlHost is a host's beacon: from is the host, to is zero. A host broadcasts
+	// it the instant it is elected and then periodically for as long as it holds
+	// the room. It is what makes the election race-free at any timing: a tab that
+	// opens while a host is still wiring its [Server] — the window that once let a
+	// second host be elected — hears the beacon and joins instead. And if two tabs
+	// ever both believe they host, the beacon settles it deterministically: the one
+	// with the higher identifier hears the lower's beacon and steps down.
+	ctlHost byte = 5
 )
 
 // helloRetry is how often a dialling tab repeats its hello until its host
@@ -92,6 +100,24 @@ const (
 // waiting on a hello nobody was yet listening for. It is small because a post on
 // a same-origin bus is delivered in well under a millisecond.
 const helloRetry = 30 * time.Millisecond
+
+// hostBeacon is how often a host re-announces itself with a [ctlHost] frame. It
+// is short next to the election window so a tab electing during a former
+// serve-gap always hears a beacon within its window and joins rather than
+// electing a second host, and so two hosts that somehow coexist settle which one
+// steps down within a couple of ticks. Like [helloRetry], it is cheap because a
+// post on a same-origin bus is delivered in well under a millisecond.
+const hostBeacon = 40 * time.Millisecond
+
+// ErrHostSuperseded is why a host's serve loop returned: another tab with a lower
+// identifier — the one the tie-break gives priority — announced itself as host,
+// so this tab steps down to let that one hold the room. It is the self-healing
+// half of the election: even if two tabs ever both reach [RoleHost], exactly one
+// keeps the document and the other yields, rather than the two drifting apart as
+// separate documents. A caller that hosts should, on this error, re-join the room
+// (it will now find the surviving host answering) rather than treat it as a
+// failure.
+var ErrHostSuperseded = errors.New("collab: another tab is hosting this room")
 
 // A Role is which side of the protocol a tab took, decided by [electRole].
 type Role int
@@ -254,28 +280,32 @@ func (bc *busConn) post(ctl byte, to uint64, payload []byte) {
 }
 
 // electRole decides whether this tab hosts the document or joins one already
-// being held, and does it so that tabs opening together never both host.
+// being held, and does it so that tabs opening at any timing never both host.
 //
 // Each tab broadcasts a hello and then watches the bus for the length of the
-// election window:
+// election window, re-broadcasting the hello each [helloRetry] so a tab that
+// opened after this one's first hello — its bus not yet existing then — still
+// hears this tab and defers to the lower identifier. (A single hello was how two
+// tabs could both reach [RoleHost]: the later one never heard the earlier's one
+// hello, and the earlier was not yet answering.) What it hears decides it:
 //
-//   - A welcome addressed to it means a host is already serving and has answered:
-//     this tab joins. This is what a tab that opens well after the first finds.
+//   - A host beacon ([ctlHost]) from any tab means a host holds the room — even
+//     one still wiring its [Server] and not yet welcoming: this tab joins.
+//   - A welcome addressed to it means a host answered its hello: this tab joins.
 //   - A hello from a lower identifier means a tab with priority is still
 //     deciding and will host: this tab joins.
-//   - Neither, before the window elapses, means there is no host and no tab with
-//     priority: this tab hosts.
+//   - None of these, before the window elapses, means there is no host and no tab
+//     with priority: this tab hosts.
 //
-// Because the tie is broken by the lowest identifier, exactly one tab among any
-// set opening together hosts, and every other joins it. The one assumption is
-// that the window is longer than the spread in when tabs that open "together"
-// actually run and than a round trip on the bus — both far below it on a
-// same-origin bus, and a tab that opens outside the window simply finds the host
-// already answering. ctx ending before the window returns its error.
+// Because the tie is broken by the lowest identifier and every tab re-announces
+// itself through the window, exactly one tab among any set that overlaps hosts,
+// and every other joins it. A tab opening outside the window finds the host's
+// beacon or a welcome at once. ctx ending before the window returns its error.
 func electRole(ctx context.Context, bc *busConn, window time.Duration) (Role, error) {
-	bc.post(ctlHello, 0, nil)
 	ectx, cancel := context.WithTimeout(ctx, window)
 	defer cancel()
+	stop := reannounce(ectx, bc, ctlHello)
+	defer stop()
 	for {
 		e, err := bc.in.recv(ectx)
 		if err != nil {
@@ -285,12 +315,42 @@ func electRole(ctx context.Context, bc *busConn, window time.Duration) (Role, er
 			return RoleHost, nil
 		}
 		switch {
+		case e.ctl == ctlHost:
+			return RoleClient, nil
 		case e.ctl == ctlWelcome && e.to == bc.selfID:
 			return RoleClient, nil
 		case e.ctl == ctlHello && e.from < bc.selfID:
 			return RoleClient, nil
 		}
 	}
+}
+
+// reannounce broadcasts ctl once now and again every helloRetry until ctx ends or
+// the returned stop is called, so a tab keeps announcing itself for as long as it
+// is deciding or holding the room. It is how an election hello reaches a tab that
+// opened late and how a host's beacon keeps reaching the room.
+func reannounce(ctx context.Context, bc *busConn, ctl byte) (stop func()) {
+	bc.post(ctl, 0, nil)
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(helloRetry)
+		if ctl == ctlHost {
+			t.Reset(hostBeacon)
+		}
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				bc.post(ctl, 0, nil)
+			}
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
 }
 
 // dialBus joins the document a host on the bus is holding. It broadcasts a hello,
@@ -374,48 +434,181 @@ func (c *bcastClient) Close() error {
 	return nil
 }
 
-// serveBus is the host: it hears every tab on the bus, answers each hello with a
-// welcome, and runs one session per tab, routing that tab's messages to it. It
-// supports as many tabs as join, and returns when ctx ends, closing every
-// session it was holding.
+// serveBus is the host over a bus whose Server is known up front: it starts a
+// host answerer, attaches the server at once, and blocks until the room is torn
+// down, closing every session it held. It is the direct-role entry
+// ([Server.ServeBroadcastChannel]) writes in terms of the same [bcastHost] the
+// zero-config path uses, so both share one answering loop.
 func serveBus(ctx context.Context, s *Server, bc *busConn) error {
-	ends := map[uint64]*bcastEnd{}
-	defer func() {
-		for _, e := range ends {
-			_ = e.Close()
-		}
-	}()
+	h := newBcastHost(ctx, bc)
+	h.attachServer(s)
+	defer h.close()
+	return h.wait()
+}
+
+// A bcastHost is the host side of a room: it hears every tab on the bus, answers
+// each hello with a welcome, beacons its presence, and runs one session per tab.
+//
+// It answers from the instant it is created — before its [Server] is attached —
+// which is what closes the serve-gap. A tab that opens while the host is still
+// wiring its Server is welcomed immediately and its session buffered, so it never
+// mistakes the wiring for an empty room and elects a second host; its buffered
+// messages replay into a real session the moment [bcastHost.attachServer] runs.
+type bcastHost struct {
+	bc   *busConn
+	done chan error
+
+	mu   sync.Mutex
+	s    *Server              // nil until attachServer wires it; sessions buffer until then
+	ends map[uint64]*bcastEnd // one per tab heard from
+}
+
+// newBcastHost starts a host answerer on bc under ctx: it welcomes hellos, routes
+// data and beacons at once, buffering each tab's session until a Server is
+// attached. Its loop returns — reported through [bcastHost.wait] — when ctx ends
+// or a lower-identifier host beacon supersedes it.
+func newBcastHost(ctx context.Context, bc *busConn) *bcastHost {
+	h := &bcastHost{bc: bc, done: make(chan error, 1), ends: map[uint64]*bcastEnd{}}
+	go func() { h.done <- h.run(ctx) }()
+	return h
+}
+
+// run reads the bus, answering hellos, routing data and stepping down on a
+// rightful host's beacon, until ctx ends. It beacons this host's presence
+// throughout.
+func (h *bcastHost) run(ctx context.Context) error {
+	stop := reannounce(ctx, h.bc, ctlHost)
+	defer stop()
 	for {
-		e, err := bc.in.recv(ctx)
+		e, err := h.bc.in.recv(ctx)
 		if err != nil {
 			return err
 		}
 		switch {
+		case e.ctl == ctlHost && e.from < h.bc.selfID:
+			// A host with priority exists: step down so the room keeps one document.
+			return ErrHostSuperseded
 		case e.ctl == ctlHello:
-			// A hello from a tab not yet known opens its session; one from a tab
-			// already known is a repeat from a dialler that has not heard the
-			// welcome yet, and is answered again without a second session.
-			if _, ok := ends[e.from]; !ok {
-				end := &bcastEnd{ctx: ctx, bc: bc, clientID: e.from, in: newInbox()}
-				ends[e.from] = end
-				go func() {
-					_ = s.session(end)
-					_ = end.Close()
-				}()
-			}
-			bc.post(ctlWelcome, e.from, nil)
-		case e.ctl == ctlData && e.to == bc.selfID:
-			if end, ok := ends[e.from]; ok {
-				end.in.push(envelope{ctl: ctlData, payload: e.payload})
-			}
+			h.onHello(ctx, e.from)
+		case e.ctl == ctlData && e.to == h.bc.selfID:
+			h.onData(e.from, e.payload)
 		case e.ctl == ctlBye:
-			if end, ok := ends[e.from]; ok {
-				_ = end.Close()
-				delete(ends, e.from)
-			}
+			h.onBye(e.from)
 		}
 	}
 }
+
+// onHello welcomes a tab. A hello from a tab not yet known opens its session (or
+// buffers it until a Server is attached); one from a tab already known is a
+// repeat from a dialler that has not heard the welcome yet, answered again
+// without a second session.
+func (h *bcastHost) onHello(ctx context.Context, from uint64) {
+	h.mu.Lock()
+	if _, ok := h.ends[from]; !ok {
+		end := &bcastEnd{ctx: ctx, bc: h.bc, clientID: from, in: newInbox()}
+		h.ends[from] = end
+		if h.s != nil {
+			h.startSession(h.s, end)
+		}
+	}
+	h.mu.Unlock()
+	h.bc.post(ctlWelcome, from, nil)
+}
+
+// onData routes a tab's message into its session, dropping data from a tab it
+// does not know.
+func (h *bcastHost) onData(from uint64, payload []byte) {
+	h.mu.Lock()
+	end, ok := h.ends[from]
+	h.mu.Unlock()
+	if ok {
+		end.in.push(envelope{ctl: ctlData, payload: payload})
+	}
+}
+
+// onBye ends a tab's session, ignoring a bye for one never seen.
+func (h *bcastHost) onBye(from uint64) {
+	h.mu.Lock()
+	end, ok := h.ends[from]
+	if ok {
+		delete(h.ends, from)
+	}
+	h.mu.Unlock()
+	if ok {
+		_ = end.Close()
+	}
+}
+
+// startSession runs one tab's session against the server. The caller holds h.mu.
+func (h *bcastHost) startSession(s *Server, end *bcastEnd) {
+	go func() {
+		_ = s.session(end)
+		_ = end.Close()
+	}()
+}
+
+// attachServer wires the Server in and starts a session for every tab already
+// welcomed and buffered while there was none. After it, a new tab's session
+// starts the moment its hello is heard.
+func (h *bcastHost) attachServer(s *Server) {
+	h.mu.Lock()
+	h.s = s
+	for _, end := range h.ends {
+		h.startSession(s, end)
+	}
+	h.mu.Unlock()
+}
+
+// wait blocks until the answer loop returns and reports why — ctx ended, or a
+// rightful host superseded this one ([ErrHostSuperseded]).
+func (h *bcastHost) wait() error { return <-h.done }
+
+// close ends the loop, if it has not already, and closes every session it held.
+// It is idempotent, and the reason it hands the loop makes the reader on each
+// session end return so its goroutine stops.
+func (h *bcastHost) close() {
+	h.bc.in.fail(ErrBroadcastClosed)
+	h.mu.Lock()
+	ends := h.ends
+	h.ends = map[uint64]*bcastEnd{}
+	h.mu.Unlock()
+	for _, e := range ends {
+		_ = e.Close()
+	}
+}
+
+// hostOrJoinBus runs the same-browser election on bc and hands back a live
+// endpoint, closing the serve-gap the old two-call shape ([HostOrJoin] then a
+// fresh bus for serving) left open. The bus and identity that elected are the
+// ones that go on to serve or dial — nothing is reopened — so an elected host
+// answers hellos from the instant it wins, and a client dials on the same
+// carrier it elected over.
+//
+// It returns exactly one of a running [bcastHost] (this tab is host, already
+// answering — attach a Server with [bcastHost.attachServer] and block on
+// [bcastHost.wait]) or a dialled [carrierConn] (this tab joined — hand it to a
+// session). ctx ending during the election or the dial returns its error.
+func hostOrJoinBus(ctx context.Context, bc *busConn, window time.Duration) (Role, *bcastHost, carrierConn, error) {
+	role, err := electRole(ctx, bc, window)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	if role == RoleHost {
+		return RoleHost, newBcastHost(ctx, bc), nil, nil
+	}
+	conn, err := dialBus(ctx, bc)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	return RoleClient, nil, conn, nil
+}
+
+// An openedCarrier is a [Transport] over a carrier that is already open — the one
+// [hostOrJoinBus] dialled for a client — so a joined tab reuses that connection
+// rather than dialling a second time.
+type openedCarrier struct{ c carrierConn }
+
+func (t *openedCarrier) open(context.Context) (carrierConn, error) { return t.c, nil }
 
 // A bcastEnd is the host's side of one tab's session: a carrier like the one a
 // gRPC stream or a pipe presents, with its received messages fed in by serveBus

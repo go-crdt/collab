@@ -244,6 +244,8 @@ jobs:
             echo "::error::the browser-to-browser session did not run"; exit 1; }
           grep -q 'two tabs, one browser, no server' js.log || {
             echo "::error::the tab-to-tab BroadcastChannel session did not run"; exit 1; }
+          grep -q 'gap-free tab-to-tab session' js.log || {
+            echo "::error::the serve-gap BroadcastSession proof did not run"; exit 1; }
 
   arch-native:
     name: arch ${{ matrix.label }}
