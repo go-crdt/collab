@@ -703,11 +703,38 @@ func (d *document) applyOperations(ctx context.Context, from *subscriber, raw []
 	// the link back — and returns to where it started. Applying it a second
 	// time advances nothing, and without this it would be passed on again, and
 	// again. Idempotent is not the same as terminating.
-	if d.doc.Version().Equal(before) {
+	// What is passed on is what the server LEARNED, not what it was handed,
+	// and the difference is not cosmetic.
+	//
+	// Apply parks an operation whose causal predecessors have not arrived, and
+	// releases it later when they do. So the operations a batch adds to this
+	// replica are not the operations in that batch: a batch can add nothing
+	// now and a great deal three batches later, and the ones it releases were
+	// never in any batch that was passed on. Relaying the bytes that happened
+	// to arrive therefore leaves operations that this server holds and has
+	// never told anybody about — and a participant missing one of those never
+	// hears it from anywhere, because by then the server has it and will not
+	// pass it on again. That is collab#62: subscribers stranded a few
+	// operations short of a document the server holds in full, holding the
+	// operations that come after the one they are missing and unable to apply
+	// any of them.
+	//
+	// Asking the replica what it gained answers both questions at once. It is
+	// empty exactly when nothing was learned, which is the termination this
+	// needs — an operation that has been round a loop of servers adds nothing
+	// the second time and stops there. And it is complete, which is the part
+	// the raw bytes could not give: every operation this server ever applies is
+	// passed on once, at the moment it becomes applied, so a participant that
+	// was subscribed then has heard it and one that arrives later gets it in
+	// the welcome.
+	learned := d.doc.OpsSince(before)
+	if len(learned) == 0 {
 		return nil
 	}
+	// These operations came from this document, so they cannot fail to encode.
+	relay, _ := crdt.AppendPartOps(nil, learned)
 	d.dirty = true
-	d.broadcast(from, operationsMessage(raw))
+	d.broadcast(from, operationsMessage(relay))
 	return nil
 }
 

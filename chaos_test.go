@@ -28,15 +28,18 @@ import (
 // Sized from the environment so the same harness can be run harder by hand than
 // it is in CI — CHAOS_EDITORS, CHAOS_ROUNDS, CHAOS_CUTS.
 func TestEverythingAtOnceAndBrokenWhileItRuns(t *testing.T) {
-	// Off unless asked for, because it fails: it reproduces collab#62, where a
-	// participant that rejoins after being dropped can stay permanently short
-	// of the document while still connected. A test that reddens CI for a bug
-	// already written down helps nobody, and deleting it would take the
-	// reproduction with it.
+	// Off unless asked for, because it is slow and because somebody running
+	// the suite while they work does not want it. CI sets COLLAB_CHAOS, so it
+	// runs where a harness has to: one that never runs is one that has quietly
+	// stopped working.
+	//
+	// It found collab#62 and it is what would catch it coming back, which is
+	// why CI runs it with CHAOS_BACKLOG far under the number of participants —
+	// the setting under which a rejoining participant used to be stranded.
 	//
 	//	COLLAB_CHAOS=1 CHAOS_BACKLOG=4 go test -race -run TestEverythingAtOnce -v .
 	if os.Getenv("COLLAB_CHAOS") == "" {
-		t.Skip("set COLLAB_CHAOS=1 to run the chaos harness; see collab#62")
+		t.Skip("set COLLAB_CHAOS=1 to run the chaos harness")
 	}
 
 	editors := envInt("CHAOS_EDITORS", 40)
@@ -139,11 +142,13 @@ func TestEverythingAtOnceAndBrokenWhileItRuns(t *testing.T) {
 			for i := 0; i < cuts; i++ {
 				links[r.IntN(len(links))].cut()
 			}
-			// Refuse every other turn, and for the whole of it. A coin flip
-			// here made the test pass on a coincidence: the window has to be
-			// certain to span a persist tick, or the guard below that says the
-			// chaos happened is itself the flaky part.
-			hot.refuse(turn%2 == 0)
+			// Refuse until a refusal has actually been reported, and only then
+			// start alternating. A coin flip here made the test pass on a
+			// coincidence, and alternating from the start still left short runs
+			// where no persist tick landed in a refusing window — the guard
+			// below that says the chaos happened has to be the certain part,
+			// not the lucky one.
+			hot.refuse(persistErrors.Load() == 0 || turn%2 == 0)
 			// Archive whatever has gone quiet, which for a document being
 			// typed into means asking constantly and being told no.
 			moved, err := store.Archive(ctx, time.Nanosecond)
@@ -155,6 +160,15 @@ func TestEverythingAtOnceAndBrokenWhileItRuns(t *testing.T) {
 	}()
 
 	wg.Wait()
+	// The breaker runs on until the chaos it exists to cause has demonstrably
+	// happened, rather than until the typing stops. A short run could otherwise
+	// end with no save ever attempted during a refusing window, and the guard
+	// below that says the disk was made to fill up would be the flaky part of
+	// this test rather than the certain one.
+	waited := time.Now()
+	for persistErrors.Load() == 0 && time.Since(waited) < 30*time.Second {
+		time.Sleep(2 * time.Millisecond)
+	}
 	close(breaking)
 	wgBreak.Wait()
 	hot.refuse(false)

@@ -85,6 +85,21 @@ jobs:
       - run: go vet ./...
       - run: go build ./...
       - run: go test -race ./...
+      # The chaos harness: reconnecting participants, a store that is two
+      # stores, an archive documents are moved into while people type into
+      # them, a backlog far under the size of the room, and a disk that refuses
+      # to write. It is off by default because it is slow and because a
+      # developer running the suite does not want it; it runs here because a
+      # harness that never runs is a harness that stops working. CHAOS_BACKLOG
+      # is set well under the number of participants on purpose: that is the
+      # setting under which collab#62 was found, and the one that would catch
+      # it coming back.
+      - name: Chaos
+        shell: bash
+        env:
+          COLLAB_CHAOS: "1"
+          CHAOS_BACKLOG: "4"
+        run: go test -race -timeout 600s -run TestEverythingAtOnce -v .
       - name: Test + 100% coverage gate
         shell: bash
         run: |
