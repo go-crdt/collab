@@ -20,12 +20,20 @@ type scriptedCarrier struct {
 	in   []scripted
 	at   int
 	sent []wireMsg
+	// hangsUp ends the script by reporting the connection gone rather than
+	// waiting for the context. A test that wants a participant who stays
+	// leaves it false; one that wants a participant who leaves — and a fuzzer,
+	// which cannot afford a timeout per input — sets it.
+	hangsUp bool
 }
 
 func (c *scriptedCarrier) Context() context.Context { return c.ctx }
 
 func (c *scriptedCarrier) Recv() (byte, any, error) {
 	if c.at >= len(c.in) {
+		if c.hangsUp {
+			return 0, nil, context.Canceled
+		}
 		<-c.ctx.Done()
 		return 0, nil, c.ctx.Err()
 	}
