@@ -368,3 +368,40 @@ func (m *Map) mp() *crdt.Map {
 	got, _ := m.c.doc.Map(m.name)
 	return got
 }
+
+// Edit runs fn against the map part itself and sends whatever operations it
+// produced to everyone else.
+//
+// It is what a structured type built on a map is driven through. A
+// [github.com/go-crdt/crdt/structured.Sequence], a Tree or a RecordMap is a
+// binding over a [crdt.Map] rather than a thing of its own, and each of its
+// methods changes the map here and hands back the operations that change:
+//
+//	err := m.Edit(func(mp *crdt.Map) ([]crdt.MapOp, error) {
+//	    _, ops, err := structured.SequenceOf(mp).Insert(after, value)
+//	    return ops, err
+//	})
+//
+// The lock is held for the whole of fn, so what it reads and what it writes are
+// one moment. fn must not call back into the client.
+func (m *Map) Edit(fn func(*crdt.Map) ([]crdt.MapOp, error)) error {
+	return m.c.edit(m.Part(), func() (crdt.PartOps, error) {
+		ops, err := fn(m.mp())
+		if err != nil {
+			return crdt.PartOps{}, err
+		}
+		return crdt.PartOps{Map: ops}, nil
+	})
+}
+
+// Read runs fn against the map part for reading. It sends nothing, and
+// anything fn writes to the map would be this replica's alone — so do not:
+// use [Map.Edit].
+//
+// The lock is held for the whole of fn, so a view built from several reads sees
+// one moment rather than a moment per read.
+func (m *Map) Read(fn func(*crdt.Map)) {
+	m.c.mu.Lock()
+	defer m.c.mu.Unlock()
+	fn(m.mp())
+}
