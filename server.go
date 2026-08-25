@@ -15,6 +15,17 @@ import (
 
 // DefaultBacklog is how many messages may be queued for one participant before
 // the server gives up on it. See [Config].
+//
+// It is also, and less obviously, a capacity: a document where P participants
+// edit in the same breath sends P-1 messages to each of them, so a backlog
+// below P is a backlog that will be exceeded. Measured on one server with 800
+// participants each making one edit at once — a backlog of 256 disconnected 99%
+// of them, 512 disconnected 32%, and 1024 disconnected none.
+//
+// So 256 means "about two hundred and fifty people editing at the same instant",
+// not "a queue that is usually long enough". A document with more than that
+// wants a larger [Config.Backlog], and the cost of one is a queue slot per
+// participant rather than anything per document.
 const DefaultBacklog = 256
 
 // serverSite is the identity of the server's own replica. It is never observed:
@@ -32,6 +43,18 @@ type Config struct {
 	// ResourceExhausted rather than served stale state or allowed to stall
 	// everyone else; it rejoins and is caught up from its version vector.
 	// Defaults to [DefaultBacklog].
+	//
+	// Size it against the number of participants who may edit at once, not
+	// against how fast one of them types: one edit by each of P participants is
+	// P-1 messages into every queue, so a burst on a busy document reaches the
+	// limit in an instant however well everyone is keeping up. See
+	// [DefaultBacklog] for what that costs, measured.
+	//
+	// Note what "it rejoins" asks of a caller. Nothing here rejoins: the
+	// material is there — [Client.Snapshot] and [ClientConfig.Resume] — and the
+	// loop belongs to whoever is holding the session, the same way it does for
+	// [Server.Follow] and for the same reason. A caller that does not write one
+	// turns a burst into a disconnection nobody recovers from.
 	Backlog int
 
 	// PersistEvery, when set, saves every document that has changed at this
@@ -58,6 +81,24 @@ type Config struct {
 	// document cannot be kept — a session may already have opened a fresh
 	// replica of it — so this is the only place that failure can be seen.
 	OnEvictError func(document string, err error)
+
+	// OnPersistError, when set, is called for every document whose periodic
+	// save failed, with the error the store gave.
+	//
+	// Without it a server that cannot write is silent about it. The saves go on
+	// being attempted and go on failing, participants go on editing and are
+	// told nothing, and the work is there until the process stops and then is
+	// not. A disk that filled up, a name a filesystem will not take, a
+	// credential that expired: all of them look exactly like a server that is
+	// working, which is the worst way for durability to fail.
+	//
+	// It is called from the housekeeping goroutine, once per document per pass,
+	// so an implementation that blocks delays the next pass. Counting or
+	// logging is what it is for; recovery is the operator's.
+	//
+	// [Server.Flush] does not call it — a caller that asks for a flush is given
+	// the error to handle.
+	OnPersistError func(document string, err error)
 
 	// Clock is what [Config.EvictAfter] measures with. It defaults to time.Now,
 	// and exists because a caller that wants a monotonic source, or a test that
@@ -119,6 +160,7 @@ type Config struct {
 // document it has served. Call [Server.Flush] to persist them.
 type Server struct {
 	store        Store
+	onPersistErr func(document string, err error)
 	backlog      int
 	authorize    func(ctx context.Context, document string, site crdt.SiteID) error
 	authorizeOps func(ctx context.Context, document string, from crdt.SiteID, batches []crdt.PartOps) error
@@ -152,6 +194,7 @@ func NewServer(cfg Config) *Server {
 	}
 	s := &Server{
 		store:        cfg.Store,
+		onPersistErr: cfg.OnPersistError,
 		backlog:      cfg.Backlog,
 		authorize:    cfg.Authorize,
 		authorizeOps: cfg.AuthorizeOperations,
@@ -187,6 +230,16 @@ func (s *Server) Close(ctx context.Context) error {
 // A server that wants durability without waiting for participants to leave
 // calls this on a timer, or before shutting down.
 func (s *Server) Flush(ctx context.Context) error {
+	return s.flush(ctx, nil)
+}
+
+// flush persists every changed document, telling report about each failure as
+// it happens and returning all of them together.
+//
+// Every failure rather than the first: a caller that gets one error back when
+// four documents could not be written knows less than it needs to, and the
+// housekeeping needs each one to name its own document.
+func (s *Server) flush(ctx context.Context, report func(document string, err error)) error {
 	s.mu.Lock()
 	docs := make([]*document, 0, len(s.docs))
 	for _, d := range s.docs {
@@ -194,13 +247,18 @@ func (s *Server) Flush(ctx context.Context) error {
 	}
 	s.mu.Unlock()
 
-	var first error
+	var failures []error
 	for _, d := range docs {
-		if err := d.persist(ctx); err != nil && first == nil {
-			first = err
+		err := d.persist(ctx)
+		if err == nil {
+			continue
 		}
+		if report != nil {
+			report(d.name, err)
+		}
+		failures = append(failures, err)
 	}
-	return first
+	return errors.Join(failures...)
 }
 
 // open returns the hub for a document, reading it from the store the first time
@@ -342,6 +400,26 @@ type wireMsg struct {
 	msg  any
 }
 
+// maxDocumentName bounds a document's name.
+//
+// A name is a length a peer chose, and this package's own rule about those is
+// written in crdt's ParsePartOps: do not allocate on one before checking it.
+// The name is worse than an allocation, because it is kept: it becomes a key in
+// the table of open documents and stays there for as long as the document does,
+// so a participant sending a mebibyte of name makes the server hold a mebibyte
+// until it is evicted, and one sending a thousand of them makes it hold a
+// gibibyte. Measured before this existed: sixty-four names of a mebibyte each
+// cost 66 MB, and twenty thousand ordinary ones cost 16 MB in a hundred
+// milliseconds from a single connection.
+//
+// Four kibibytes rather than something tighter because this is a memory bound
+// and not a policy. Every store here imposes its own and shorter one — DirStore
+// stops at 189 bytes, because base64 of more than that is a filename longer
+// than a filesystem will take — and a deployment that wants to say which names
+// are acceptable at all has [Config.Authorize], which is given the name before
+// anything is opened.
+const maxDocumentName = 4096
+
 func (s *Server) session(stream carrier) error {
 	ctx := stream.Context()
 	kind, first, err := stream.Recv()
@@ -354,6 +432,9 @@ func (s *Server) session(stream carrier) error {
 		return fail(errInvalid, "collab: a session must open with a join")
 	case join.Document == "":
 		return fail(errInvalid, "collab: a join must name a document")
+	case len(join.Document) > maxDocumentName:
+		return fail(errInvalid, "collab: a document name may be %d bytes and this one is %d",
+			maxDocumentName, len(join.Document))
 	}
 
 	if s.authorize != nil {

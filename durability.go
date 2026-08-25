@@ -62,7 +62,10 @@ func (s *Server) persistLoop(every, evictAfter time.Duration) {
 // to write, so the pass that drops it is not also the pass that does the work.
 func (s *Server) housekeep(ctx context.Context, persist bool, evictAfter time.Duration) {
 	if persist {
-		_ = s.Flush(ctx)
+		// The error is not dropped here any more: a server that cannot write
+		// used to go on failing every pass in silence, and silence is the one
+		// way durability must not fail. See [Config.OnPersistError].
+		_ = s.flush(ctx, s.onPersistErr)
 	}
 	if evictAfter > 0 {
 		s.evictIdle(ctx, evictAfter)
