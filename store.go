@@ -4,7 +4,9 @@ package collab
 
 import (
 	"context"
+	"sort"
 	"sync"
+	"time"
 )
 
 // A Store keeps documents between sessions. It holds snapshots, which are
@@ -27,11 +29,20 @@ type Store interface {
 type MemoryStore struct {
 	mu   sync.Mutex
 	docs map[string][]byte
+	// written is when each document was last saved, which is what [Idle]
+	// answers from. now is time.Now, replaced in tests so that a document can
+	// be made old without waiting for it to become old.
+	written map[string]time.Time
+	now     func() time.Time
 }
 
 // NewMemoryStore returns an empty store.
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{docs: map[string][]byte{}}
+	return &MemoryStore{
+		docs:    map[string][]byte{},
+		written: map[string]time.Time{},
+		now:     time.Now,
+	}
 }
 
 // Load returns a copy of the stored snapshot, or nil if the document is new.
@@ -50,6 +61,43 @@ func (s *MemoryStore) Save(_ context.Context, document string, snapshot []byte) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.docs[document] = append([]byte(nil), snapshot...)
+	s.written[document] = s.now()
+	return nil
+}
+
+// Idle returns the documents this store has not been asked to write for longer
+// than d, which is a [MemoryStore]'s half of [Archivable].
+func (s *MemoryStore) Idle(_ context.Context, d time.Duration) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cutoff := s.now().Add(-d)
+	var out []string
+	for name, at := range s.written {
+		if at.Before(cutoff) {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// Release forgets a document if this store still holds exactly want.
+//
+// The comparison and the removal are one step under the same lock, so a save
+// that lands while a document is being archived cannot be deleted by the
+// release that follows it.
+func (s *MemoryStore) Release(_ context.Context, document string, want []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stored, ok := s.docs[document]
+	if !ok {
+		return nil
+	}
+	if err := stillHolds(stored, want); err != nil {
+		return err
+	}
+	delete(s.docs, document)
+	delete(s.written, document)
 	return nil
 }
 
