@@ -50,11 +50,12 @@ type Config struct {
 	// limit in an instant however well everyone is keeping up. See
 	// [DefaultBacklog] for what that costs, measured.
 	//
-	// Note what "it rejoins" asks of a caller. Nothing here rejoins: the
-	// material is there — [Client.Snapshot] and [ClientConfig.Resume] — and the
-	// loop belongs to whoever is holding the session, the same way it does for
-	// [Server.Follow] and for the same reason. A caller that does not write one
-	// turns a burst into a disconnection nobody recovers from.
+	// Note what "it rejoins" asks of a caller, because it is not free.
+	// [JoinWithRetry] does it: it opens a session again whenever the one it has
+	// ends, rejoining with what its replica already holds so that nothing
+	// edited in between is lost. A caller that uses [Join] instead gets one
+	// session, and a burst on a busy document then becomes a disconnection
+	// nobody recovers from.
 	Backlog int
 
 	// PersistEvery, when set, saves every document that has changed at this

@@ -281,6 +281,33 @@ somebody is in every `PersistEvery`, so a busy document never looks quiet.
 `MemoryStore` and `DirStore` both implement `Archivable`; `Config.EvictAfter` is
 the same idea one level up, for the server's memory rather than the store's.
 
+## Staying in a document
+
+`Join` opens one session. When it ends — a connection dropped, or the server
+disconnected a participant that fell behind its `Backlog` — it has ended.
+
+`JoinWithRetry` opens another:
+
+```go
+c, err := collab.JoinWithRetry(ctx, dial, collab.ClientConfig{
+    Document: "project:paper", Site: site,
+}, collab.RetryPolicy{Notify: func(s collab.LinkStatus) { /* log it */ }})
+```
+
+The handles taken from the client stay valid across every reconnection — a
+handle holds a name and looks its part up under the client's lock, which is what
+makes replacing the session underneath it invisible. Each attempt rejoins with
+what the replica already holds, so the server sends the difference rather than a
+snapshot, and **an edit made while there was nowhere to send it is not lost and
+is not an error**: it goes out as soon as there is a session again.
+
+This matters more than it looks. One edit by each of P participants is P-1
+messages into every other queue, so a document busier than `Config.Backlog`
+disconnects everyone in it at once — measured with 800 participants editing
+simultaneously, a backlog of 256 disconnected 99% of them. With `Join` that is a
+room full of documents that have stopped moving; with `JoinWithRetry` it is a
+pause.
+
 ## Status
 
 Version 0.1. **100% statement coverage**, race-clean, six-arch CI, and the
