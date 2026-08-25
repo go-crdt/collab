@@ -5,8 +5,6 @@ package collab
 import (
 	"context"
 	"errors"
-	"fmt"
-	"math/rand/v2"
 	"time"
 
 	"github.com/go-crdt/crdt"
@@ -201,10 +199,7 @@ type reconnectingLink struct {
 	document string
 	as       crdt.SiteID
 	policy   RetryPolicy
-
-	sleep  func(ctx context.Context, d time.Duration) error
-	random func() float64
-	now    func() time.Time
+	back     *backoff
 }
 
 // reconnecting checks what cannot be retried and builds the link.
@@ -215,21 +210,9 @@ func (s *Server) reconnecting(dial Dialer, document string, as crdt.SiteID, poli
 	if err := followable(document, as); err != nil {
 		return nil, err
 	}
-	if policy.Wait < 0 || policy.Ceiling < 0 {
-		return nil, fmt.Errorf("collab: a retry policy cannot wait for a negative time (wait %v, ceiling %v)", policy.Wait, policy.Ceiling)
-	}
-	if policy.Wait == 0 {
-		policy.Wait = DefaultRetryWait
-	}
-	if policy.Ceiling == 0 {
-		policy.Ceiling = DefaultRetryCeiling
-	}
-	// Refused rather than clamped: a first wait longer than the ceiling is
-	// somebody who has misread one of the two fields, and silently doing what
-	// the shorter one says would hide that from them for as long as the link
-	// runs.
-	if policy.Wait > policy.Ceiling {
-		return nil, fmt.Errorf("collab: a retry policy cannot start at %v and be capped at %v", policy.Wait, policy.Ceiling)
+	policy, err := policy.checked()
+	if err != nil {
+		return nil, err
 	}
 	return &reconnectingLink{
 		server:   s,
@@ -237,27 +220,14 @@ func (s *Server) reconnecting(dial Dialer, document string, as crdt.SiteID, poli
 		document: document,
 		as:       as,
 		policy:   policy,
-		sleep:    waitFor,
-		random:   rand.Float64,
-		now:      time.Now,
+		back:     newBackoff(policy),
 	}, nil
 }
 
 // run is the loop.
 func (l *reconnectingLink) run(ctx context.Context) error {
-	wait := l.policy.Wait
-	attempt := 0
-	// downSince is when the current outage began, and being zero is how the
-	// loop knows there is not one: a link that has never been up is down from
-	// its first failure, not from the moment it started.
-	var downSince time.Time
-
 	for {
-		err := l.attempt(ctx, func() {
-			// Only a session that was really established resets the backoff.
-			wait, attempt, downSince = l.policy.Wait, 0, time.Time{}
-			l.notify(LinkStatus{Up: true})
-		})
+		err := l.attempt(ctx, l.back.up)
 
 		// Cancellation first, and before the policy is consulted: a link torn
 		// down on purpose has not failed, and the error the attempt happened to
@@ -269,20 +239,9 @@ func (l *reconnectingLink) run(ctx context.Context) error {
 			return err
 		}
 
-		if downSince.IsZero() {
-			downSince = l.now()
-		}
-		attempt++
-		in := l.jittered(wait)
-		l.notify(LinkStatus{Err: err, Attempt: attempt, RetryIn: in, DownFor: l.now().Sub(downSince)})
-
-		// Waiting is where a link spends nearly all of an outage, so this is
-		// where cancellation has to be answered rather than at the top of the
-		// loop: a process shutting down must not have to sit out a ceiling.
-		if err := l.sleep(ctx, in); err != nil {
+		if err := l.back.down(ctx, err); err != nil {
 			return err
 		}
-		wait = min(2*wait, l.policy.Ceiling)
 	}
 }
 
@@ -299,21 +258,6 @@ func (l *reconnectingLink) attempt(ctx context.Context, established func()) erro
 		return errors.New("collab: the dialler returned no transport and no error")
 	}
 	return l.server.follow(ctx, peer, l.document, l.as, established)
-}
-
-// jittered draws the real delay for an interval: somewhere in the half-open
-// band between half of it and all of it. See FollowWithRetry on why the band is
-// that one and why it is not configurable.
-func (l *reconnectingLink) jittered(d time.Duration) time.Duration {
-	half := d / 2
-	return half + time.Duration(l.random()*float64(half))
-}
-
-// notify tells the operator, if they asked to be told.
-func (l *reconnectingLink) notify(status LinkStatus) {
-	if l.policy.Notify != nil {
-		l.policy.Notify(status)
-	}
 }
 
 // waitFor is the real sleep: d, or ctx ending, whichever comes first. A bare

@@ -69,9 +69,9 @@ func TestTheBackoffGrowsIsCappedAndIsJittered(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			var slept []time.Duration
-			link.random = func() float64 { return tt.random }
-			link.now = func() time.Time { return clock }
-			link.sleep = func(_ context.Context, d time.Duration) error {
+			link.back.random = func() float64 { return tt.random }
+			link.back.now = func() time.Time { return clock }
+			link.back.sleep = func(_ context.Context, d time.Duration) error {
 				slept = append(slept, d)
 				clock = clock.Add(d)
 				if len(slept) == len(tt.want) {
@@ -143,7 +143,7 @@ func TestTheJitterStaysInsideItsBand(t *testing.T) {
 	const interval = 4 * time.Second
 	seen := make(map[time.Duration]bool)
 	for range 1000 {
-		got := link.jittered(interval)
+		got := link.back.jittered(interval)
 		if got < interval/2 || got >= interval {
 			t.Fatalf("a delay of %v is outside [%v, %v)", got, interval/2, interval)
 		}
@@ -302,8 +302,8 @@ func TestALinkComesBackAndTheDocumentsConvergeAgain(t *testing.T) {
 	// says when a reconnection happens rather than hoping one has by now.
 	slept := make(chan time.Duration)
 	resume := make(chan struct{})
-	link.random = func() float64 { return 1 }
-	link.sleep = func(ctx context.Context, d time.Duration) error {
+	link.back.random = func() float64 { return 1 }
+	link.back.sleep = func(ctx context.Context, d time.Duration) error {
 		select {
 		case slept <- d:
 		case <-ctx.Done():
@@ -494,7 +494,7 @@ func TestAPermanentFailureEndsTheLink(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		link.sleep = func(context.Context, time.Duration) error { return nil }
+		link.back.sleep = func(context.Context, time.Duration) error { return nil }
 
 		if err := link.run(t.Context()); !errors.Is(err, refused) {
 			t.Fatalf("the link ended with %v, want the refusal", err)

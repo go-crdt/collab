@@ -50,11 +50,20 @@ type Client struct {
 
 	send sync.Mutex // a carrier allows exactly one sender at a time
 
+	// supervised is set on a client that reconnects, and changes two things:
+	// its session ending is not the client ending, and an edit it could not
+	// send is not an error. See [JoinWithRetry].
+	supervised bool
+
 	mu       sync.Mutex
 	doc      *crdt.Composite
 	presence *awareness.Registry
 	changed  []crdt.PartChange
 	err      error
+	// down is set while a supervised client has no carrier. Nothing may be
+	// sent then, and nothing needs to be: an edit is in the replica already and
+	// the next attach pushes what the server lacks.
+	down bool
 }
 
 // Join opens a session over transport and returns once the document has
@@ -70,6 +79,30 @@ func Join(ctx context.Context, transport Transport, cfg ClientConfig) (*Client, 
 		return nil, errors.New("collab: Join needs a document name")
 	}
 
+	ctx, cancel := context.WithCancel(ctx)
+	c, err := joinOn(ctx, cancel, transport, cfg)
+	if err != nil {
+		return nil, err
+	}
+	// One session, and its end is the client's end.
+	go c.receive(c.conn, c.finished)
+	return c, nil
+}
+
+// joinOn is Join with the session's context and its cancel already made, and
+// without the goroutine that reads it.
+//
+// The cancel is passed in so that [JoinWithRetry] holds the same one its
+// supervisor waits on: a supervisor sleeping out a backoff has to be woken by
+// [Client.Close], or the close waits for it and it waits for the close.
+//
+// Reading is left to the caller because who closes [Client.Done] is the whole
+// difference between the two. For Join it is the session: when it ends, the
+// client has ended. For JoinWithRetry it is the supervisor, and a session
+// ending is one attempt ending — a receive goroutine that closed Done on its
+// own would make the client look finished for good, and every edit after that
+// would be dropped by transmit on its way out.
+func joinOn(ctx context.Context, cancel context.CancelFunc, transport Transport, cfg ClientConfig) (*Client, error) {
 	local := crdt.NewComposite(cfg.Site)
 	join := joinMsg{Document: cfg.Document, Site: uint64(cfg.Site)}
 	if len(cfg.Resume) > 0 {
@@ -82,7 +115,6 @@ func Join(ctx context.Context, transport Transport, cfg ClientConfig) (*Client, 
 		join.Have, _ = local.Version().MarshalBinary()
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
 	conn, err := transport.open(ctx)
 	if err != nil {
 		cancel()
@@ -124,7 +156,6 @@ func Join(ctx context.Context, transport Transport, cfg ClientConfig) (*Client, 
 		cancel()
 		return nil, err
 	}
-	go c.receive()
 	return c, nil
 }
 
@@ -151,7 +182,12 @@ func (c *Client) absorbWelcome(w welcomeMsg) error {
 		if err != nil {
 			return err
 		}
+		// Under the lock because a client that reconnects is already being
+		// read from by whoever holds its handles, unlike one that is still
+		// being built by Join.
+		c.mu.Lock()
 		c.doc = doc
+		c.mu.Unlock()
 	} else if err := c.applyOperations(w.Operations); err != nil {
 		return err
 	}
@@ -164,10 +200,10 @@ func (c *Client) absorbWelcome(w welcomeMsg) error {
 }
 
 // receive merges everything the server sends until the session ends.
-func (c *Client) receive() {
-	defer close(c.finished)
+func (c *Client) receive(conn carrierConn, done chan struct{}) {
+	defer close(done)
 	for {
-		kind, msg, err := c.conn.Recv()
+		kind, msg, err := conn.Recv()
 		if err != nil {
 			c.fail(err)
 			return
@@ -345,7 +381,26 @@ func (c *Client) transmit(kind byte, msg any) error {
 	}
 	c.send.Lock()
 	defer c.send.Unlock()
-	return c.conn.Send(kind, msg)
+
+	// A supervised client with no carrier is not a failed edit. The operation
+	// is in the replica, the next attach sends the server everything it lacks,
+	// and telling an editor that their keystroke failed when it did not is how
+	// an application starts undoing work that was never lost. The outage is
+	// reported through [RetryPolicy.Notify], which is where an operator looks.
+	c.mu.Lock()
+	down := c.down
+	c.mu.Unlock()
+	if down {
+		return nil
+	}
+
+	err := c.conn.Send(kind, msg)
+	if err != nil && c.supervised {
+		// The carrier failed under this send. The supervisor is about to
+		// notice; the edit is safe here and goes out on the next attach.
+		return nil
+	}
+	return err
 }
 
 // Close ends the session. The local document is left intact, so its
@@ -368,7 +423,7 @@ func (c *Client) Close() error {
 	// The wait is bounded because a server that has stopped reading must not
 	// hold a page open. Past the deadline the connection is cut, which is
 	// exactly what happened every time before.
-	_ = c.conn.Close()
+	_ = c.carrier().Close()
 	select {
 	case <-c.finished:
 	case <-time.After(closeGrace):
@@ -382,3 +437,15 @@ func (c *Client) Close() error {
 // already been sent. Long enough for a round trip on a bad connection, short
 // enough that nothing a person does waits on it.
 const closeGrace = 2 * time.Second
+
+// carrier is the connection this client is using now, which is not the one it
+// started with once it has reconnected.
+//
+// Under the send lock because that is what a reconnection takes to swap it: a
+// client being closed while its supervisor is taking a new carrier would
+// otherwise read the field as it is being written.
+func (c *Client) carrier() carrierConn {
+	c.send.Lock()
+	defer c.send.Unlock()
+	return c.conn
+}
