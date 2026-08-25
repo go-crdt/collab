@@ -678,6 +678,9 @@ func (d *document) applyOperations(ctx context.Context, from *subscriber, raw []
 	// Advancing the version is exactly "the server learned something", which is
 	// exactly when there is something to tell anybody.
 	before := d.doc.Version()
+	// How many operations are waiting for something that has not arrived. It
+	// matters below, and it is a counter rather than a scan.
+	waitingBefore := d.doc.Pending()
 	batches, err := crdt.ParsePartOps(raw)
 	if err != nil {
 		return fail(errInvalid, "collab: unusable operations")
@@ -707,6 +710,35 @@ func (d *document) applyOperations(ctx context.Context, from *subscriber, raw []
 		return nil
 	}
 	d.dirty = true
+
+	// Usually the bytes that arrived are exactly what this replica gained, and
+	// they are passed on unchanged: applying them is idempotent and
+	// order-independent, so there is nothing for the server to decide.
+	//
+	// Not always, and the exception is what collab#62 was. Apply parks an
+	// operation whose causal predecessors have not arrived — and a batch that
+	// parks entirely advances nothing, so it is not passed on. Later the
+	// predecessor arrives, the parked operations are released, and the replica
+	// gains far more than the batch that arrived carried. Passing on that
+	// batch alone leaves the released ones held by this server and told to
+	// nobody, and a participant missing one of those never hears it from
+	// anywhere: by then the server has it and will not pass it on again.
+	//
+	// The number waiting is the cheap way to know which of the two happened. It
+	// falls exactly when something that had been waiting was released, and only
+	// then is it worth asking the replica what it actually gained — a question
+	// that costs a walk of the document, which is why it is not asked on every
+	// keystroke. Measured: on a document of sixty thousand operations, OpsSince
+	// for a version one batch behind takes 383µs, against 90ns for one that is
+	// current. Asking it every time made the server quadratic in its own
+	// history.
+	if d.doc.Pending() < waitingBefore {
+		// These operations came from this document, so they cannot fail to
+		// encode.
+		relay, _ := crdt.AppendPartOps(nil, d.doc.OpsSince(before))
+		d.broadcast(from, operationsMessage(relay))
+		return nil
+	}
 	d.broadcast(from, operationsMessage(raw))
 	return nil
 }
