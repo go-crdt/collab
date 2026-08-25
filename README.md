@@ -253,6 +253,34 @@ only the second had — `MergeSnapshots` is what makes that free. Adding a store
 to a running server therefore backfills it. A store that cannot be read fails
 the load rather than serving a document quietly missing a paragraph.
 
+`Tiered` is the other composition: a hot store for documents somebody is using
+and a cold one for documents nobody has opened in a long time.
+
+```go
+store := collab.NewTiered(hot, archive)
+srv := collab.NewServer(collab.Config{Store: store})
+
+// On a timer, or by hand.
+moved, err := store.Archive(ctx, 30*24*time.Hour)
+```
+
+**Nothing is deleted that is not already somewhere else.** Archiving reads the
+hot store, writes the cold one, and only then asks the hot one to release
+*exactly what was read* — so a cold store that refuses releases nothing, and a
+document that somebody saved while it was being copied is not released at all;
+it is archived on a later pass. Reading an archived document brings it back to
+the hot store on the way past.
+
+A `Tiered` store never answers "no such document" because it could not reach the
+archive: nil means *start a new one*, and a server acts on it. An unreachable
+archive fails the load instead.
+
+What counts as idle is *not written for a while*, which is as close to *not
+used* as a store can get — and close enough, because a server saves a document
+somebody is in every `PersistEvery`, so a busy document never looks quiet.
+`MemoryStore` and `DirStore` both implement `Archivable`; `Config.EvictAfter` is
+the same idea one level up, for the server's memory rather than the store's.
+
 ## Status
 
 Version 0.1. **100% statement coverage**, race-clean, six-arch CI, and the

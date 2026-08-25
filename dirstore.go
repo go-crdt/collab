@@ -10,7 +10,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
+	"time"
 )
 
 // A DirStore keeps documents as files in one directory. It is what a server
@@ -41,6 +44,18 @@ import (
 // the next [NewDirStore] on that directory clears those away.
 type DirStore struct {
 	dir string
+	// mu keeps a save and a release from interleaving.
+	//
+	// Reads need none of it: a save reaches its final name by rename, which is
+	// atomic, so a reader sees the whole of one version or the whole of the
+	// other. A release is different — it compares and then removes, and those
+	// two have to be one step or an archiver deletes a version that arrived
+	// between them.
+	//
+	// It is a lock within one process, which is the same reach this store has
+	// always had: two servers sharing a directory would each hold the document
+	// in memory and write over each other whatever any lock here did.
+	mu sync.Mutex
 }
 
 // tempPrefix marks the files a save is in the middle of writing, so they can be
@@ -144,6 +159,8 @@ func (s *DirStore) Load(_ context.Context, document string) ([]byte, error) {
 // every system this package supports, a rename within a directory replaces the
 // destination in one step.
 func (s *DirStore) Save(_ context.Context, document string, snapshot []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	path, err := s.path(document)
 	if err != nil {
 		return err
@@ -199,4 +216,70 @@ func (s *DirStore) Documents() ([]string, error) {
 		out = append(out, string(name))
 	}
 	return out, nil
+}
+
+// Idle returns the documents whose file has not been written for longer than d,
+// which is a [DirStore]'s half of [Archivable].
+func (s *DirStore) Idle(_ context.Context, d time.Duration) ([]string, error) {
+	entries, err := readDir(s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("collab: reading %s: %w", s.dir, err)
+	}
+	cutoff := time.Now().Add(-d)
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), tempPrefix) {
+			continue
+		}
+		name, err := base64.URLEncoding.DecodeString(e.Name())
+		if err != nil {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			// Removed while this listing was being read, which is the answer
+			// to "is it idle" as much as anything else is.
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			out = append(out, string(name))
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// Release forgets a document if this store still holds exactly want.
+//
+// The comparison and the removal are one step under the same lock as a save,
+// so a document written while it was being archived is not deleted by the
+// release that follows.
+func (s *DirStore) Release(ctx context.Context, document string, want []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	path, err := s.path(document)
+	if err != nil {
+		return err
+	}
+	stored, err := readFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("collab: reading document %q: %w", document, err)
+	}
+	unpacked, err := unpack(stored)
+	if err != nil {
+		// Unreadable is not "holds what you expected", and it is certainly not
+		// a reason to remove it.
+		return fmt.Errorf("collab: reading document %q: %w", document, err)
+	}
+	if err := stillHolds(unpacked, want); err != nil {
+		return err
+	}
+	if err := removeFile(path); err != nil {
+		return fmt.Errorf("collab: releasing document %q: %w", document, err)
+	}
+	return nil
 }
