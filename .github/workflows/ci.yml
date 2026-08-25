@@ -161,6 +161,13 @@ jobs:
   git-store:
     name: git store
     runs-on: ubuntu-latest
+    # git ships its own smart-HTTP server, git-http-backend, and the credential
+    # tests run against it behind Basic auth — which is the only way to show
+    # that what Remote.Auth returns is what the far end receives, rather than
+    # only that it was asked for. A runner without it must fail here rather
+    # than skip and prove nothing.
+    env:
+      COLLAB_REQUIRE_GIT_HTTP: "1"
     defaults:
       run:
         working-directory: gitstore
