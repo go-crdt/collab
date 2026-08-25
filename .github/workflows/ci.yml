@@ -233,14 +233,17 @@ jobs:
       #
       # This lane built for js/wasm and ran nothing under it, so anything
       # guarded by that tag — the WebSocket a page opens, the data channel two
-      # pages share — was compiled and never executed. Building is not running,
-      # and the difference is where a browser-only path goes wrong.
+      # pages share, the BroadcastChannel two tabs share — was compiled and
+      # never executed. Building is not running, and the difference is where a
+      # browser-only path goes wrong.
       - name: The browser build's own tests
         run: |
           GOOS=js GOARCH=wasm go test -v \
             -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./... | tee js.log
           grep -q 'two browsers, no server' js.log || {
             echo "::error::the browser-to-browser session did not run"; exit 1; }
+          grep -q 'two tabs, one browser, no server' js.log || {
+            echo "::error::the tab-to-tab BroadcastChannel session did not run"; exit 1; }
 
   arch-native:
     name: arch ${{ matrix.label }}

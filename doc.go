@@ -26,7 +26,10 @@
 // and gRPC brings deadlines, interceptors and the tooling built around them.
 //
 // The client builds for js/wasm either way, so a browser tab and a server run
-// the same code down to the merge.
+// the same code down to the merge. Two browsers with no server between them
+// carry a session over a WebRTC data channel ([DataChannel]), and two tabs of
+// one browser over a BroadcastChannel ([JoinBroadcastChannel]) with nothing to
+// configure at all.
 //
 // # A document holds named parts
 //
