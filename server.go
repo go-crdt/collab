@@ -661,26 +661,6 @@ func (d *document) applyOperations(ctx context.Context, from *subscriber, raw []
 	// apart here because [Config.AuthorizeOperations] runs between them — after
 	// the operations are known and before any is applied — and Apply's error is
 	// dropped rather than turned into that unreachable branch.
-	// What the server knew before, so that operations it already had can be
-	// recognised and not passed on again.
-	//
-	// The test is the version vector and not whether the document looks
-	// different, and the difference between those two is worth writing down
-	// because the wrong one passes most tests. Two participants setting the
-	// same key to the same value concurrently produce two operations; one wins
-	// the tie-break and the other changes nothing anybody can see — but it is
-	// still an operation, it still belongs in the version vector, and a replica
-	// that never hears it cannot reproduce the same snapshot. Not passing it on
-	// leaves the two permanently disagreeing, which is what
-	// TestAFieldOfACommentFlipsOnItsOwn caught when this was written the other
-	// way.
-	//
-	// Advancing the version is exactly "the server learned something", which is
-	// exactly when there is something to tell anybody.
-	before := d.doc.Version()
-	// How many operations are waiting for something that has not arrived. It
-	// matters below, and it is a counter rather than a scan.
-	waitingBefore := d.doc.Pending()
 	batches, err := crdt.ParsePartOps(raw)
 	if err != nil {
 		return fail(errInvalid, "collab: unusable operations")
@@ -694,52 +674,42 @@ func (d *document) applyOperations(ctx context.Context, from *subscriber, raw []
 			return refusal(err)
 		}
 	}
-	// ParsePartOps guarantees what Apply would check, so this cannot fail. The
-	// comment above says decoding and merging share one rejection and that
-	// splitting them would leave a branch no input can reach; the hook has to
-	// run between the two, so the branch is dropped rather than left there.
-	_ = d.doc.Apply(batches...)
-	// This saves a little for a participant that reconnects and pushes work the
-	// server already had. It is required for two servers that follow each
-	// other: an operation from a participant of one reaches the other, is
-	// broadcast there to everything but the link it came in on — which includes
-	// the link back — and returns to where it started. Applying it a second
-	// time advances nothing, and without this it would be passed on again, and
-	// again. Idempotent is not the same as terminating.
-	if d.doc.Version().Equal(before) {
-		return nil
-	}
-	d.dirty = true
 
-	// Usually the bytes that arrived are exactly what this replica gained, and
-	// they are passed on unchanged: applying them is idempotent and
-	// order-independent, so there is nothing for the server to decide.
+	// What is passed on is what this replica absorbed, which is neither the
+	// bytes that arrived nor anything that can be worked out from them.
 	//
-	// Not always, and the exception is what collab#62 was. Apply parks an
-	// operation whose causal predecessors have not arrived — and a batch that
-	// parks entirely advances nothing, so it is not passed on. Later the
-	// predecessor arrives, the parked operations are released, and the replica
-	// gains far more than the batch that arrived carried. Passing on that
-	// batch alone leaves the released ones held by this server and told to
-	// nobody, and a participant missing one of those never hears it from
-	// anywhere: by then the server has it and will not pass it on again.
+	// Apply parks an operation whose causal predecessors have not arrived and
+	// releases it later when they do, and it ignores one it already had. So a
+	// batch can integrate nothing now and a great deal three batches later, and
+	// what it releases was in no batch anybody sent. Passing on the bytes that
+	// arrived leaves those held here and told to nobody, and a participant
+	// missing one of them never hears it from anywhere — by then this server
+	// has it and will not pass it on again.
 	//
-	// The number waiting is the cheap way to know which of the two happened. It
-	// falls exactly when something that had been waiting was released, and only
-	// then is it worth asking the replica what it actually gained — a question
-	// that costs a walk of the document, which is why it is not asked on every
-	// keystroke. Measured: on a document of sixty thousand operations, OpsSince
-	// for a version one batch behind takes 383µs, against 90ns for one that is
-	// current. Asking it every time made the server quadratic in its own
-	// history.
-	if d.doc.Pending() < waitingBefore {
-		// These operations came from this document, so they cannot fail to
-		// encode.
-		relay, _ := crdt.AppendPartOps(nil, d.doc.OpsSince(before))
-		d.broadcast(from, operationsMessage(relay))
+	// Two cheaper guesses were tried and both are wrong, in opposite
+	// directions. The number of operations waiting cannot see a release that
+	// coincides with a park in the same call, because the count comes back
+	// where it started. The size of what the version gained cannot see past
+	// duplicates, and every rejoining participant sends those by the hundred,
+	// so it almost never fires — measured at sixteen runs in twenty stranding
+	// somebody against seven. Asking the replica what it holds that a version
+	// does not is exact and walks the document, which makes this quadratic in
+	// its own history.
+	//
+	// ApplyAbsorbed answers it without looking anything up: the replica
+	// integrated them. Empty means nothing was learned, which is the
+	// termination this needs — an operation that has been round a loop of
+	// servers adds nothing the second time and stops there.
+	//
+	// ParsePartOps guarantees what Apply would check, so this cannot fail.
+	absorbed, _ := d.doc.ApplyAbsorbed(batches...)
+	if len(absorbed) == 0 {
 		return nil
 	}
-	d.broadcast(from, operationsMessage(raw))
+	// These operations came from this document, so they cannot fail to encode.
+	relay, _ := crdt.AppendPartOps(nil, absorbed)
+	d.dirty = true
+	d.broadcast(from, operationsMessage(relay))
 	return nil
 }
 
