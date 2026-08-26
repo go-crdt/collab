@@ -19,7 +19,6 @@ func TestBcastServeGapConverges(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	const window = 60 * time.Millisecond
-	const gap = 150 * time.Millisecond
 
 	srv := NewServer(Config{Store: NewMemoryStore()})
 	defer func() { _ = srv.Close(context.Background()) }()
@@ -52,7 +51,18 @@ func TestBcastServeGapConverges(t *testing.T) {
 	}()
 
 	// The gap itself: A is elected but its Server is not yet attached.
-	time.Sleep(gap)
+	//
+	// Waiting for A to have actually heard B, rather than sleeping for as long
+	// as that ought to take. The whole point of this test is the tab that
+	// arrives while the host has no Server — so the tab has to have arrived,
+	// and a sleep only arranges that most of the time. When it did not, the
+	// loop in attachServer that picks up tabs already waiting was never run and
+	// this test passed anyway, guarding nothing.
+	waitUntil(t, "tab B to reach the host", func() bool {
+		hostA.mu.Lock()
+		defer hostA.mu.Unlock()
+		return len(hostA.ends) > 0
+	})
 	hostA.attachServer(srv)
 	served := make(chan error, 1)
 	go func() { served <- hostA.wait(); hostA.close() }()
@@ -198,5 +208,18 @@ func TestHostOrJoinBusErrors(t *testing.T) {
 	}
 	if host != nil || conn != nil {
 		t.Fatalf("a failed dial returned host=%v conn=%v, want both nil", host != nil, conn != nil)
+	}
+}
+
+// waitUntil waits for something to become true, and says what it was waiting
+// for if it never does.
+func waitUntil(t *testing.T, what string, want func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !want() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
