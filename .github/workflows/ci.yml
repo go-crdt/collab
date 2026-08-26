@@ -100,6 +100,15 @@ jobs:
           COLLAB_CHAOS: "1"
           CHAOS_BACKLOG: "4"
         run: go test -race -timeout 600s -run TestEverythingAtOnce -v .
+      # And the other half: servers that follow each other, which is where an
+      # operation can go round for ever. It checks that the mesh converges and
+      # then goes quiet — a test that only checked convergence would pass on a
+      # server that never stops talking.
+      - name: Chaos (federation)
+        shell: bash
+        env:
+          COLLAB_CHAOS: "1"
+        run: go test -race -timeout 600s -run TestAMeshOfServers -v .
       - name: Test + 100% coverage gate
         shell: bash
         run: |
