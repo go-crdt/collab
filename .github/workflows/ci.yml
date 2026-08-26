@@ -5,6 +5,14 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # So a run can be asked for. GitHub had a partial outage on 2026-08-26 and
+  # left a run on main queued with fourteen jobs that never started and no
+  # conclusion; it could not be cancelled, because the API considered it
+  # finished, and it could not be rerun, because a run that never started has
+  # nothing to rerun. Without this the only way to get CI to look at a commit
+  # again is to push another one, which means putting a commit in the history to
+  # work around a bad afternoon at somebody else's data centre.
+  workflow_dispatch:
 
 permissions:
   contents: read
