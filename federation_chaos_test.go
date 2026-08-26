@@ -59,10 +59,17 @@ func TestAMeshOfServersConvergesAndThenGoesQuiet(t *testing.T) {
 			}
 			link := &countingLink{peer: srvs[j], ctx: ctx, crossings: &crossings}
 			links = append(links, link)
+			// Links take a range of their own. A link joins a peer as a
+			// participant, and two sessions claiming one replica identity
+			// displace each other by design — so a link whose site happened to
+			// be a participant's would take turns evicting somebody for as long
+			// as the test ran. The old numbering gave links 901..1032 and the
+			// people on server 1 sites 1001..1020, which is twenty identities
+			// shared between the two.
 			go func(follower *Server, l *countingLink, as crdt.SiteID) {
 				_ = follower.FollowWithRetry(ctx, l.dial, "paper", as,
 					RetryPolicy{Wait: time.Millisecond, Ceiling: 20 * time.Millisecond})
-			}(srvs[i], link, crdt.SiteID(900+len(links)))
+			}(srvs[i], link, crdt.SiteID(900000+len(links)))
 		}
 	}
 
