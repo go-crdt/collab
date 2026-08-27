@@ -33,6 +33,11 @@ const (
 	kindWelcome   byte = 2
 	kindOperation byte = 3
 	kindPresence  byte = 4
+	// kindAcknowledge carries a participant's version, so the server can say
+	// what every participant has certainly seen. Nothing depends on it
+	// arriving: it is an observation, and a participant that never sends one
+	// simply holds the answer back.
+	kindAcknowledge byte = 5
 )
 
 // A joinMsg opens a session.
@@ -68,6 +73,12 @@ type opsMsg struct{ Operations []byte }
 
 // A presenceMsg carries one encoded awareness update. It is never persisted.
 type presenceMsg struct{ Update []byte }
+
+// An ackMsg carries a participant's encoded version, per part: what it has
+// applied, as of sending. It is how the server learns what every participant
+// has certainly seen, which is the one thing a stable version needs and the one
+// thing a fan-out server does not otherwise know.
+type ackMsg struct{ Version []byte }
 
 // appendBytes writes a length-prefixed field.
 func appendBytes(dst, field []byte) []byte {
@@ -179,6 +190,12 @@ func decodeClient(data []byte) (byte, any, error) {
 			return 0, nil, ErrProtocol
 		}
 		return kindPresence, presenceMsg{Update: update}, nil
+	case kindAcknowledge:
+		version, ok := f.copied()
+		if !ok || !f.done() {
+			return 0, nil, ErrProtocol
+		}
+		return kindAcknowledge, ackMsg{Version: version}, nil
 	default:
 		return 0, nil, ErrProtocol
 	}
@@ -251,9 +268,20 @@ func encodeClient(kind byte, msg any) ([]byte, error) {
 			return nil, ErrProtocol
 		}
 		return encodePresence(m), nil
+	case kindAcknowledge:
+		m, ok := msg.(ackMsg)
+		if !ok {
+			return nil, ErrProtocol
+		}
+		return encodeAck(m), nil
 	default:
 		return nil, ErrProtocol
 	}
+}
+
+// encodeAck writes a participant's version.
+func encodeAck(m ackMsg) []byte {
+	return appendBytes([]byte{kindAcknowledge}, m.Version)
 }
 
 // encodeServer writes one message a server sends.

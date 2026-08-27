@@ -156,6 +156,11 @@ func joinOn(ctx context.Context, cancel context.CancelFunc, transport Transport,
 		cancel()
 		return nil, err
 	}
+	// The welcome was read here rather than by the receive loop, so this is the
+	// only place that can say the participant has adopted it. Until it does,
+	// the server counts this participant as having nothing — and one such
+	// participant holds the answer at nothing for the whole document.
+	_ = c.acknowledge()
 	return c, nil
 }
 
@@ -212,6 +217,15 @@ func (c *Client) receive(conn carrierConn, done chan struct{}) {
 			c.fail(err)
 			return
 		}
+		// A participant that only reads does not acknowledge from here, which
+		// is where it belongs and where it cannot go yet. Sending anything
+		// from this goroutine — anything at all, including a message the
+		// server then ignores — makes forty sessions racing an eviction lose
+		// work, five times out of five. That is a race in the server rather
+		// than in the acknowledgement, and it is filed rather than worked
+		// around here; until it is fixed, a participant tells the server what
+		// it holds when it joins and when it writes, so a document nobody
+		// writes to holds the answer back. See [Server.Stable].
 		c.notify()
 	}
 }
@@ -368,7 +382,15 @@ func (c *Client) publish(batches []crdt.PartOps) error {
 	// Operations this replica made are valid by construction, so they cannot
 	// fail to encode.
 	raw, _ := crdt.AppendPartOps(nil, batches)
-	return c.transmit(kindOperation, opsMsg{Operations: raw})
+	if err := c.transmit(kindOperation, opsMsg{Operations: raw}); err != nil {
+		return err
+	}
+	// A participant writing alone never receives anything, so acknowledging
+	// only what arrives would leave the server never hearing what such a
+	// participant holds — and one participant it has heard nothing from is
+	// enough to hold the answer at nothing for everybody. See [Server.Stable].
+	_ = c.acknowledge()
+	return nil
 }
 
 // transmit is the only place that writes to the stream.
@@ -448,4 +470,17 @@ func (c *Client) carrier() carrierConn {
 	c.send.Lock()
 	defer c.send.Unlock()
 	return c.conn
+}
+
+// acknowledge tells the server what this replica has applied.
+//
+// It is sent after absorbing rather than on a timer: the thing being reported
+// is exactly what just changed, and a version reported late is a version the
+// server holds its answer back on. See [Server.Stable].
+func (c *Client) acknowledge() error {
+	c.mu.Lock()
+	// A version this replica built cannot fail to encode.
+	raw, _ := c.doc.Version().MarshalBinary()
+	c.mu.Unlock()
+	return c.transmit(kindAcknowledge, ackMsg{Version: raw})
 }

@@ -30,6 +30,7 @@ message ClientMessage {
     Join join = 1;
     Operations operations = 2;
     Presence presence = 3;
+    Acknowledge acknowledge = 4;
   }
 }
 
@@ -95,4 +96,17 @@ message Operations {
 // departure. It is never persisted.
 message Presence {
   bytes update = 1;
+}
+
+// Acknowledge carries a participant's version: what it has applied, as of
+// sending. It is how the server learns what every participant has certainly
+// seen, which is the one thing a version safe to collect against needs and the
+// one thing a server fanning operations out does not otherwise know.
+//
+// Nothing depends on one arriving. A participant that never sends one holds the
+// server's answer back rather than making it wrong, which is the safe
+// direction: a replica nobody has heard from is exactly the replica that might
+// not have seen the operation in question.
+message Acknowledge {
+  bytes version = 1;
 }
