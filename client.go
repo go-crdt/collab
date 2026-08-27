@@ -221,6 +221,15 @@ func (c *Client) receive(conn carrierConn, done chan struct{}) {
 			c.fail(err)
 			return
 		}
+		// The application first, the server second, and the order is not
+		// arbitrary. Whoever is watching this replica is waiting on the change
+		// that has just landed; the acknowledgement is a message to somebody
+		// else about it. Sending it first puts a round trip between the edit
+		// arriving and the view being told, and puts a wake-up after the point
+		// a caller could reasonably think the document had settled — which is
+		// what stopped changes coalescing.
+		c.notify()
+
 		// Tell the server what this replica now holds, which is the only place
 		// a participant that merely reads can say anything at all. See
 		// [Server.Stable].
@@ -231,7 +240,6 @@ func (c *Client) receive(conn carrierConn, done chan struct{}) {
 		if kind == kindOperation || kind == kindWelcome {
 			_ = c.acknowledge()
 		}
-		c.notify()
 	}
 }
 
