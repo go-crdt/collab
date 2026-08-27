@@ -49,6 +49,10 @@ type Client struct {
 	finished chan struct{}
 
 	send sync.Mutex // a carrier allows exactly one sender at a time
+	// sendClosed is set once the sending side has been closed, under send, so
+	// that nothing writes to a stream that is being wound down. See
+	// [Client.Close].
+	sendClosed bool
 
 	// supervised is set on a client that reconnects, and changes two things:
 	// its session ending is not the client ending, and an edit it could not
@@ -217,15 +221,16 @@ func (c *Client) receive(conn carrierConn, done chan struct{}) {
 			c.fail(err)
 			return
 		}
-		// A participant that only reads does not acknowledge from here, which
-		// is where it belongs and where it cannot go yet. Sending anything
-		// from this goroutine — anything at all, including a message the
-		// server then ignores — makes forty sessions racing an eviction lose
-		// work, five times out of five. That is a race in the server rather
-		// than in the acknowledgement, and it is filed rather than worked
-		// around here; until it is fixed, a participant tells the server what
-		// it holds when it joins and when it writes, so a document nobody
-		// writes to holds the answer back. See [Server.Stable].
+		// Tell the server what this replica now holds, which is the only place
+		// a participant that merely reads can say anything at all. See
+		// [Server.Stable].
+		//
+		// A failure here is not the session failing: an acknowledgement is an
+		// observation, and one that does not arrive holds the server's answer
+		// back rather than making it wrong.
+		if kind == kindOperation || kind == kindWelcome {
+			_ = c.acknowledge()
+		}
 		c.notify()
 	}
 }
@@ -404,6 +409,17 @@ func (c *Client) transmit(kind byte, msg any) error {
 	c.send.Lock()
 	defer c.send.Unlock()
 
+	// Nothing may be written once the sending side has been closed. A carrier
+	// treats a send after that as the stream going wrong rather than as one
+	// message failing, and takes down what it had not flushed with it — which
+	// is the edit this participant just made. Before this, forty sessions that
+	// wrote once and closed lost work whenever anything else was sending:
+	// [Client.receive] acknowledging what had just arrived was enough.
+	if c.sendClosed {
+		// Err is never nil here: [Client.Close] records why before closing.
+		return c.Err()
+	}
+
 	// A supervised client with no carrier is not a failed edit. The operation
 	// is in the replica, the next attach sends the server everything it lacks,
 	// and telling an editor that their keystroke failed when it did not is how
@@ -445,7 +461,18 @@ func (c *Client) Close() error {
 	// The wait is bounded because a server that has stopped reading must not
 	// hold a page open. Past the deadline the connection is cut, which is
 	// exactly what happened every time before.
-	_ = c.carrier().Close()
+	// Under the sending lock, and not through [Client.carrier], which takes and
+	// releases it and leaves the close outside. Closing the sending side is
+	// itself a send, and a carrier allows exactly one at a time: doing it while
+	// another goroutine is mid-send tears the stream down with a message still
+	// buffered on it, which is the same lost work this whole dance is here to
+	// avoid. The goroutine that does that is the one acknowledging what has
+	// just arrived, which is why it could not send from there until now.
+	c.send.Lock()
+	c.sendClosed = true
+	conn := c.conn
+	_ = conn.Close()
+	c.send.Unlock()
 	select {
 	case <-c.finished:
 	case <-time.After(closeGrace):
@@ -459,18 +486,6 @@ func (c *Client) Close() error {
 // already been sent. Long enough for a round trip on a bad connection, short
 // enough that nothing a person does waits on it.
 const closeGrace = 2 * time.Second
-
-// carrier is the connection this client is using now, which is not the one it
-// started with once it has reconnected.
-//
-// Under the send lock because that is what a reconnection takes to swap it: a
-// client being closed while its supervisor is taking a new carrier would
-// otherwise read the field as it is being written.
-func (c *Client) carrier() carrierConn {
-	c.send.Lock()
-	defer c.send.Unlock()
-	return c.conn
-}
 
 // acknowledge tells the server what this replica has applied.
 //
