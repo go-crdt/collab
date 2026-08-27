@@ -77,6 +77,30 @@ type Config struct {
 	// evicting costs a read rather than anything anybody wrote.
 	EvictAfter time.Duration
 
+	// CollectEvery, when set, gives back what every participant of a document
+	// has certainly seen: the tombstones nobody can be confused by any more.
+	// See [crdt.Doc.Collect].
+	//
+	// It is off by default, and being off is not a failure of nerve. Collecting
+	// asks for a version every replica has delivered, and a server can only
+	// know one because participants tell it what they hold. If any of them has
+	// gone quiet, the answer is nothing and nothing is collected — which is the
+	// behaviour the literature calls for, and the reason it is acceptable is
+	// that collecting affects size and never correctness:
+	//
+	//	When these requirements are not met, GC may block. We consider this to
+	//	be acceptable, as GC does not impact correctness (only performance), and
+	//	the normal operations in the object's interface remain live.
+	//	  — Shapiro, Preguiça, Baquero and Zawirski, "A comprehensive study of
+	//	    Convergent and Commutative Replicated Data Types", §4.1
+	//
+	// What it costs is stated on [ErrTooFarBehind], and it is not nothing: a
+	// participant that went away, wrote while away, and wrote against something
+	// this document has since collected is refused rather than served. Turn
+	// this on for documents that are edited in a room, not for ones people take
+	// home.
+	CollectEvery time.Duration
+
 	// OnEvictError, when set, is told about a document that could not be saved
 	// as it was evicted. There is nobody left to return an error to, and the
 	// document cannot be kept — a session may already have opened a fresh
@@ -173,6 +197,8 @@ type Server struct {
 	// nil outside the test that has to make that window happen on purpose.
 	betweenOpenAndJoin func(*document)
 	onEvictError       func(document string, err error)
+	collectEvery       time.Duration
+	lastCollect        time.Time // guarded by mu
 
 	stop     chan struct{}
 	stopped  chan struct{}
@@ -201,12 +227,13 @@ func NewServer(cfg Config) *Server {
 		authorizeOps: cfg.AuthorizeOperations,
 		now:          cfg.Clock,
 		onEvictError: cfg.OnEvictError,
+		collectEvery: cfg.CollectEvery,
 		stop:         make(chan struct{}),
 		stopped:      make(chan struct{}),
 		docs:         map[string]*document{},
 	}
-	if cfg.PersistEvery > 0 || cfg.EvictAfter > 0 {
-		go s.persistLoop(cfg.PersistEvery, cfg.EvictAfter)
+	if cfg.PersistEvery > 0 || cfg.EvictAfter > 0 || cfg.CollectEvery > 0 {
+		go s.persistLoop(cfg.PersistEvery, cfg.EvictAfter, cfg.CollectEvery)
 	} else {
 		// Nothing to stop, so Close has nothing to wait for.
 		close(s.stopped)
@@ -576,13 +603,26 @@ func (d *document) join(j joinMsg) (*subscriber, error) {
 	}
 
 	welcome := welcomeMsg{}
-	if have := j.Have; len(have) == 0 {
-		welcome.Snapshot = d.doc.Snapshot()
-	} else {
-		var held crdt.CompositeVersion
+	var held crdt.CompositeVersion
+	if have := j.Have; len(have) > 0 {
 		if err := held.UnmarshalBinary(have); err != nil {
 			return nil, fail(errInvalid, "collab: malformed version")
 		}
+	}
+	// A participant that says nothing about what it holds is sent the whole
+	// document. So is one that says something this document can no longer make
+	// a difference from: [crdt.Composite.Collect] has dropped operations below
+	// what that participant has, so the difference would have holes in its
+	// sequence numbers and the participant would park everything after the
+	// first one rather than catch up — silently, since nothing in the batch is
+	// wrong on its own.
+	if behind(d.doc, held) {
+		return nil, fail(errBehind, "%s", ErrTooFarBehind.Error())
+	}
+	switch {
+	case len(j.Have) == 0, !d.doc.CanReplay(held):
+		welcome.Snapshot = d.doc.Snapshot()
+	default:
 		// These operations came from this document, so they are valid by
 		// construction and cannot fail to encode.
 		welcome.Operations, _ = crdt.AppendPartOps(nil, d.doc.OpsSince(held))

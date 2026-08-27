@@ -44,3 +44,17 @@ func (s *Server) Documents() int {
 	defer s.mu.Unlock()
 	return len(s.docs)
 }
+
+// CollectNow runs one collection pass, whatever the interval says, so a test
+// does not have to wait for a timer to prove what a timer would have done.
+func (s *Server) CollectNow() {
+	s.mu.Lock()
+	was := s.collectEvery
+	s.collectEvery = time.Nanosecond
+	s.lastCollect = time.Time{}
+	s.mu.Unlock()
+	s.collectStable()
+	s.mu.Lock()
+	s.collectEvery = was
+	s.mu.Unlock()
+}

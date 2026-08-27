@@ -47,6 +47,11 @@ func (s *Server) Stable(name string) (crdt.CompositeVersion, bool) {
 func (d *document) stable() (crdt.CompositeVersion, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.stableLocked()
+}
+
+// stableLocked is [document.stable] for a caller that already holds the lock.
+func (d *document) stableLocked() (crdt.CompositeVersion, bool) {
 	if len(d.subs) == 0 {
 		return nil, false
 	}
