@@ -178,6 +178,7 @@ func TestTheGRPCCarrierRefusesTheSameShapes(t *testing.T) {
 		{kindJoin, opsMsg{}},
 		{kindOperation, joinMsg{}},
 		{kindPresence, joinMsg{}},
+		{kindAcknowledge, joinMsg{}},
 		{kindWelcome, welcomeMsg{}},
 		{99, joinMsg{}},
 	} {

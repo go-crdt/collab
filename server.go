@@ -377,6 +377,11 @@ type subscriber struct {
 	dropped   atomic.Bool
 	displaced atomic.Bool
 	closed    bool // guarded by document.mu
+	// have is the last version this participant said it had applied, or nil
+	// while it has said nothing. Guarded by document.mu, like closed: it is
+	// read when the meet is taken, which is under the same lock as everything
+	// else that walks the subscribers.
+	have crdt.CompositeVersion
 }
 
 // Session is the service method: one bidirectional stream, one participant, one
@@ -644,8 +649,14 @@ func (d *document) handle(ctx context.Context, sub *subscriber, kind byte, msg a
 			return fail(errInvalid, "collab: malformed presence")
 		}
 		return d.applyPresence(sub, p.Update)
+	case kindAcknowledge:
+		a, ok := msg.(ackMsg)
+		if !ok {
+			return fail(errInvalid, "collab: malformed acknowledgement")
+		}
+		return d.acknowledge(sub, a.Version)
 	default:
-		return fail(errInvalid, "collab: only operations and presence may follow a join")
+		return fail(errInvalid, "collab: only operations, presence and acknowledgements may follow a join")
 	}
 }
 

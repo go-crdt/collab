@@ -66,6 +66,7 @@ func TestASessionRefusesAKindThatDoesNotMatchItsBody(t *testing.T) {
 		{"a join that is not a join", kindJoin, "not a message"},
 		{"operations that are not operations", kindOperation, "not a message"},
 		{"presence that is not presence", kindPresence, 42},
+		{"an acknowledgement that is not one", kindAcknowledge, "not a message"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
