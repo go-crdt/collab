@@ -35,11 +35,16 @@ import (
 // The two intervals share one timer rather than taking one each: they are both
 // housekeeping, the shorter of them decides how often it runs, and two timers
 // would mean two goroutines racing to persist the same document.
-func (s *Server) persistLoop(every, evictAfter time.Duration) {
+func (s *Server) persistLoop(every, evictAfter, collectEvery time.Duration) {
 	defer close(s.stopped)
-	tick := every
-	if tick <= 0 || (evictAfter > 0 && evictAfter < tick) {
-		tick = evictAfter
+	// The shortest of the three that is asked for decides how often the pass
+	// runs; each of them then does or does not do its own work on it. A server
+	// asked only to collect still needs a timer, and this is the one.
+	tick := time.Duration(0)
+	for _, d := range []time.Duration{every, evictAfter, collectEvery} {
+		if d > 0 && (tick == 0 || d < tick) {
+			tick = d
+		}
 	}
 	timer := time.NewTicker(tick)
 	defer timer.Stop()
@@ -69,6 +74,56 @@ func (s *Server) housekeep(ctx context.Context, persist bool, evictAfter time.Du
 	}
 	if evictAfter > 0 {
 		s.evictIdle(ctx, evictAfter)
+	}
+	s.collectStable()
+}
+
+// collectStable gives back, in every document, what all of its participants
+// have certainly seen.
+//
+// It runs on the housekeeping timer rather than on one of its own, and asks
+// only as often as [Config.CollectEvery]: walking a document to find what can
+// go costs a pass over it, and a document that just collected has nothing more
+// to give until somebody has both edited and acknowledged.
+//
+// A document nobody can vouch for is skipped rather than forced. See
+// [Config.CollectEvery] for why that is the right way round.
+func (s *Server) collectStable() {
+	if s.collectEvery <= 0 {
+		return
+	}
+	s.mu.Lock()
+	if now := s.now(); now.Sub(s.lastCollect) < s.collectEvery {
+		s.mu.Unlock()
+		return
+	} else {
+		s.lastCollect = now
+	}
+	docs := make([]*document, 0, len(s.docs))
+	for _, d := range s.docs {
+		docs = append(docs, d)
+	}
+	s.mu.Unlock()
+
+	for _, d := range docs {
+		d.collect()
+	}
+}
+
+// collect gives this document back what everybody in it has certainly seen.
+//
+// The whole of it is under the document's lock, including taking the meet:
+// asking what everybody has seen and then acting on the answer are one step,
+// or a participant that joined in between would have vouched for nothing.
+func (d *document) collect() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	stable, ok := d.stableLocked()
+	if !ok {
+		return
+	}
+	if n := d.doc.Collect(stable); n > 0 {
+		d.dirty = true
 	}
 }
 
