@@ -64,21 +64,10 @@ func TestWhatEverybodyHasSeenAdvances(t *testing.T) {
 		})
 	}
 
-	// One more edit each. A participant tells the server what it holds when it
-	// writes, so this is what carries the version it reached by converging —
-	// there is nowhere else it can be sent from until the race recorded on
-	// [Client.receive] is fixed, and a document nobody writes to therefore
-	// holds the answer back.
-	for i, c := range clients {
-		if err := body(t, c).Insert(0, fmt.Sprintf("%d", i)); err != nil {
-			t.Fatalf("participant %d: %v", i, err)
-		}
-	}
-
-	// And then what everybody has certainly seen has to reach at least where
-	// the room had got to. It arrives after convergence rather than with it: an
-	// acknowledgement describes what its sender had applied when it was sent,
-	// so it is always a round-trip behind the state it describes.
+	// And then what everybody has certainly seen has to reach the same place. It
+	// arrives after convergence rather than with it: an acknowledgement
+	// describes what its sender had applied when it was sent, so it is always a
+	// round-trip behind the state it describes.
 	deadline := time.Now().Add(20 * time.Second)
 	var seen uint64
 	for {
@@ -141,4 +130,52 @@ func TestOneSilentParticipantHoldsTheAnswerBack(t *testing.T) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
+}
+
+// A participant that only reads is heard from too, which is the whole point of
+// acknowledging from the goroutine that receives.
+//
+// It is also what a room mostly is. One person writing and thirty watching is
+// the ordinary shape of a document being reviewed, and if the thirty said
+// nothing the answer would sit where the writer last was — which is to say, one
+// message behind, for ever.
+func TestAParticipantThatOnlyReadsIsHeardFrom(t *testing.T) {
+	srv, conn := serve(t, collab.Config{})
+	writer := join(t, conn, collab.ClientConfig{Document: "paper", Site: 1})
+	readers := make([]*collab.Client, 0, 4)
+	for i := 0; i < 4; i++ {
+		readers = append(readers, join(t, conn, collab.ClientConfig{
+			Document: "paper", Site: crdt.SiteID(i + 2),
+		}))
+	}
+
+	const want = 12
+	for i := 0; i < want; i++ {
+		if err := body(t, writer).Insert(0, "x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, r := range readers {
+		await(t, r, "the text", func() bool { return len(body(t, r).String()) == want })
+		_ = i
+	}
+
+	// Nobody but the writer has written anything, so if a reader could not
+	// acknowledge, the meet would stop at whatever the writer last reported —
+	// which is before it received its own last broadcast.
+	deadline := time.Now().Add(20 * time.Second)
+	var seen uint64
+	for {
+		if v, ok := srv.Stable("paper"); ok {
+			seen = totalSeen(v)
+			if seen >= want {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("with four readers and one writer, the answer stalled at %d of %d", seen, want)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Logf("one writer and %d readers: all %d operations are certainly seen", len(readers), want)
 }

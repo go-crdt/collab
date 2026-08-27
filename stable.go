@@ -17,14 +17,6 @@ import "github.com/go-crdt/crdt"
 //
 // # What it is not
 //
-// It is the meet over the participants **connected now**, and only over what
-// they have told it. A participant tells the server what it holds when it joins
-// and when it writes; it cannot yet tell it on receiving, because sending
-// anything from that goroutine reopens a race in eviction — see the note in
-// [Client.receive]. So a document being read but not written to holds the
-// answer where its readers last wrote, which is the safe direction and a poor
-// one.
-//
 // It is the meet over the participants **connected now**. A replica that is
 // offline holding work of its own is not in it and cannot be: the server has
 // never heard of what it did. So this is not yet a version anything may be
