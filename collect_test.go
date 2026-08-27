@@ -254,10 +254,18 @@ func collectSomething(t *testing.T, srv *collab.Server, store collab.Store, name
 		}
 		return body.Tombstones()
 	}
+	// Wait for the deletion to reach the server before measuring: the edits
+	// that made it were sent, not applied, and on a loaded machine the
+	// difference is visible. Measuring first and finding nothing said more
+	// about the machine than about the collection.
 	deadline := time.Now().Add(20 * time.Second)
 	before := tombstones()
-	if before == 0 {
-		t.Fatalf("nothing had been deleted in %q, so there was nothing to collect", name)
+	for before == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("nothing that was deleted in %q ever reached the server, so nothing was tested", name)
+		}
+		time.Sleep(2 * time.Millisecond)
+		before = tombstones()
 	}
 	for {
 		if _, ok := srv.Stable(name); ok {
