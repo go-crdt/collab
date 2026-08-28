@@ -298,3 +298,59 @@ func collectSomething(t *testing.T, srv *collab.Server, store collab.Store, name
 		time.Sleep(2 * time.Millisecond)
 	}
 }
+
+// A participant whose own replica has collected below where the server stands
+// cannot say what the server is missing, and is told so rather than pushing a
+// difference with holes in it.
+//
+// This is a replica the application collected on its own — which it may do; the
+// library does not police who calls Collect. What it cannot then do is hand its
+// history over piece by piece, because part of that history is what it gave
+// back. Such a replica has to seed the server with its snapshot instead.
+func TestAReplicaThatCollectedOnItsOwnCannotPushItsHistory(t *testing.T) {
+	// Built away from any server: written by two sites so a run can die whole,
+	// then collected.
+	mine := crdt.NewComposite(2)
+	body, err := mine.Text("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := body.Insert(0, "AAA"); err != nil {
+		t.Fatal(err)
+	}
+	peer := crdt.NewComposite(3)
+	history, err := mine.OpsSince(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.Apply(history...); err != nil {
+		t.Fatal(err)
+	}
+	peerBody, err := peer.Text("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := peerBody.Insert(peerBody.Len(), "BBB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mine.Apply(crdt.PartOps{
+		Part: crdt.Part{Kind: crdt.PartText, Name: "body"}, Text: theirs,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := body.Delete(0, 3); err != nil {
+		t.Fatal(err)
+	}
+	if n := mine.Collect(mine.Version()); n == 0 {
+		t.Fatal("nothing was collected, so nothing here is being tested")
+	}
+
+	// A server that has never seen this document.
+	_, conn := serve(t, collab.Config{})
+	_, err = collab.Join(t.Context(), collab.GRPC(conn),
+		collab.ClientConfig{Document: "paper", Site: 2, Resume: mine.Snapshot()})
+	if !errors.Is(err, crdt.ErrCollected) {
+		t.Fatalf("joining with a replica that collected on its own = %v, want ErrCollected", err)
+	}
+}

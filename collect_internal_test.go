@@ -163,7 +163,11 @@ func TestWhoIsTooFarBehind(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := peer.Apply(doc.OpsSince(nil)...); err != nil {
+		ops, err := doc.OpsSince(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := peer.Apply(ops...); err != nil {
 			t.Fatal(err)
 		}
 		theirs, err := peerBody.Insert(peerBody.Len(), "BBB")
