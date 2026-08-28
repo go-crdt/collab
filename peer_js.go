@@ -242,7 +242,7 @@ func (p *Peer) DataChannel(ctx context.Context) (js.Value, error) {
 			p.ch = ch
 			p.mu.Unlock()
 		case <-ctx.Done():
-			return js.Value{}, ctx.Err()
+			return js.Value{}, p.stalled(ctx.Err())
 		}
 	}
 	return p.awaitOpen(ctx, ch)
@@ -282,8 +282,36 @@ func (p *Peer) awaitOpen(ctx context.Context, ch js.Value) (js.Value, error) {
 		}
 		return ch, nil
 	case <-ctx.Done():
-		return js.Value{}, ctx.Err()
+		return js.Value{}, p.stalled(ctx.Err())
 	}
+}
+
+// stalled says where a connection had got to when the caller gave up.
+//
+// A deadline on its own says only that nothing happened, which is the least
+// useful thing a transport can tell somebody: "checking" is a network that has
+// not answered, "failed" is one that answered no, and "new" with no candidates
+// is a browser that never offered an address to try. Naming the state turns an
+// afternoon of guessing into a sentence.
+func (p *Peer) stalled(err error) error {
+	if err == nil {
+		return nil
+	}
+	p.mu.Lock()
+	pc := p.pc
+	p.mu.Unlock()
+	if !pc.Truthy() {
+		return err
+	}
+	state := func(name string) string {
+		v := pc.Get(name)
+		if v.Type() != js.TypeString {
+			return "?"
+		}
+		return v.String()
+	}
+	return fmt.Errorf("%w (connection %s, ice %s, gathering %s)", err,
+		state("connectionState"), state("iceConnectionState"), state("iceGatheringState"))
 }
 
 // gatherICE waits for non-trickle ICE to finish, so the description handed back

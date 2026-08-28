@@ -53,7 +53,8 @@ const fakeWebRTC = `
     const id = nextId++;
     const evs = {};
     const pc = {
-      config, iceGatheringState: "new", localDescription: null, remoteDescription: null,
+      config, iceGatheringState: "new", connectionState: "new", iceConnectionState: "new",
+      localDescription: null, remoteDescription: null,
       _channel: null,
       addEventListener(event, fn) { (evs[event] ||= []).push(fn); },
       _emit(event, arg) { for (const fn of evs[event] || []) fn(arg); },
@@ -66,6 +67,8 @@ const fakeWebRTC = `
       setLocalDescription(desc) {
         // Stamp the registry id into the sdp so an answerer can find the offerer.
         this.localDescription = { type: desc.type, sdp: desc.sdp + "a=pcid:" + id + "\r\n" };
+        this.connectionState = "connecting";
+        this.iceConnectionState = "checking";
         if (!globalThis.__collabFake.stallICE) {
           setTimeout(() => { this.iceGatheringState = "complete"; this._emit("icegatheringstatechange", {}); }, 0);
         }
@@ -546,8 +549,21 @@ func TestDataChannelHonoursTheContext(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if _, err := p.DataChannel(ctx); !errors.Is(err, context.DeadlineExceeded) {
+	_, err = p.DataChannel(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("waiting for a channel that never arrives should time out, got %v", err)
+	}
+	// And it says where it stopped. A deadline on its own is the least useful
+	// thing a transport can report: "checking" is a network that has not
+	// answered, "failed" is one that answered no, and gathering that never
+	// finished is a browser that never offered an address to try. A real one
+	// handed back "context deadline exceeded" and nothing else for an ICE
+	// failure, and an afternoon went into working out which of the three it
+	// was.
+	for _, want := range []string{"connection connecting", "ice checking", "gathering complete"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the timeout does not say %q: %v", want, err)
+		}
 	}
 }
 
