@@ -78,8 +78,14 @@ type Config struct {
 	EvictAfter time.Duration
 
 	// CollectEvery, when set, gives back what every participant of a document
-	// has certainly seen: the tombstones nobody can be confused by any more.
-	// See [crdt.Doc.Collect].
+	// has certainly seen: the map tombstones nobody can be confused by any
+	// more. See [crdt.Map.Collect].
+	//
+	// The map parts, and only those. A text and a list had a collection too and
+	// it was withdrawn in crdt v0.35.0, because it re-pointed survivors at
+	// something relative to what each replica happened to hold and left two of
+	// them holding different documents. So a document of text gives nothing
+	// back here yet.
 	//
 	// It is off by default, and being off is not a failure of nerve. Collecting
 	// asks for a version every replica has delivered, and a server can only
@@ -94,11 +100,10 @@ type Config struct {
 	//	  — Shapiro, Preguiça, Baquero and Zawirski, "A comprehensive study of
 	//	    Convergent and Commutative Replicated Data Types", §4.1
 	//
-	// What it costs is stated on [ErrTooFarBehind], and it is not nothing: a
-	// participant that went away, wrote while away, and wrote against something
-	// this document has since collected is refused rather than served. Turn
-	// this on for documents that are edited in a room, not for ones people take
-	// home.
+	// A map costs nothing to collect beyond the asking: it re-points nothing,
+	// it gives back a sequence number without its operation as a matter of
+	// course, and a peer catches up either way. There is no participant to
+	// refuse and none to re-seed.
 	CollectEvery time.Duration
 
 	// OnEvictError, when set, is told about a document that could not be saved
@@ -616,19 +621,12 @@ func (d *document) join(j joinMsg) (*subscriber, error) {
 	// sequence numbers and the participant would park everything after the
 	// first one rather than catch up — silently, since nothing in the batch is
 	// wrong on its own.
-	if behind(d.doc, held) {
-		return nil, fail(errBehind, "%s", ErrTooFarBehind.Error())
-	}
-	switch {
-	case len(j.Have) == 0, !d.doc.CanReplay(held):
+	if len(j.Have) == 0 {
 		welcome.Snapshot = d.doc.Snapshot()
-	default:
-		// Neither error is reachable. OpsSince refuses only below the
-		// collection floor, which the switch above has already sent a snapshot
-		// for; and these operations came from this document, so they are valid
-		// by construction and cannot fail to encode.
-		ops, _ := d.doc.OpsSince(held)
-		welcome.Operations, _ = crdt.AppendPartOps(nil, ops)
+	} else {
+		// These operations came from this document, so they are valid by
+		// construction and cannot fail to encode.
+		welcome.Operations, _ = crdt.AppendPartOps(nil, d.doc.OpsSince(held))
 	}
 	for _, update := range d.presence.State() {
 		raw, _ := update.MarshalBinary() // cannot fail for an update we made

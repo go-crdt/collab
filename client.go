@@ -179,16 +179,8 @@ func (c *Client) pushMissing(serverVersion []byte) error {
 		}
 	}
 	c.mu.Lock()
-	// A replica that has collected below where the server stands cannot say
-	// what the server is missing: what it gave back is not in the difference
-	// any more. That is a replica the application collected on its own, and
-	// telling it so is better than pushing a difference with holes in it that
-	// the server could only park.
-	ops, err := c.doc.OpsSince(held)
+	ops := c.doc.OpsSince(held)
 	c.mu.Unlock()
-	if err != nil {
-		return err
-	}
 	return c.publish(ops)
 }
 
