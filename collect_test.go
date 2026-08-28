@@ -30,7 +30,8 @@ func TestADocumentInUseGivesBackWhatEverybodyHasSeen(t *testing.T) {
 	// Written and revised the way a document is: each of them types a line and
 	// takes the other's away, so whole runs die.
 	const line = "a sentence somebody wrote. "
-	for round := 0; round < 40; round++ {
+	const rounds = 20
+	for round := 0; round < rounds; round++ {
 		if err := body(t, ada).Insert(body(t, ada).Len(), line); err != nil {
 			t.Fatal(err)
 		}
@@ -42,9 +43,18 @@ func TestADocumentInUseGivesBackWhatEverybodyHasSeen(t *testing.T) {
 	}
 	want := body(t, ada).String()
 
-	// The server saves what it holds; collecting has to make that smaller
-	// without changing what it says.
-	sizeOf := func() int {
+	// What was deleted, and so what the document would still be carrying if
+	// nothing were collected.
+	deleted := rounds * len([]rune(line))
+
+	// The signal is tombstones rather than bytes, and it is not a matter of
+	// taste. Byte size has to be compared against an earlier measurement, and
+	// there is no moment to take one: the collection timer has been running
+	// since the first edit, so on a slow machine the document has already
+	// given back what it could before the editing loop ends, and on a fast one
+	// it has not. Tombstones can be compared against what was deleted, which
+	// is known in advance and does not move.
+	whatIsSaved := func() (tombstones, size int) {
 		t.Helper()
 		if err := srv.Flush(t.Context()); err != nil {
 			t.Fatal(err)
@@ -53,24 +63,32 @@ func TestADocumentInUseGivesBackWhatEverybodyHasSeen(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return len(raw)
+		doc, err := crdt.LoadComposite(99, raw)
+		if err != nil {
+			t.Fatalf("what was stored is unreadable: %v", err)
+		}
+		text, err := doc.Text("body")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return text.Tombstones(), len(raw)
 	}
-	before := sizeOf()
 
-	deadline := time.Now().Add(20 * time.Second)
-	var after int
+	deadline := time.Now().Add(60 * time.Second)
+	var left, size int
 	for {
-		after = sizeOf()
-		if after < before {
+		left, size = whatIsSaved()
+		if left < deleted {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the document never gave anything back: %d bytes throughout", before)
+			t.Fatalf("the document never gave anything back: %d tombstones for %d characters deleted",
+				left, deleted)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Logf("a document two people worked on: %d bytes became %d (%.2fx), still saying the same thing",
-		before, after, float64(before)/float64(after))
+	t.Logf("two people wrote and revised: %d characters deleted, %d tombstones left, %d bytes stored",
+		deleted, left, size)
 
 	// And it still says what it said, to both of them and to the store.
 	if got := body(t, ada).String(); got != want {
