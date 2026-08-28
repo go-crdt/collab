@@ -21,6 +21,19 @@ import (
 // document, and asserts each one's edit reached the other — over WebRTC, with
 // nothing on either connection.
 //
+// It needs a browser, which CI does not have, so it skips unless one is found —
+// which makes it a lane that never runs anywhere, and therefore one whose
+// failures nobody sees. It fails on Chrome for Testing 149 here, and now says
+// why rather than only that it gave up: "connection failed, ice disconnected,
+// gathering complete" — candidates were produced and the connectivity checks
+// did not pass, which is the shape of the mDNS obfuscation the launch flag
+// below exists to switch off. That flag no longer has the effect it had.
+//
+// The diagnosis is left here rather than repaired because repairing it is
+// browser archaeology and nothing runs this: what was worth fixing was the
+// transport saying nothing, and [Peer.DataChannel] now names the state it
+// stalled in.
+//
 // It needs a browser, which CI does not have, so it skips unless one is found.
 // COLLAB_REQUIRE_BROWSER turns a missing browser into a failure, for a machine
 // that is meant to have one. Paths are discovered but overridable:
