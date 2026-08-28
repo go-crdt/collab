@@ -23,7 +23,11 @@ import (
 // Either argument may be nil, which is how a store says it has never held the
 // document; merging with nothing gives back the other side. Merging is
 // symmetric to the byte, because the snapshot encoding is canonical and both
-// results hold the same operations.
+// results hold the same operations — with one exception, which is that a side
+// that has collected ([crdt.Composite.Collect]) carries a record of what it
+// gave back, and the merge is done from that side because it is the only one
+// that can still produce a difference. The operations are the same either way;
+// the bytes then say which side was collected.
 func MergeSnapshots(ours, theirs []byte) ([]byte, error) {
 	if len(theirs) == 0 {
 		return ours, nil
@@ -42,12 +46,41 @@ func MergeSnapshots(ours, theirs []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("collab: reading their side: %w", err)
 	}
-	// Neither error below can happen and neither is carried. Their snapshot
-	// loaded, so it is causally complete: OpsSince returns operations that
-	// validate, Apply accepts them, and nothing is left waiting for something
-	// their snapshot did not hold.
-	_ = mine.Apply(yours.OpsSince(mine.Version())...)
-	return mine.Snapshot(), nil
+	// Merging is done from whichever side can still say what it holds.
+	//
+	// Usually that is either of them and the first try is the answer. It is not
+	// either of them once one side has collected: a side that gave back the
+	// operations the other has not seen cannot produce a difference from where
+	// the other stands, and says so. The other direction is then the one that
+	// works, and it holds the same operations — which is why this is a fallback
+	// and not a failure.
+	merged, err := mergeInto(mine, yours)
+	if errors.Is(err, crdt.ErrCollected) {
+		merged, err = mergeInto(yours, mine)
+	}
+	if err != nil {
+		// Both sides have collected past the other, so neither can say what the
+		// other is missing and there is no third replica to ask. Whoever holds
+		// these two has to choose one, which is a choice this cannot make for
+		// them.
+		return nil, fmt.Errorf("collab: neither side can be caught up from the other: %w", err)
+	}
+	return merged, nil
+}
+
+// mergeInto applies to base everything other holds that it does not, and
+// returns the result.
+//
+// Apply's error is not carried: other loaded, so it is causally complete —
+// OpsSince returns operations that validate, Apply accepts them, and nothing is
+// left waiting for something that snapshot did not hold.
+func mergeInto(base, other *crdt.Composite) ([]byte, error) {
+	ops, err := other.OpsSince(base.Version())
+	if err != nil {
+		return nil, err
+	}
+	_ = base.Apply(ops...)
+	return base.Snapshot(), nil
 }
 
 // A MultiStore keeps every document in several stores at once.

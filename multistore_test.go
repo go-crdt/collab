@@ -311,3 +311,141 @@ func TestAServerKeepsDocumentsInEveryStore(t *testing.T) {
 		}
 	}
 }
+
+// Two stores holding the same document, one of which has collected, still merge
+// into one that holds everything either held.
+//
+// The difference has to be taken from the collected side: it is the only one
+// that can still say what the other is missing, because what it gave back is
+// not in its differences any more. Which way round it goes is not something a
+// caller should have to know.
+func TestMergingWhenOneSideHasCollected(t *testing.T) {
+	a := crdt.NewComposite(1)
+	body, err := a.Text("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := body.Insert(0, "AAA"); err != nil {
+		t.Fatal(err)
+	}
+	// The other store's copy stops here, before anything else happens.
+	behind := a.Snapshot()
+
+	// A second site writes, so the first run is one of its own and can die
+	// whole; then it does, and what is left is collected.
+	peer := crdt.NewComposite(2)
+	history, err := a.OpsSince(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.Apply(history...); err != nil {
+		t.Fatal(err)
+	}
+	peerBody, err := peer.Text("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := peerBody.Insert(peerBody.Len(), "BBB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(crdt.PartOps{
+		Part: crdt.Part{Kind: crdt.PartText, Name: "body"}, Text: theirs,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := body.Delete(0, 3); err != nil {
+		t.Fatal(err)
+	}
+	if n := a.Collect(a.Version()); n == 0 {
+		t.Fatal("nothing was collected, so nothing here is being tested")
+	}
+	ahead := a.Snapshot()
+	want := body.String()
+
+	// Both ways round, because a caller does not choose which store it reads
+	// first.
+	for _, order := range []struct {
+		name         string
+		ours, theirs []byte
+	}{
+		{"the collected side second", behind, ahead},
+		{"the collected side first", ahead, behind},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			merged, err := collab.MergeSnapshots(order.ours, order.theirs)
+			if err != nil {
+				t.Fatalf("MergeSnapshots: %v", err)
+			}
+			doc, err := crdt.LoadComposite(9, merged)
+			if err != nil {
+				t.Fatalf("the merge is unreadable: %v", err)
+			}
+			text, err := doc.Text("body")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if text.String() != want {
+				t.Fatalf("the merge reads %q, want %q", text.String(), want)
+			}
+		})
+	}
+}
+
+// Two sides that have each collected past the other cannot be merged, and
+// saying so is the only honest answer.
+//
+// Neither can produce a difference from where the other stands, and there is no
+// third replica to ask. Whoever holds these two has to pick one, which is a
+// choice this package will not make on their behalf.
+func TestTwoSidesThatCollectedPastEachOther(t *testing.T) {
+	// A shared base written by two sites, so each has a run of its own that the
+	// other can take away whole.
+	one := crdt.NewComposite(1)
+	oneBody, err := one.Text("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oneBody.Insert(0, "AAA"); err != nil {
+		t.Fatal(err)
+	}
+	two := crdt.NewComposite(2)
+	history, err := one.OpsSince(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := two.Apply(history...); err != nil {
+		t.Fatal(err)
+	}
+	twoBody, err := two.Text("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := twoBody.Insert(twoBody.Len(), "BBB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := crdt.Part{Kind: crdt.PartText, Name: "body"}
+	if err := one.Apply(crdt.PartOps{Part: part, Text: theirs}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now they part company: each takes the other's line away and collects,
+	// without hearing that the other did the same.
+	if _, err := oneBody.Delete(3, 3); err != nil {
+		t.Fatal(err)
+	}
+	if n := one.Collect(one.Version()); n == 0 {
+		t.Fatal("the first side collected nothing")
+	}
+	if _, err := twoBody.Delete(0, 3); err != nil {
+		t.Fatal(err)
+	}
+	if n := two.Collect(two.Version()); n == 0 {
+		t.Fatal("the second side collected nothing")
+	}
+
+	if _, err := collab.MergeSnapshots(one.Snapshot(), two.Snapshot()); !errors.Is(err, crdt.ErrCollected) {
+		t.Fatalf("merging two sides that collected past each other = %v, want ErrCollected", err)
+	}
+}

@@ -623,9 +623,12 @@ func (d *document) join(j joinMsg) (*subscriber, error) {
 	case len(j.Have) == 0, !d.doc.CanReplay(held):
 		welcome.Snapshot = d.doc.Snapshot()
 	default:
-		// These operations came from this document, so they are valid by
-		// construction and cannot fail to encode.
-		welcome.Operations, _ = crdt.AppendPartOps(nil, d.doc.OpsSince(held))
+		// Neither error is reachable. OpsSince refuses only below the
+		// collection floor, which the switch above has already sent a snapshot
+		// for; and these operations came from this document, so they are valid
+		// by construction and cannot fail to encode.
+		ops, _ := d.doc.OpsSince(held)
+		welcome.Operations, _ = crdt.AppendPartOps(nil, ops)
 	}
 	for _, update := range d.presence.State() {
 		raw, _ := update.MarshalBinary() // cannot fail for an update we made
