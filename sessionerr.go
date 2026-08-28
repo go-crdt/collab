@@ -30,11 +30,6 @@ const (
 	errInternal
 	// errRefused is Authorize saying no.
 	errRefused
-	// errBehind is a participant holding work made against operations this
-	// document has since collected. It cannot be caught up and it cannot be
-	// re-seeded either, because re-seeding would drop that work; see
-	// [ErrTooFarBehind].
-	errBehind
 )
 
 // A sessionError is one of the above, with what to tell the participant.

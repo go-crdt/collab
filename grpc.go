@@ -5,7 +5,6 @@ package collab
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/go-crdt/collab/collabpb"
 	"google.golang.org/grpc"
@@ -82,7 +81,7 @@ func (c *grpcConn) Send(kind byte, msg any) error {
 func (c *grpcConn) Recv() (byte, any, error) {
 	in, err := c.stream.Recv()
 	if err != nil {
-		return 0, nil, tooFarBehind(err)
+		return 0, nil, err
 	}
 	switch body := in.GetBody().(type) {
 	case *collabpb.ServerMessage_Welcome:
@@ -161,11 +160,6 @@ func asStatus(err error) error {
 		code = codes.ResourceExhausted
 	case errAborted:
 		code = codes.Aborted
-	case errBehind:
-		// FailedPrecondition rather than InvalidArgument: nothing the
-		// participant sent is wrong, and retrying the same join will fail the
-		// same way. The state of the document is what makes it impossible.
-		code = codes.FailedPrecondition
 	}
 	return status.Error(code, se.msg)
 }
@@ -227,20 +221,4 @@ func (c *grpcCarrier) Send(kind byte, msg any) error {
 	default:
 		return ErrProtocol
 	}
-}
-
-// tooFarBehind gives back [ErrTooFarBehind] where the wire could only carry a
-// code and a sentence.
-//
-// It matters because of what an application is supposed to do about it. A
-// participant refused this way is holding work nothing can merge, and the only
-// right answer is to show that person their own writing and let them decide —
-// which an application can only do if it can tell this refusal from every other
-// one. A status code and a string are not something to ask callers to match on.
-func tooFarBehind(err error) error {
-	st, ok := status.FromError(err)
-	if !ok || st.Code() != codes.FailedPrecondition || st.Message() != ErrTooFarBehind.Error() {
-		return err
-	}
-	return fmt.Errorf("%w: %w", ErrTooFarBehind, err)
 }

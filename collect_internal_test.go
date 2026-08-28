@@ -6,8 +6,6 @@ import (
 	"context"
 	"testing"
 	"time"
-
-	"github.com/go-crdt/crdt"
 )
 
 // A participant that has vouched for nothing holds the answer at nothing, and
@@ -135,74 +133,4 @@ func TestNothingIsCollectedWhileSomebodyIsQuiet(t *testing.T) {
 	// was here to prove is proved.
 	cancel()
 	<-ended
-}
-
-// The rule that decides between catching a participant up, re-seeding it, and
-// refusing it, stated directly.
-//
-// Three cases and they are not symmetric: a participant the document can still
-// make a difference for is caught up; one it cannot, but which holds nothing of
-// its own, is re-seeded and loses nothing; one it cannot which does hold
-// something is refused, because re-seeding it would throw that away in silence.
-func TestWhoIsTooFarBehind(t *testing.T) {
-	part := crdt.Part{Kind: crdt.PartText, Name: "body"}
-	build := func() (*crdt.Composite, crdt.CompositeVersion) {
-		doc := crdt.NewComposite(1)
-		body, err := doc.Text("body")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := body.Insert(0, "AAA"); err != nil {
-			t.Fatal(err)
-		}
-		early := doc.Version()
-		// A second site writes, so the first run is one of its own and can die
-		// whole; then it does.
-		peer := crdt.NewComposite(2)
-		peerBody, err := peer.Text("body")
-		if err != nil {
-			t.Fatal(err)
-		}
-		ops, err := doc.OpsSince(nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := peer.Apply(ops...); err != nil {
-			t.Fatal(err)
-		}
-		theirs, err := peerBody.Insert(peerBody.Len(), "BBB")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := doc.Apply(crdt.PartOps{Part: part, Text: theirs}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := body.Delete(0, 3); err != nil {
-			t.Fatal(err)
-		}
-		if n := doc.Collect(doc.Version()); n == 0 {
-			t.Fatal("nothing was collected, so nothing below is being tested")
-		}
-		return doc, early
-	}
-
-	doc, early := build()
-	if doc.CanReplay(early) {
-		t.Fatal("a version from before the collection can still be caught up")
-	}
-
-	// Level with the document: caught up, not re-seeded and not refused.
-	if behind(doc, doc.Version()) {
-		t.Fatal("a participant level with the document was called too far behind")
-	}
-	// Behind, holding nothing of its own: re-seeded, so not too far behind.
-	if behind(doc, early) {
-		t.Fatal("a participant that was merely away was called too far behind")
-	}
-	// Behind and holding something of its own: nothing can be done.
-	withWork := early.Clone()
-	withWork[part][crdt.SiteID(7)] = 4
-	if !behind(doc, withWork) {
-		t.Fatal("a participant holding work that cannot merge was not called too far behind")
-	}
 }
