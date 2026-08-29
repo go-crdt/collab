@@ -105,6 +105,14 @@ type Config struct {
 	// course, and a peer catches up either way. There is no participant to
 	// refuse and none to re-seed.
 	//
+	// In a federation it does nothing at all. A follow link is a participant —
+	// it joins the server it follows, and [Server.Follow] joins its own server
+	// too — and only a [Client] sends an acknowledgement, so both ends have a
+	// participant that will never say what it holds and neither can collect.
+	// That is the safe direction rather than a broken one, and it is pinned
+	// down by a test rather than left to be discovered; see
+	// TestAFederatedServerDoesNotCollect and the issue it names.
+	//
 	// All of which holds only for the version it is asked with. "Gone quiet"
 	// above means gone quiet, not gone off the air: a participant whose carrier
 	// dropped is out of the open sessions within milliseconds and is exactly the
