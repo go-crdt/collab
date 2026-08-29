@@ -117,6 +117,19 @@ jobs:
         env:
           COLLAB_CHAOS: "1"
         run: go test -race -timeout 600s -run TestAMeshOfServers -v .
+      # And the third of the three, which ran nowhere. Collecting is the one
+      # thing this server does that takes away what somebody wrote, so it is the
+      # one that has to be broken on purpose — and the only test that breaks it
+      # was gated behind COLLAB_CHAOS with no job setting it. Two of the three
+      # chaos tests had a lane and this one did not, which is not a decision
+      # anybody made. Run for the first time, it wedged twenty-three times in
+      # thirty at sixty participants.
+      - name: Chaos (collecting)
+        shell: bash
+        env:
+          COLLAB_CHAOS: "1"
+          CHAOS_COLLECT_EDITORS: "60"
+        run: go test -race -timeout 900s -run TestCollectingWhileEverythingBreaks -v .
       - name: Test + 100% coverage gate
         shell: bash
         run: |
