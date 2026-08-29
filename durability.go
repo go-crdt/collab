@@ -118,7 +118,7 @@ func (s *Server) collectStable() {
 func (d *document) collect() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	stable, ok := d.stableLocked()
+	stable, ok := d.collectable()
 	if !ok {
 		return
 	}

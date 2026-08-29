@@ -104,6 +104,16 @@ type Config struct {
 	// it gives back a sequence number without its operation as a matter of
 	// course, and a peer catches up either way. There is no participant to
 	// refuse and none to re-seed.
+	//
+	// All of which holds only for the version it is asked with. "Gone quiet"
+	// above means gone quiet, not gone off the air: a participant whose carrier
+	// dropped is out of the open sessions within milliseconds and is exactly the
+	// one that has not delivered what the others have. So the meet is taken over
+	// every site this document has seen, present or not — see
+	// [document.collectable] — and a participant that never comes back holds
+	// collection back for good. That is the shape of the trade the passage above
+	// describes, and it is the one this server takes: giving back space is worth
+	// nothing beside two participants who will never agree again.
 	CollectEvery time.Duration
 
 	// OnEvictError, when set, is told about a document that could not be saved
@@ -387,7 +397,11 @@ type document struct {
 	doc      *crdt.Composite
 	presence *awareness.Registry
 	subs     map[*subscriber]struct{}
-	dirty    bool
+	// seen is the last version each site acknowledged, kept against the site and
+	// not the session so that it survives a dropped carrier. It is what this
+	// document may be collected against; see [document.collectable].
+	seen  map[crdt.SiteID]crdt.CompositeVersion
+	dirty bool
 	// emptySince is when the last participant left, and the zero time while
 	// anybody is here. See evictIdle.
 	emptySince time.Time
@@ -615,12 +629,11 @@ func (d *document) join(j joinMsg) (*subscriber, error) {
 		}
 	}
 	// A participant that says nothing about what it holds is sent the whole
-	// document. So is one that says something this document can no longer make
-	// a difference from: [crdt.Composite.Collect] has dropped operations below
-	// what that participant has, so the difference would have holes in its
-	// sequence numbers and the participant would park everything after the
-	// first one rather than catch up — silently, since nothing in the batch is
-	// wrong on its own.
+	// document. Everybody else is sent the difference, and there is no third
+	// case to check for: the difference can always be made, because this
+	// document is only ever collected against a version every site that has
+	// been in it has acknowledged. See [document.collectable], and what
+	// happened when that was the meet over the open sessions instead.
 	if len(j.Have) == 0 {
 		welcome.Snapshot = d.doc.Snapshot()
 	} else {
@@ -643,6 +656,15 @@ func (d *document) join(j joinMsg) (*subscriber, error) {
 	}
 	sub.out <- wireMsg{kind: kindWelcome, msg: welcome}
 	d.subs[sub] = struct{}{}
+	// A site nobody has heard from holds collection back rather than being
+	// absent from the question. Recording it here, and not on its first
+	// acknowledgement, is what makes joining enough to be counted.
+	if d.seen == nil {
+		d.seen = map[crdt.SiteID]crdt.CompositeVersion{}
+	}
+	if _, known := d.seen[site]; !known {
+		d.seen[site] = nil
+	}
 	// Somebody is here, so this document is not idle.
 	d.emptySince = time.Time{}
 	return sub, nil
