@@ -46,6 +46,9 @@ func TestCollectingWhileEverythingBreaks(t *testing.T) {
 	backlog := envInt("CHAOS_COLLECT_BACKLOG", 256)
 	// One turn in this many sends somebody away for a while. Zero is never.
 	absences := envInt("CHAOS_COLLECT_ABSENCES", 3)
+	// And one turn in this many sends everybody away at once, for long enough
+	// that the document goes idle and the server lets go of it. Zero is never.
+	blackouts := envInt("CHAOS_COLLECT_BLACKOUTS", 25)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -59,6 +62,10 @@ func TestCollectingWhileEverythingBreaks(t *testing.T) {
 		Store:        store,
 		Backlog:      backlog,
 		PersistEvery: 3 * time.Millisecond,
+		// Short, so that a moment with nobody in the document is enough for the
+		// server to let go of it. What a document forgets when that happens is
+		// the thing being tested: see sitesIn.
+		EvictAfter:   time.Duration(envInt("CHAOS_COLLECT_EVICT_MS", 5)) * time.Millisecond,
 		CollectEvery: time.Duration(envInt("CHAOS_COLLECT_EVERY_MS", 3)) * time.Millisecond,
 		OnPersistError: func(string, error) {
 			persistErrors.Add(1)
@@ -148,6 +155,21 @@ func TestCollectingWhileEverythingBreaks(t *testing.T) {
 			// as long as this harness could not arrange that, it could not find
 			// what happens when the telling is wrong. It missed a divergence
 			// that way. See TestCollectingPastAnAbsentParticipant.
+			// A blackout: everybody off the air at once, for long enough that
+			// the document goes idle and is let go of. It is the one thing that
+			// makes the server forget who has been here — and forgetting that
+			// is how it comes to collect against whoever gets back first. A
+			// room does empty: everyone closes the tab on a Friday and one of
+			// them opens it on Monday.
+			if blackouts > 0 && turn > 0 && turn%blackouts == 0 {
+				for _, l := range links {
+					l.away()
+				}
+				time.Sleep(30 * time.Millisecond)
+				for _, l := range links {
+					l.back()
+				}
+			}
 			if absences > 0 && turn%absences == 0 {
 				gone := links[r.IntN(len(links))]
 				// How long, drawn here: the goroutine that waits it out is one
