@@ -21,22 +21,25 @@ import (
 // document, and asserts each one's edit reached the other — over WebRTC, with
 // nothing on either connection.
 //
-// It needs a browser, which CI does not have, so it skips unless one is found —
-// which makes it a lane that never runs anywhere, and therefore one whose
-// failures nobody sees. It fails on Chrome for Testing 149 here, and now says
-// why rather than only that it gave up: "connection failed, ice disconnected,
-// gathering complete" — candidates were produced and the connectivity checks
-// did not pass, which is the shape of the mDNS obfuscation the launch flag
-// below exists to switch off. That flag no longer has the effect it had.
+// The ci.yml lane named "real browser" runs it on a pinned Chrome for Testing,
+// with COLLAB_REQUIRE_BROWSER set so that a missing browser fails rather than
+// skips. Before that lane existed this ran only on whichever developer machine
+// happened to have Chrome, which is the shape of a proof nobody collects.
 //
-// The diagnosis is left here rather than repaired because repairing it is
-// browser archaeology and nothing runs this: what was worth fixing was the
-// transport saying nothing, and [Peer.DataChannel] now names the state it
-// stalled in.
+// It was reported failing on Chrome for Testing 149 — "connection failed, ice
+// disconnected, gathering complete", which is candidates produced and the
+// connectivity checks not passing, and reads like the mDNS obfuscation the
+// launch flag in browsertest/driver.cjs exists to switch off. It does not
+// reproduce: six runs out of six on that same version, in about one and a half
+// seconds each. What was different when it failed was the machine, which had
+// every core busy at the time — ICE gives its connectivity checks a deadline in
+// wall-clock seconds, so a box that cannot schedule the page loses them. That
+// is worth knowing before reaching for a launch flag: a WebRTC handshake under
+// load fails in the same words as a WebRTC handshake that is misconfigured.
 //
-// It needs a browser, which CI does not have, so it skips unless one is found.
-// COLLAB_REQUIRE_BROWSER turns a missing browser into a failure, for a machine
-// that is meant to have one. Paths are discovered but overridable:
+// Elsewhere it skips unless a browser is found, and COLLAB_REQUIRE_BROWSER
+// turns that into a failure for a machine that is meant to have one. Paths are
+// discovered but overridable:
 //
 //	CHROME                    the Chrome (for Testing) binary
 //	COLLAB_BROWSER_NODE_PATH  a node_modules directory holding puppeteer-core

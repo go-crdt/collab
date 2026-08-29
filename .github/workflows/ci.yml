@@ -279,6 +279,42 @@ jobs:
           grep -q 'gap-free tab-to-tab session' js.log || {
             echo "::error::the serve-gap BroadcastSession proof did not run"; exit 1; }
 
+  real-browser:
+    name: real browser
+    runs-on: ubuntu-latest
+    env:
+      # A missing browser is a failure here, not a skip. That is the whole point
+      # of the lane: this test guards the only path where the WebRTC Peer meets
+      # a browser's own RTCPeerConnection rather than a stub, and for as long as
+      # it ran only on whichever developer machine happened to have Chrome, it
+      # was a proof nobody was collecting.
+      COLLAB_REQUIRE_BROWSER: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Pinned, and deliberately. The handshake depends on launch flags whose
+      # effect Chrome has changed before, and a floating browser turns that into
+      # a lane that breaks on a day nobody touched this repository. Moving the
+      # pin is then a commit that says so.
+      - name: Install a pinned Chrome for Testing and puppeteer-core
+        run: |
+          cd "$RUNNER_TEMP"
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund --silent puppeteer-core@24
+          npx --yes @puppeteer/browsers install chrome@149.0.7827.22 > chrome.txt
+          cat chrome.txt
+          echo "CHROME=$(awk '{print $NF}' chrome.txt)" >> "$GITHUB_ENV"
+          echo "COLLAB_BROWSER_NODE_PATH=$RUNNER_TEMP/node_modules" >> "$GITHUB_ENV"
+      - name: Two WebRTC peers in a real browser
+        run: |
+          "$CHROME" --version
+          go test -v -run TestPeerBrowserHandshake .
+
   arch-native:
     name: arch ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
