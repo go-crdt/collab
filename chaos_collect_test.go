@@ -131,9 +131,6 @@ func TestCollectingWhileEverythingBreaks(t *testing.T) {
 	go func() {
 		defer wgBreak.Done()
 		r := rand.New(rand.NewPCG(101, 4))
-		// A second stream, because the absences are timed from another
-		// goroutine and must not consume draws the cuts are counting on.
-		r2 := rand.New(rand.NewPCG(101, 5))
 		for turn := 0; ; turn++ {
 			select {
 			case <-breaking:
@@ -153,9 +150,14 @@ func TestCollectingWhileEverythingBreaks(t *testing.T) {
 			// that way. See TestCollectingPastAnAbsentParticipant.
 			if absences > 0 && turn%absences == 0 {
 				gone := links[r.IntN(len(links))]
+				// How long, drawn here: the goroutine that waits it out is one
+				// of several alive at once, and a generator is not safe for two
+				// of them. The race detector said so on the first run of the
+				// lane this commit adds, which is the lane doing its job.
+				how := time.Duration(20+r.IntN(180)) * time.Millisecond
 				gone.away()
 				go func() {
-					time.Sleep(time.Duration(20+r2.IntN(180)) * time.Millisecond)
+					time.Sleep(how)
 					gone.back()
 				}()
 			}
