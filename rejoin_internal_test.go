@@ -21,9 +21,20 @@ type breakable struct {
 	mu    sync.Mutex
 	conns []carrierConn
 	opens int
+	// shut keeps a participant off the air rather than merely knocking it off:
+	// a supervised client redials in milliseconds, so cutting a carrier is an
+	// interruption and not an absence. What hid a divergence for as long as it
+	// hid was that nothing here could arrange the second one.
+	shut bool
 }
 
 func (b *breakable) open(ctx context.Context) (carrierConn, error) {
+	b.mu.Lock()
+	shut := b.shut
+	b.mu.Unlock()
+	if shut {
+		return nil, ErrPipeClosed
+	}
 	transport, server := Pipe()
 	go func() { _ = b.srv.ServePipe(b.ctx, server) }()
 	conn, err := transport.open(ctx)
@@ -38,6 +49,23 @@ func (b *breakable) open(ctx context.Context) (carrierConn, error) {
 }
 
 func (b *breakable) dial(context.Context) (Transport, error) { return b, nil }
+
+// away takes a participant off the air and keeps it there: the carrier is cut
+// and every redial is refused until [breakable.back]. What the room does in the
+// meantime is what this participant has to be caught up on when it returns.
+func (b *breakable) away() {
+	b.mu.Lock()
+	b.shut = true
+	b.mu.Unlock()
+	b.cut()
+}
+
+// back readmits it.
+func (b *breakable) back() {
+	b.mu.Lock()
+	b.shut = false
+	b.mu.Unlock()
+}
 
 // cut ends every session it has handed out.
 func (b *breakable) cut() {
