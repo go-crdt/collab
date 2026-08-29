@@ -113,7 +113,9 @@ func (d *document) acknowledge(sub *subscriber, raw []byte) error {
 	d.mu.Lock()
 	sub.have = have
 	// And against the site rather than the session, which is what outlives a
-	// dropped carrier. See [document.collectable].
+	// dropped carrier. See [document.collectable]. The map is made here as
+	// well as in [Server.open] because a document can be built without going
+	// through it, and an acknowledgement is not the place to find that out.
 	if d.seen == nil {
 		d.seen = map[crdt.SiteID]crdt.CompositeVersion{}
 	}

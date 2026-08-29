@@ -44,6 +44,8 @@ func TestCollectingWhileEverythingBreaks(t *testing.T) {
 	rounds := envInt("CHAOS_COLLECT_ROUNDS", 30)
 	cuts := envInt("CHAOS_COLLECT_CUTS", 6)
 	backlog := envInt("CHAOS_COLLECT_BACKLOG", 256)
+	// One turn in this many sends somebody away for a while. Zero is never.
+	absences := envInt("CHAOS_COLLECT_ABSENCES", 3)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -137,6 +139,27 @@ func TestCollectingWhileEverythingBreaks(t *testing.T) {
 			}
 			for i := 0; i < cuts; i++ {
 				links[r.IntN(len(links))].cut()
+			}
+			// And an absence, which is a different thing from a cut. A cut
+			// carrier is an interruption: the supervised client redials before
+			// the room has done anything. A participant that is off the air
+			// while the others write, delete and are collected against is the
+			// one that comes back needing to be told what it missed -- and for
+			// as long as this harness could not arrange that, it could not find
+			// what happens when the telling is wrong. It missed a divergence
+			// that way. See TestCollectingPastAnAbsentParticipant.
+			if absences > 0 && turn%absences == 0 {
+				gone := links[r.IntN(len(links))]
+				// How long, drawn here: the goroutine that waits it out is one
+				// of several alive at once, and a generator is not safe for two
+				// of them. The race detector said so on the first run of the
+				// lane this commit adds, which is the lane doing its job.
+				how := time.Duration(20+r.IntN(180)) * time.Millisecond
+				gone.away()
+				go func() {
+					time.Sleep(how)
+					gone.back()
+				}()
 			}
 			if envInt("CHAOS_COLLECT_FLAKY", 1) != 0 {
 				hot.refuse(persistErrors.Load() == 0 || turn%2 == 0)

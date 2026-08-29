@@ -364,11 +364,46 @@ func (s *Server) open(ctx context.Context, name string) (*document, error) {
 		doc:          doc,
 		presence:     awareness.New(),
 		subs:         map[*subscriber]struct{}{},
+		seen:         sitesIn(doc),
 		now:          s.now,
 		emptySince:   s.now(),
 	}
 	s.docs[name] = d
 	return d, nil
+}
+
+// sitesIn is the site set a freshly loaded document starts with: every site its
+// own version vector names, each of them owing an acknowledgement.
+//
+// [document.seen] is what this document may be collected against, and it lives
+// in memory — so a document that is let go of and loaded again would come back
+// remembering nobody, and the first participant to return and acknowledge would
+// be the whole of the answer. Everyone else who was away would then be
+// collected past, which is the divergence [document.collectable] exists to
+// prevent, reached through a different door. A server that has just started
+// remembers nobody either, and it is the same door.
+//
+// The version vector is the durable part: it is in the snapshot, and it names
+// every site that has written here. Seeding from it means a writer that never
+// comes back holds collection back for good, which is the trade already made
+// for one that is merely away.
+//
+// It does not name a participant that only ever read — nothing it did is in any
+// version vector — so one of those, away across an eviction, is still outside
+// this. What it read it read; what it would be missing is a deletion, and there
+// is nowhere durable that says it was ever here. Somewhere to write that down
+// is a store change and is not this.
+func sitesIn(doc *crdt.Composite) map[crdt.SiteID]crdt.CompositeVersion {
+	out := map[crdt.SiteID]crdt.CompositeVersion{}
+	for _, vv := range doc.Version() {
+		for site := range vv {
+			if site == serverSite {
+				continue
+			}
+			out[site] = nil
+		}
+	}
+	return out
 }
 
 // A document is one hub: the server's replica, everyone's presence, and the
@@ -659,9 +694,6 @@ func (d *document) join(j joinMsg) (*subscriber, error) {
 	// A site nobody has heard from holds collection back rather than being
 	// absent from the question. Recording it here, and not on its first
 	// acknowledgement, is what makes joining enough to be counted.
-	if d.seen == nil {
-		d.seen = map[crdt.SiteID]crdt.CompositeVersion{}
-	}
 	if _, known := d.seen[site]; !known {
 		d.seen[site] = nil
 	}
