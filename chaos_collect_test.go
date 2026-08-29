@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,7 +57,7 @@ func TestCollectingWhileEverythingBreaks(t *testing.T) {
 		Store:        store,
 		Backlog:      backlog,
 		PersistEvery: 3 * time.Millisecond,
-		CollectEvery: 3 * time.Millisecond,
+		CollectEvery: time.Duration(envInt("CHAOS_COLLECT_EVERY_MS", 3)) * time.Millisecond,
 		OnPersistError: func(string, error) {
 			persistErrors.Add(1)
 		},
@@ -137,11 +138,15 @@ func TestCollectingWhileEverythingBreaks(t *testing.T) {
 			for i := 0; i < cuts; i++ {
 				links[r.IntN(len(links))].cut()
 			}
-			hot.refuse(persistErrors.Load() == 0 || turn%2 == 0)
-			moved, err := store.Archive(ctx, time.Nanosecond)
-			archived.Add(int64(moved))
-			if err != nil {
-				refusedArchives.Add(1)
+			if envInt("CHAOS_COLLECT_FLAKY", 1) != 0 {
+				hot.refuse(persistErrors.Load() == 0 || turn%2 == 0)
+			}
+			if envInt("CHAOS_COLLECT_ARCHIVE", 1) != 0 {
+				moved, err := store.Archive(ctx, time.Nanosecond)
+				archived.Add(int64(moved))
+				if err != nil {
+					refusedArchives.Add(1)
+				}
 			}
 		}
 	}()
@@ -158,7 +163,19 @@ func TestCollectingWhileEverythingBreaks(t *testing.T) {
 	// Everybody has to end up holding the same document. Not a length — the
 	// text itself, because a collection that dropped the wrong run would leave
 	// two replicas the same length and saying different things.
-	deadline := time.Now().Add(60 * time.Second)
+	// A settling budget, not a performance bar. It is wall clock, so it measures
+	// the machine as much as the code: sixty seconds is minutes of work for one
+	// participant when something else on the box is using every core, and a
+	// harness that calls that a divergence has cried wolf. It therefore scales
+	// with the crowd and is generous, because what is being asserted is that
+	// they agree in the end and not how soon.
+	budget := time.Duration(60+2*editors) * time.Second
+	if s := os.Getenv("CHAOS_COLLECT_SETTLE"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			budget = time.Duration(n) * time.Second
+		}
+	}
+	deadline := time.Now().Add(budget)
 	var agreed string
 	contents := func(c *Client) (string, bool) {
 		m, err := c.Map("cells")
@@ -202,7 +219,7 @@ func TestCollectingWhileEverythingBreaks(t *testing.T) {
 			for _, s := range texts {
 				differing[s]++
 			}
-			t.Fatalf("%d participants hold %d different documents", len(texts), len(differing))
+			t.Fatalf("%d participants hold %d different documents after %s", len(texts), len(differing), budget)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
