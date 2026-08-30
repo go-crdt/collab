@@ -80,6 +80,12 @@ var ErrChanged = errors.New("collab: the document changed since it was read")
 // Reading an archived document brings it back: it is written to the hot store
 // on the way past, so the next read does not go looking again and the next
 // save has somewhere to land.
+//
+// It does not implement [SiteStore]. Go has no way to implement an interface
+// only when what is underneath does, so a Tiered that declared the methods
+// would keep nothing whenever its tiers could not — silently, which is worse than
+// not offering it. A server given one falls back to the participants a document
+// names, which is everyone who has written; see [SiteStore] for what that costs.
 type Tiered struct {
 	hot  Archivable
 	cold Store

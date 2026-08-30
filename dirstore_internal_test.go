@@ -210,3 +210,132 @@ func TestADocumentThatCannotBeReadIsNotTakenForANewOne(t *testing.T) {
 		t.Fatalf("the error is %q, want it to name the document", err)
 	}
 }
+
+// The participants are written the way a snapshot is, and fail the way one
+// does: somewhere else first, then a rename, and nothing half-written left
+// where a reader could find it.
+func TestTheParticipantsAreWrittenLikeASnapshot(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewDirStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	// Nothing recorded is nil rather than an error: it is how a store says it
+	// has never been told about this document.
+	got, err := store.LoadSites(ctx, "doc")
+	if err != nil || got != nil {
+		t.Fatalf("LoadSites of an unknown document = %v, %v", got, err)
+	}
+	if err := store.SaveSites(ctx, "doc", []byte("who was here")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = store.LoadSites(ctx, "doc"); err != nil || string(got) != "who was here" {
+		t.Fatalf("LoadSites = %q, %v", got, err)
+	}
+
+	// And nothing that walks the documents sees them.
+	names, err := store.Documents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		if name != "doc" {
+			t.Fatalf("Documents reported %q; the participants are not a document", name)
+		}
+	}
+	idle, err := store.Idle(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range idle {
+		if name != "doc" {
+			t.Fatalf("Idle reported %q; the participants are not a document", name)
+		}
+	}
+
+	// A document with no name has nowhere to keep them, as it has nowhere to
+	// keep itself.
+	if _, err := store.LoadSites(ctx, ""); !errors.Is(err, ErrNoDocument) {
+		t.Fatalf("LoadSites of the empty name = %v, want ErrNoDocument", err)
+	}
+	if err := store.SaveSites(ctx, "", nil); !errors.Is(err, ErrNoDocument) {
+		t.Fatalf("SaveSites of the empty name = %v, want ErrNoDocument", err)
+	}
+
+	for _, tt := range []struct {
+		name string
+		file *failingFile
+		want string
+	}{
+		{"the disk fills up", &failingFile{write: true}, "writing"},
+		{"the write never reaches the disk", &failingFile{sync: true}, "flushing"},
+		{"the file will not close", &failingFile{shut: true}, "closing"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := filepath.Join(dir, sitesDir, tempPrefix+"stand-in")
+			if err := os.WriteFile(tmp, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tt.file.name = tmp
+			restore := createTemp
+			createTemp = func(string, string) (halfWritten, error) { return tt.file, nil }
+			defer func() { createTemp = restore }()
+
+			err := store.SaveSites(ctx, "doc", []byte("somebody else"))
+			if err == nil {
+				t.Fatal("a save that could not finish reported success")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("the error is %q, want it to say %q", err, tt.want)
+			}
+			if got, err := store.LoadSites(ctx, "doc"); err != nil || string(got) != "who was here" {
+				t.Fatalf("what was recorded is now %q, %v", got, err)
+			}
+			if _, err := os.Stat(tmp); !os.IsNotExist(err) {
+				t.Errorf("the half-written file is still there: %v", err)
+			}
+		})
+	}
+
+	// The ones before the writing: no room to make the directory, no temporary
+	// file, and a rename that will not take.
+	for _, tt := range []struct {
+		name string
+		with func() func()
+		want string
+	}{
+		{"no room for the directory", func() func() {
+			restore := mkdirAll
+			mkdirAll = func(string, os.FileMode) error { return errors.New("no room") }
+			return func() { mkdirAll = restore }
+		}, "making room"},
+		{"no temporary file", func() func() {
+			restore := createTemp
+			createTemp = func(string, string) (halfWritten, error) { return nil, errors.New("no room") }
+			return func() { createTemp = restore }
+		}, "writing"},
+		{"the rename will not take", func() func() {
+			restore := renameFile
+			renameFile = func(string, string) error { return errors.New("it would not move") }
+			return func() { renameFile = restore }
+		}, "replacing"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			defer tt.with()()
+			err := store.SaveSites(ctx, "doc", []byte("somebody else"))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("the error is %v, want it to say %q", err, tt.want)
+			}
+		})
+	}
+
+	// And a read that fails for a reason other than absence is reported.
+	restore := readFile
+	readFile = func(string) ([]byte, error) { return nil, errors.New("the disk is gone") }
+	defer func() { readFile = restore }()
+	if _, err := store.LoadSites(ctx, "doc"); err == nil {
+		t.Fatal("a read that failed reported success")
+	}
+}

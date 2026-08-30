@@ -359,6 +359,31 @@ func (s *Server) open(ctx context.Context, name string) (*document, error) {
 		}
 	}
 
+	// And who has been here, from a store that keeps such a thing. Reading it
+	// happens without the lock for the same reason the snapshot does.
+	seen, reached := sitesIn(doc), map[crdt.SiteID]crdt.CompositeClocks(nil)
+	if keeper, keeps := s.store.(SiteStore); keeps {
+		raw, err := keeper.LoadSites(ctx, name)
+		if err != nil {
+			return nil, fail(errInternal, "collab: reading the participants of %q: %v", name, err)
+		}
+		if len(raw) > 0 {
+			held, said, err := decodeSites(raw)
+			if err != nil {
+				return nil, fail(errInternal, "collab: the participants stored for %q are unreadable: %v", name, err)
+			}
+			// The union, not the stored set. A site the document names is one
+			// that has written here, whatever a store remembers, and forgetting
+			// it would be collecting past somebody the document itself can see.
+			for site, version := range held {
+				if _, named := seen[site]; !named || version != nil {
+					seen[site] = version
+				}
+			}
+			reached = said
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.docs[name]; ok {
@@ -372,7 +397,8 @@ func (s *Server) open(ctx context.Context, name string) (*document, error) {
 		doc:          doc,
 		presence:     awareness.New(),
 		subs:         map[*subscriber]struct{}{},
-		seen:         sitesIn(doc),
+		seen:         seen,
+		reached:      reached,
 		now:          s.now,
 		emptySince:   s.now(),
 	}
@@ -452,7 +478,13 @@ type document struct {
 	// reached is how far each site said its own map parts had counted, which is
 	// what bounds what it will write next. See [document.clockFloor].
 	reached map[crdt.SiteID]crdt.CompositeClocks
-	dirty   bool
+	// sitesDirty marks a participant this document has not written down yet.
+	// An acknowledgement does not set it: what it changes is a version that
+	// only ever grows, and one written down late is one that holds the floor
+	// lower than it needs to, which is the safe direction. A site nobody has
+	// recorded at all is the other direction, so joining does set it.
+	sitesDirty bool
+	dirty      bool
 	// emptySince is when the last participant left, and the zero time while
 	// anybody is here. See evictIdle.
 	emptySince time.Time
@@ -712,6 +744,7 @@ func (d *document) join(j joinMsg) (*subscriber, error) {
 	// acknowledgement, is what makes joining enough to be counted.
 	if _, known := d.seen[site]; !known {
 		d.seen[site] = nil
+		d.sitesDirty = true
 	}
 	// Somebody is here, so this document is not idle.
 	d.emptySince = time.Time{}
@@ -892,20 +925,50 @@ func (d *document) persist(ctx context.Context) error {
 	d.saving.Lock()
 	defer d.saving.Unlock()
 
+	keeper, keeps := d.store.(SiteStore)
+
 	d.mu.Lock()
-	if !d.dirty {
+	if !d.dirty && !(keeps && d.sitesDirty) {
 		d.mu.Unlock()
 		return nil
 	}
-	snapshot := d.doc.Snapshot()
-	d.dirty = false
+	var snapshot []byte
+	if d.dirty {
+		snapshot = d.doc.Snapshot()
+		d.dirty = false
+	}
+	var sites []byte
+	var sitesErr error
+	if keeps {
+		// Everything, not only what changed: it is a handful of versions, and a
+		// store that is given the whole of it cannot be left holding half.
+		sites, sitesErr = encodeSites(d.seen, d.reached)
+		d.sitesDirty = false
+	}
 	d.mu.Unlock()
 
-	if err := d.store.Save(ctx, d.name, snapshot); err != nil {
+	if snapshot != nil {
+		if err := d.store.Save(ctx, d.name, snapshot); err != nil {
+			d.mu.Lock()
+			d.dirty = true
+			d.mu.Unlock()
+			return err
+		}
+	}
+	if !keeps {
+		return nil
+	}
+	if sitesErr == nil {
+		sitesErr = keeper.SaveSites(ctx, d.name, sites)
+	}
+	if sitesErr != nil {
+		// The snapshot is saved and this is not, which is the direction that
+		// costs nothing: a document that comes back knowing fewer participants
+		// collects less than it could, and never more.
 		d.mu.Lock()
-		d.dirty = true
+		d.sitesDirty = true
 		d.mu.Unlock()
-		return err
+		return sitesErr
 	}
 	return nil
 }

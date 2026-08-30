@@ -174,3 +174,225 @@ func TestTheServersOwnSiteIsNotAParticipant(t *testing.T) {
 		t.Fatalf("sitesIn = %v, want the server's own site left out", got)
 	}
 }
+
+// A participant that has only ever read is remembered too, when the store can
+// remember it.
+//
+// The document's own version vector names everyone who has written here, which
+// is what a document that has been let go of comes back knowing. It does not
+// name a reader: nothing a reader did is in any version vector. So before a
+// store could be asked to keep the participants, a reader that was away across
+// an eviction was collected past, and came back holding a value everybody else
+// had removed.
+func TestAReaderIsRememberedAcrossAnEviction(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := NewMemoryStore()
+	if _, keeps := Store(store).(SiteStore); !keeps {
+		t.Fatal("the fixture needs a store that can keep participants")
+	}
+	srv := NewServer(Config{Store: store, EvictAfter: 5 * time.Millisecond})
+	defer func() { _ = srv.Close(context.Background()) }()
+
+	linkA := &gatedLink{srv: srv, ctx: ctx}
+	author, err := JoinWithRetry(ctx, linkA.dial, ClientConfig{Document: "paper", Site: 1},
+		RetryPolicy{Wait: time.Millisecond, Ceiling: 5 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = author.Close() }()
+
+	// A reader, which writes nothing at all.
+	linkR := &gatedLink{srv: srv, ctx: ctx}
+	reader, err := JoinWithRetry(ctx, linkR.dial, ClientConfig{Document: "paper", Site: 2},
+		RetryPolicy{Wait: time.Millisecond, Ceiling: 5 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	cells, err := author.Map("cells")
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := reader.Map("cells")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cells.Set("k", []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "the reader to see it", func() bool {
+		v, held := theirs.Get("k")
+		return held && string(v) == "v"
+	})
+
+	// Everybody leaves, and the document is let go of.
+	linkA.away()
+	linkR.away()
+	until(t, "the document to be let go of", func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		_, held := srv.docs["paper"]
+		return !held
+	})
+
+	// The author comes back to a document the server has just loaded, deletes
+	// the key, and acknowledges.
+	linkA.back()
+	document := func() *document {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return srv.docs["paper"]
+	}
+	until(t, "the author to be connected again", func() bool {
+		d := document()
+		if d == nil {
+			return false
+		}
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return len(d.subs) == 1
+	})
+	if err := cells.Delete("k"); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "the server to hold the deletion", func() bool {
+		d := document()
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		m, err := d.doc.Map("cells")
+		return err == nil && m.Tombstones() == 1
+	})
+
+	// It must not be collected: the reader is one of the participants this
+	// document has had, and it has said nothing since it went away.
+	for range 10 {
+		document().collect()
+	}
+	d := document()
+	d.mu.Lock()
+	m, _ := d.doc.Map("cells")
+	left := m.Tombstones()
+	d.mu.Unlock()
+	if left != 1 {
+		t.Fatal("the tombstone was given back while a reader that had been here was away")
+	}
+
+	// And the reader comes back to a key that is gone.
+	linkR.back()
+	until(t, "the reader to agree that the key is gone", func() bool {
+		_, held := theirs.Get("k")
+		return !held
+	})
+}
+
+// plainStore is a Store and nothing more: it keeps documents and cannot be
+// asked to keep anybody.
+type plainStore struct{ inner *MemoryStore }
+
+func (p plainStore) Load(ctx context.Context, document string) ([]byte, error) {
+	return p.inner.Load(ctx, document)
+}
+
+func (p plainStore) Save(ctx context.Context, document string, snapshot []byte) error {
+	return p.inner.Save(ctx, document, snapshot)
+}
+
+func (p plainStore) Idle(ctx context.Context, d time.Duration) ([]string, error) {
+	return p.inner.Idle(ctx, d)
+}
+
+// And with a store that cannot keep them, the reader is not remembered. This is
+// the fallback [SiteStore] documents, pinned rather than described: a store that
+// does not implement it leaves the behaviour that was there before, and that
+// behaviour has this hole in it.
+func TestAReaderIsNotRememberedByAStoreThatCannotKeepThem(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := plainStore{inner: NewMemoryStore()}
+	if _, keeps := Store(store).(SiteStore); keeps {
+		t.Fatal("the fixture needs a store that cannot keep participants")
+	}
+	srv := NewServer(Config{Store: store, EvictAfter: 5 * time.Millisecond})
+	defer func() { _ = srv.Close(context.Background()) }()
+
+	linkA := &gatedLink{srv: srv, ctx: ctx}
+	author, err := JoinWithRetry(ctx, linkA.dial, ClientConfig{Document: "paper", Site: 1},
+		RetryPolicy{Wait: time.Millisecond, Ceiling: 5 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = author.Close() }()
+	linkR := &gatedLink{srv: srv, ctx: ctx}
+	reader, err := JoinWithRetry(ctx, linkR.dial, ClientConfig{Document: "paper", Site: 2},
+		RetryPolicy{Wait: time.Millisecond, Ceiling: 5 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	cells, err := author.Map("cells")
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := reader.Map("cells")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cells.Set("k", []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "the reader to see it", func() bool {
+		v, held := theirs.Get("k")
+		return held && string(v) == "v"
+	})
+
+	linkA.away()
+	linkR.away()
+	until(t, "the document to be let go of", func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		_, held := srv.docs["paper"]
+		return !held
+	})
+
+	linkA.back()
+	document := func() *document {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return srv.docs["paper"]
+	}
+	until(t, "the author to be connected again", func() bool {
+		d := document()
+		if d == nil {
+			return false
+		}
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return len(d.subs) == 1
+	})
+	if err := cells.Delete("k"); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "the server to hold the deletion", func() bool {
+		d := document()
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		m, err := d.doc.Map("cells")
+		return err == nil && m.Tombstones() == 1
+	})
+
+	// The reader is not among the participants this document came back
+	// knowing, so nothing holds the floor at its version and the tombstone goes.
+	until(t, "the tombstone to be given back", func() bool {
+		document().collect()
+		d := document()
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		m, err := d.doc.Map("cells")
+		return err == nil && m.Tombstones() == 0
+	})
+}

@@ -102,6 +102,12 @@ func MergeSnapshots(ours, theirs []byte) ([]byte, error) {
 //
 // They are written one after another rather than at the same time because there
 // are two of them, not two hundred.
+//
+// It does not implement [SiteStore]. Go has no way to implement an interface
+// only when what is underneath does, so a MultiStore that declared the methods
+// would keep nothing whenever its stores could not — silently, which is worse than
+// not offering it. A server given one falls back to the participants a document
+// names, which is everyone who has written; see [SiteStore] for what that costs.
 type MultiStore struct {
 	stores []Store
 }
