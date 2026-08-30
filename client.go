@@ -502,8 +502,12 @@ const closeGrace = 2 * time.Second
 // server holds its answer back on. See [Server.Stable].
 func (c *Client) acknowledge() error {
 	c.mu.Lock()
-	// A version this replica built cannot fail to encode.
+	// A version and clocks this replica built cannot fail to encode.
 	raw, _ := c.doc.Version().MarshalBinary()
+	// And how far each map part here has counted, which is what bounds what
+	// this replica will write next. A version does not say it: see
+	// document.clockFloor on the server.
+	clocks, _ := c.doc.Clocks().MarshalBinary()
 	c.mu.Unlock()
-	return c.transmit(kindAcknowledge, ackMsg{Version: raw})
+	return c.transmit(kindAcknowledge, ackMsg{Version: raw, Clocks: clocks})
 }

@@ -98,10 +98,17 @@ message Presence {
   bytes update = 1;
 }
 
-// Acknowledge carries a participant's version: what it has applied, as of
-// sending. It is how the server learns what every participant has certainly
-// seen, which is the one thing a version safe to collect against needs and the
-// one thing a server fanning operations out does not otherwise know.
+// Acknowledge carries a participant's version and its clocks: what it has
+// applied as of sending, and how far each of its map parts has counted. It is
+// how the server learns what every participant has certainly seen, which a
+// version safe to collect against needs, and how far each of them will write
+// next, which such a version does not say and cannot.
+//
+// The clocks are the second half because a version does not bound them. A site
+// that has seen nothing writes at clock one however far along everyone else is,
+// and a write carrying such a clock can beat a deletion everybody has already
+// delivered. A participant that says where its own clock stands says the one
+// thing that bounds what it will send: a Lamport clock only goes up.
 //
 // Nothing depends on one arriving. A participant that never sends one holds the
 // server's answer back rather than making it wrong, which is the safe
@@ -109,4 +116,8 @@ message Presence {
 // not have seen the operation in question.
 message Acknowledge {
   bytes version = 1;
+  // clocks is a marshalled crdt.CompositeClocks: how far each map part of this
+  // participant's replica has counted. Absent from an older participant, which
+  // holds the server's answer back rather than making it wrong.
+  bytes clocks = 2;
 }

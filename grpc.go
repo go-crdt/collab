@@ -70,7 +70,7 @@ func (c *grpcConn) Send(kind byte, msg any) error {
 			return ErrProtocol
 		}
 		out.Body = &collabpb.ClientMessage_Acknowledge{
-			Acknowledge: &collabpb.Acknowledge{Version: m.Version},
+			Acknowledge: &collabpb.Acknowledge{Version: m.Version, Clocks: m.Clocks},
 		}
 	default:
 		return ErrProtocol
@@ -186,7 +186,7 @@ func (c *grpcCarrier) Recv() (byte, any, error) {
 	case *collabpb.ClientMessage_Presence:
 		return kindPresence, presenceMsg{Update: body.Presence.GetUpdate()}, nil
 	case *collabpb.ClientMessage_Acknowledge:
-		return kindAcknowledge, ackMsg{Version: body.Acknowledge.GetVersion()}, nil
+		return kindAcknowledge, ackMsg{Version: body.Acknowledge.GetVersion(), Clocks: body.Acknowledge.GetClocks()}, nil
 	default:
 		// A message the generated code allows and this does not understand,
 		// which the session logic refuses as "not a join" or "not operations".

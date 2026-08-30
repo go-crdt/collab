@@ -487,18 +487,29 @@ func (x *Presence) GetUpdate() []byte {
 	return nil
 }
 
-// Acknowledge carries a participant's version: what it has applied, as of
-// sending. It is how the server learns what every participant has certainly
-// seen, which is the one thing a version safe to collect against needs and the
-// one thing a server fanning operations out does not otherwise know.
+// Acknowledge carries a participant's version and its clocks: what it has
+// applied as of sending, and how far each of its map parts has counted. It is
+// how the server learns what every participant has certainly seen, which a
+// version safe to collect against needs, and how far each of them will write
+// next, which such a version does not say and cannot.
+//
+// The clocks are the second half because a version does not bound them. A site
+// that has seen nothing writes at clock one however far along everyone else is,
+// and a write carrying such a clock can beat a deletion everybody has already
+// delivered. A participant that says where its own clock stands says the one
+// thing that bounds what it will send: a Lamport clock only goes up.
 //
 // Nothing depends on one arriving. A participant that never sends one holds the
 // server's answer back rather than making it wrong, which is the safe
 // direction: a replica nobody has heard from is exactly the replica that might
 // not have seen the operation in question.
 type Acknowledge struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Version       []byte                 `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Version []byte                 `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`
+	// clocks is a marshalled crdt.CompositeClocks: how far each map part of this
+	// participant's replica has counted. Absent from an older participant, which
+	// holds the server's answer back rather than making it wrong.
+	Clocks        []byte `protobuf:"bytes,2,opt,name=clocks,proto3" json:"clocks,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -540,6 +551,13 @@ func (x *Acknowledge) GetVersion() []byte {
 	return nil
 }
 
+func (x *Acknowledge) GetClocks() []byte {
+	if x != nil {
+		return x.Clocks
+	}
+	return nil
+}
+
 var File_collab_proto protoreflect.FileDescriptor
 
 const file_collab_proto_rawDesc = "" +
@@ -577,9 +595,10 @@ const file_collab_proto_rawDesc = "" +
 	"operations\x18\x01 \x01(\fR\n" +
 	"operations\"\"\n" +
 	"\bPresence\x12\x16\n" +
-	"\x06update\x18\x01 \x01(\fR\x06update\"'\n" +
+	"\x06update\x18\x01 \x01(\fR\x06update\"?\n" +
 	"\vAcknowledge\x12\x18\n" +
-	"\aversion\x18\x01 \x01(\fR\aversion2K\n" +
+	"\aversion\x18\x01 \x01(\fR\aversion\x12\x16\n" +
+	"\x06clocks\x18\x02 \x01(\fR\x06clocks2K\n" +
 	"\x06Collab\x12A\n" +
 	"\aSession\x12\x18.collab.v1.ClientMessage\x1a\x18.collab.v1.ServerMessage(\x010\x01B$Z\"github.com/go-crdt/collab/collabpbb\x06proto3"
 
