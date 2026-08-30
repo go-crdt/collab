@@ -254,3 +254,38 @@ func FuzzDecodeServer(f *testing.F) {
 		}
 	})
 }
+
+// A participant built before the clocks existed sends the version and stops,
+// and that has to keep working: the two ends of a session are not deployed at
+// the same moment. It holds the collection floor back rather than making it
+// wrong, which is what a participant that says nothing always does here.
+func TestAnAcknowledgementWithoutClocksIsStillOne(t *testing.T) {
+	old := appendBytes([]byte{kindAcknowledge}, []byte{1, 2, 3})
+	kind, msg, err := decodeClient(old)
+	if err != nil {
+		t.Fatalf("an acknowledgement without clocks was refused: %v", err)
+	}
+	if kind != kindAcknowledge {
+		t.Fatalf("decoded kind %d, want an acknowledgement", kind)
+	}
+	ack, ok := msg.(ackMsg)
+	if !ok {
+		t.Fatalf("decoded %T, want an ackMsg", msg)
+	}
+	if string(ack.Version) != string([]byte{1, 2, 3}) {
+		t.Fatalf("version came back as %v", ack.Version)
+	}
+	if ack.Clocks != nil {
+		t.Fatalf("clocks came back as %v, want none", ack.Clocks)
+	}
+
+	// And anything after the clocks is still refused: a message is decoded from
+	// its own encoding and nothing else.
+	if _, _, err := decodeClient(append(encodeAck(ackMsg{Version: []byte{1}, Clocks: []byte{2}}), 0)); err == nil {
+		t.Fatal("trailing bytes were accepted")
+	}
+	// A clocks field that says more than it has is refused rather than guessed.
+	if _, _, err := decodeClient(append(appendBytes([]byte{kindAcknowledge}, []byte{1}), 9, 0)); err == nil {
+		t.Fatal("a clocks field longer than the message was accepted")
+	}
+}

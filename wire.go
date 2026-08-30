@@ -203,8 +203,18 @@ func decodeClient(data []byte) (byte, any, error) {
 		if !ok {
 			return 0, nil, ErrProtocol
 		}
-		clocks, ok := f.copied()
-		if !ok || !f.done() {
+		// The clocks are optional, and that is what makes a participant built
+		// before them still able to speak here: it sends the version and stops.
+		// One that says nothing about its clocks holds the server's collection
+		// floor back rather than making it wrong, which is what it does for a
+		// version it does not send either. See document.clockFloor.
+		var clocks []byte
+		if !f.done() {
+			if clocks, ok = f.copied(); !ok {
+				return 0, nil, ErrProtocol
+			}
+		}
+		if !f.done() {
 			return 0, nil, ErrProtocol
 		}
 		return kindAcknowledge, ackMsg{Version: version, Clocks: clocks}, nil
