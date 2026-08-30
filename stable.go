@@ -198,6 +198,14 @@ func (d *document) collectable() (crdt.CompositeVersion, bool) {
 // Why the server and not a replica: a replica does not know who is out there,
 // and the site whose write is still on its way is exactly the one it has never
 // heard from.
+//
+// A participant that says something untrue about its own clocks cannot raise
+// this, because it is the least of what everybody said. It can only pin it
+// down, which costs space and nothing else. What it can do is say a high clock
+// and then write below it — and that is refused where every other operation
+// that would resurrect a collected key is refused, by [crdt.Map.Collect]'s
+// guard, loudly, since [crdt.Composite.Apply] passes it on. Deciding who may
+// speak for whom is [Config.AuthorizeOperations].
 func (d *document) clockFloor() (crdt.CompositeClocks, bool) {
 	if len(d.seen) == 0 {
 		return nil, false
