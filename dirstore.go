@@ -80,6 +80,7 @@ var (
 	removeFile = os.Remove
 	readFile   = os.ReadFile
 	readDir    = os.ReadDir
+	mkdirAll   = os.MkdirAll
 )
 
 // NewDirStore returns a store keeping documents in dir, creating it if it is not
@@ -280,6 +281,81 @@ func (s *DirStore) Release(ctx context.Context, document string, want []byte) er
 	}
 	if err := removeFile(path); err != nil {
 		return fmt.Errorf("collab: releasing document %q: %w", document, err)
+	}
+	return nil
+}
+
+// sitesDir is where the participants live: a directory beside the documents
+// rather than a file among them.
+//
+// [DirStore.Documents] and [DirStore.Idle] skip directories, so nothing that
+// walks the documents can mistake one of these for a document — which is the
+// whole reason they are not simply files with a decorated name.
+const sitesDir = "sites"
+
+func (s *DirStore) sitesPath(document string) (string, error) {
+	if document == "" {
+		return "", ErrNoDocument
+	}
+	return filepath.Join(s.dir, sitesDir, base64.URLEncoding.EncodeToString([]byte(document))), nil
+}
+
+// LoadSites returns what SaveSites last wrote, or nil for a document nobody has
+// been recorded in. See [SiteStore].
+func (s *DirStore) LoadSites(_ context.Context, document string) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path, err := s.sitesPath(document)
+	if err != nil {
+		return nil, err
+	}
+	held, err := readFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("collab: reading the participants of %q: %w", document, err)
+	}
+	return held, nil
+}
+
+// SaveSites records the participants, replaced whole and atomically, exactly as
+// a snapshot is: a half-written one would be read back as unreadable and take
+// the document down with it.
+//
+// The bytes are stored as they arrive. A snapshot is packed because it is large
+// and repetitive; this is neither.
+func (s *DirStore) SaveSites(_ context.Context, document string, sites []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path, err := s.sitesPath(document)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if err := mkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("collab: making room for the participants of %q: %w", document, err)
+	}
+	tmp, err := createTemp(dir, tempPrefix+"*")
+	if err != nil {
+		return fmt.Errorf("collab: writing the participants of %q: %w", document, err)
+	}
+	name := tmp.Name()
+	defer func() { _ = removeFile(name) }()
+
+	if _, err := tmp.Write(sites); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("collab: writing the participants of %q: %w", document, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("collab: flushing the participants of %q: %w", document, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("collab: closing the participants of %q: %w", document, err)
+	}
+	if err := renameFile(name, path); err != nil {
+		return fmt.Errorf("collab: replacing the participants of %q: %w", document, err)
 	}
 	return nil
 }
