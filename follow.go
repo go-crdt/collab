@@ -156,23 +156,37 @@ func (s *Server) follow(ctx context.Context, peer Transport, document string, as
 	// commonly a peer that has stopped writing, so "next" can be never. The
 	// cancel is what turns a broken link into a returned error.
 	sent := make(chan error, 1)
+	// Where the inbound loop hands its acknowledgements, so that one goroutine
+	// writes to the carrier and not two. One in flight is enough: an
+	// acknowledgement says what this replica holds now, so a newer one says
+	// everything an older one would have and offering it is allowed to fail.
+	acks := make(chan wireMsg, 1)
 	go func() {
 		defer cancel()
 		for {
+			// One message is chosen and then one send makes it, rather than a
+			// send in each arm: the two would fail the same way and be answered
+			// the same way, and one of the two answers would be a branch no test
+			// could reach without arranging for a carrier to break in the
+			// moment an acknowledgement was in flight.
+			var out wireMsg
 			select {
+			case out = <-acks:
 			case msg, open := <-sub.out:
 				if !open {
 					sent <- nil
 					return
 				}
-				if msg.kind == kindOperation {
-					if err := conn.Send(msg.kind, msg.msg); err != nil {
-						sent <- err
-						return
-					}
+				if msg.kind != kindOperation {
+					continue
 				}
+				out = msg
 			case <-ctx.Done():
 				sent <- ctx.Err()
+				return
+			}
+			if err := conn.Send(out.kind, out.msg); err != nil {
+				sent <- err
 				return
 			}
 		}
@@ -207,6 +221,27 @@ func (s *Server) follow(ctx context.Context, peer Transport, document string, as
 		}
 		if err := local.applyOperations(ctx, sub, ops.Operations); err != nil {
 			return err
+		}
+
+		// And say what this replica now holds, which is what lets the peer
+		// collect. A link is a participant of the document it follows, and a
+		// participant that never says anything holds that document's floor at
+		// nothing for ever — so before this, Config.CollectEvery did nothing at
+		// all in a federation, silently.
+		//
+		// Saying it is safe, and the argument is short. What is promised is
+		// what this server has applied, not what everybody behind it has: those
+		// are participants of this document, and this document's own floor is
+		// what protects them. The peer collecting up to what this server holds
+		// can take away nothing anybody here will later ask this server for,
+		// because this server still holds it.
+		local.mu.Lock()
+		raw, _ := local.doc.Version().MarshalBinary()
+		clocks, _ := local.doc.Clocks().MarshalBinary()
+		local.mu.Unlock()
+		select {
+		case acks <- wireMsg{kind: kindAcknowledge, msg: ackMsg{Version: raw, Clocks: clocks}}:
+		default:
 		}
 	}
 }

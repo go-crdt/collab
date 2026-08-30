@@ -10,21 +10,17 @@ import (
 	"github.com/go-crdt/crdt"
 )
 
-// A server that is in a federation does not collect, and this is that pinned
-// down rather than left to be discovered.
+// A server in a federation collects, because a link says what it holds.
 //
-// [document.collectable] is the meet over every site that has been in the
-// document, and a site that has acknowledged nothing takes it to nothing. A
-// follow link is a site: it joins the server it follows, and it joins its own
-// server too — see [Server.Follow]. Neither of those sessions is a [Client],
-// and only a Client sends kindAcknowledge. So both servers have a participant
-// that will never say what it holds, and neither of them can ever collect.
+// A link is a participant of the document it follows: it joins that server, and
+// [Server.Follow] joins its own as well. A participant that never says anything
+// holds a document's floor at nothing for ever, so before the link acknowledged,
+// Config.CollectEvery did nothing at all in a federation — silently, which is
+// the worst way for a setting to do nothing.
 //
-// That is the safe direction and not a regression: the meet has always refused
-// an answer while any participant was silent. It is worth a test because
-// Config.CollectEvery otherwise does nothing at all in a federated deployment
-// and says nothing about it.
-func TestAFederatedServerDoesNotCollect(t *testing.T) {
+// What a link promises is what its own server has applied, not what everybody
+// behind it has. That is enough, and the next test is why.
+func TestAFederatedServerCollectsOnceTheLinkSaysWhatItHolds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -33,8 +29,6 @@ func TestAFederatedServerDoesNotCollect(t *testing.T) {
 	paris := NewServer(Config{Store: NewMemoryStore(), CollectEvery: time.Millisecond})
 	defer func() { _ = paris.Close(context.Background()) }()
 
-	// Somebody in Paris, writing and deleting, and acknowledging every word of
-	// it: on its own that is a room whose meet advances.
 	tr, sc := Pipe()
 	go func() { _ = paris.ServePipe(ctx, sc) }()
 	author, err := Join(ctx, tr, ClientConfig{Document: "paper", Site: 1})
@@ -44,12 +38,6 @@ func TestAFederatedServerDoesNotCollect(t *testing.T) {
 	defer func() { _ = author.Close() }()
 	cells, err := author.Map("cells")
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cells.Set("k", []byte("v")); err != nil {
-		t.Fatal(err)
-	}
-	if err := cells.Delete("k"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -71,55 +59,71 @@ func TestAFederatedServerDoesNotCollect(t *testing.T) {
 		}
 		return m.Tombstones()
 	}
-	// Paris on its own collects, and the timer does it without being asked.
-	// This is the control: without it, everything below would pass on a server
-	// that was not collecting for some other reason.
-	until(t, "Paris to give the tombstone back", func() bool { return tombstones(paris) == 0 })
 
-	// Now Lyon follows Paris. Neither of them can collect any more.
 	link := &directDial{srv: paris, ctx: ctx}
-	// Follow runs the link and does not return while it is up, so it goes in a
-	// goroutine the way a deployment would run it.
 	go func() { _ = lyon.Follow(ctx, link, "paper", crdt.SiteID(9001)) }()
 	until(t, "the link to reach Paris", func() bool {
 		d := document(paris)
+		if d == nil {
+			return false
+		}
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		return len(d.subs) == 2
 	})
 
-	document(paris).mu.Lock()
-	_, parisCan := document(paris).collectable()
-	document(paris).mu.Unlock()
-	if parisCan {
-		t.Fatal("Paris reported a version to collect against while a link that never acknowledges is in the room")
-	}
-	document(lyon).mu.Lock()
-	_, lyonCan := document(lyon).collectable()
-	document(lyon).mu.Unlock()
-	if lyonCan {
-		t.Fatal("Lyon reported one, and its own end of the link has acknowledged nothing either")
-	}
-
-	// And in practice: another deletion, and the tombstone stays.
-	if err := cells.Set("m", []byte("w")); err != nil {
+	if err := cells.Set("k", []byte("v")); err != nil {
 		t.Fatal(err)
 	}
-	if err := cells.Delete("m"); err != nil {
+	// The tombstone has to be there before its going away means anything: an
+	// empty document has none either, and a test that cannot tell those apart
+	// passes whatever the code does. This one did, until it was checked against
+	// the change reverted.
+	until(t, "Paris to hold the write", func() bool { return tombstones(paris) == 0 && len(cells.Keys()) == 1 })
+	if err := cells.Delete("k"); err != nil {
 		t.Fatal(err)
 	}
-	until(t, "Paris to hold the second tombstone", func() bool { return tombstones(paris) > 0 })
-	held := tombstones(paris)
-	time.Sleep(50 * time.Millisecond) // fifty passes of the collector
-	if got := tombstones(paris); got < held {
-		t.Fatalf("Paris went from %d tombstones to %d with a silent link in the room", held, got)
+	until(t, "Paris to hold the deletion", func() bool { return tombstones(paris) == 1 })
+	// And then to give it back, with a link in the room, on its own timer.
+	until(t, "Paris to give the tombstone back", func() bool { return tombstones(paris) == 0 })
+	// Giving it back is the proof that the floor moved: nothing is collected
+	// without one, and before the link acknowledged, nothing here ever was.
+}
+
+// And a participant behind the link is not collected past, which is what makes
+// the promise above enough.
+//
+// A link says what its own server has applied. The people behind it are
+// participants of that server's document, and that document's own floor is what
+// protects them: the server they ask still holds what it told the peer it had.
+func TestAParticipantBehindALinkIsNotCollectedPast(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	lyon := NewServer(Config{Store: NewMemoryStore(), CollectEvery: time.Millisecond})
+	defer func() { _ = lyon.Close(context.Background()) }()
+	paris := NewServer(Config{Store: NewMemoryStore(), CollectEvery: time.Millisecond})
+	defer func() { _ = paris.Close(context.Background()) }()
+
+	tr, sc := Pipe()
+	go func() { _ = paris.ServePipe(ctx, sc) }()
+	author, err := Join(ctx, tr, ClientConfig{Document: "paper", Site: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = author.Close() }()
+	cells, err := author.Map("cells")
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	// And the deletion still reaches Lyon, which is the part that matters: not
-	// collecting costs space and never correctness.
-	tr2, sc2 := Pipe()
-	go func() { _ = lyon.ServePipe(ctx, sc2) }()
-	reader, err := Join(ctx, tr2, ClientConfig{Document: "paper", Site: 2})
+	link := &directDial{srv: paris, ctx: ctx}
+	go func() { _ = lyon.Follow(ctx, link, "paper", crdt.SiteID(9001)) }()
+
+	// A reader on Lyon, which takes the value and then goes away holding it.
+	away := &gatedLink{srv: lyon, ctx: ctx}
+	reader, err := JoinWithRetry(ctx, away.dial, ClientConfig{Document: "paper", Site: 2},
+		RetryPolicy{Wait: time.Millisecond, Ceiling: 5 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +132,51 @@ func TestAFederatedServerDoesNotCollect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	until(t, "Lyon's reader to agree that the key is gone", func() bool {
+	if err := cells.Set("k", []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "the reader on Lyon to see it", func() bool {
+		v, held := theirs.Get("k")
+		return held && string(v) == "v"
+	})
+	away.away()
+
+	// Paris deletes it and gives the tombstone back, which it may: the link has
+	// told it that Lyon holds the deletion.
+	if err := cells.Delete("k"); err != nil {
+		t.Fatal(err)
+	}
+	document := func(s *Server) *document {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.docs["paper"]
+	}
+	tombstones := func(s *Server) int {
+		d := document(s)
+		if d == nil {
+			return -1
+		}
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		m, err := d.doc.Map("cells")
+		if err != nil {
+			return -1
+		}
+		return m.Tombstones()
+	}
+	until(t, "Paris to give the tombstone back", func() bool { return tombstones(paris) == 0 })
+
+	// Lyon must not: the reader is one of its participants and has said nothing
+	// since it went away. Ten passes of its collector to be sure.
+	until(t, "Lyon to hold the deletion", func() bool { return tombstones(lyon) == 1 })
+	time.Sleep(10 * time.Millisecond)
+	if got := tombstones(lyon); got != 1 {
+		t.Fatalf("Lyon gave back the tombstone its own reader has not delivered: %d left", got)
+	}
+
+	// And the reader comes back to a key that is gone, which is the whole point.
+	away.back()
+	until(t, "the reader to agree that the key is gone", func() bool {
 		_, held := theirs.Get("k")
 		return !held
 	})
