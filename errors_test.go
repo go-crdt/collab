@@ -340,6 +340,25 @@ func TestAParticipantThatCannotKeepUpIsDropped(t *testing.T) {
 	}
 
 	busy := join(t, conn, collab.ClientConfig{Document: "doc", Site: 2})
+
+	// Everything is written before anything is read, which is what the sentence
+	// above says and what the code did not do: it drained in a goroutine while
+	// the writer wrote, so whether the queue ever overflowed was a race between
+	// them. It lost that race about one run in six under -race, and once on a
+	// Windows runner.
+	//
+	// Two thousand rather than a handful. What has to fill first is not the
+	// backlog of one but gRPC's flow-control window and the bufconn behind it,
+	// and only when the carrier stops accepting does the backlog back up and
+	// the participant go. Two hundred operations of sixty-four characters — some
+	// twenty kilobytes — went nowhere near it: measured, twenty-four runs in
+	// twenty-five never dropped anybody. Two thousand does it every time.
+	for range 2000 {
+		if err := body(t, busy).Insert(0, strings.Repeat("x", 64)); err != nil {
+			t.Fatalf("Insert: %v", err)
+		}
+	}
+
 	dropped := make(chan error, 1)
 	go func() {
 		for {
@@ -349,23 +368,13 @@ func TestAParticipantThatCannotKeepUpIsDropped(t *testing.T) {
 			}
 		}
 	}()
-
-	// Keep writing until the idle participant's queue overflows.
-	deadline := time.After(settle)
-	for {
-		select {
-		case err := <-dropped:
-			if got := status.Code(err); got != codes.ResourceExhausted {
-				t.Fatalf("the idle participant was dropped with %v (%v), want ResourceExhausted", got, err)
-			}
-			return
-		case <-deadline:
-			t.Fatal("an idle participant was never dropped")
-		default:
+	select {
+	case err := <-dropped:
+		if got := status.Code(err); got != codes.ResourceExhausted {
+			t.Fatalf("the idle participant was dropped with %v (%v), want ResourceExhausted", got, err)
 		}
-		if err := body(t, busy).Insert(0, strings.Repeat("x", 64)); err != nil {
-			t.Fatalf("Insert: %v", err)
-		}
+	case <-time.After(settle):
+		t.Fatal("an idle participant was never dropped")
 	}
 }
 

@@ -24,9 +24,9 @@ func TestAFederatedServerCollectsOnceTheLinkSaysWhatItHolds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	lyon := NewServer(Config{Store: NewMemoryStore(), CollectEvery: time.Millisecond})
+	lyon := NewServer(Config{Store: NewMemoryStore()})
 	defer func() { _ = lyon.Close(context.Background()) }()
-	paris := NewServer(Config{Store: NewMemoryStore(), CollectEvery: time.Millisecond})
+	paris := NewServer(Config{Store: NewMemoryStore()})
 	defer func() { _ = paris.Close(context.Background()) }()
 
 	tr, sc := Pipe()
@@ -84,10 +84,21 @@ func TestAFederatedServerCollectsOnceTheLinkSaysWhatItHolds(t *testing.T) {
 		t.Fatal(err)
 	}
 	until(t, "Paris to hold the deletion", func() bool { return tombstones(paris) == 1 })
-	// And then to give it back, with a link in the room, on its own timer.
-	until(t, "Paris to give the tombstone back", func() bool { return tombstones(paris) == 0 })
-	// Giving it back is the proof that the floor moved: nothing is collected
-	// without one, and before the link acknowledged, nothing here ever was.
+
+	// Collecting is asked for rather than left to a timer. A timer would be
+	// racing this test: it could take the tombstone away between the deletion
+	// landing and the assertion seeing it, and a test that loses that race says
+	// the opposite of what it means. Measured before this was written that way:
+	// one run in six.
+	// Asked for until it happens, rather than once. The link acknowledges after
+	// applying what it was sent, so its answer arrives when it arrives: the
+	// first ask can be too early, and waiting for it to have said *something*
+	// is not the same as waiting for it to have said something recent enough.
+	// Before the link acknowledged at all, no number of asks would do.
+	until(t, "Paris to give the tombstone back", func() bool {
+		document(paris).collect()
+		return tombstones(paris) == 0
+	})
 }
 
 // And a participant behind the link is not collected past, which is what makes
@@ -100,9 +111,9 @@ func TestAParticipantBehindALinkIsNotCollectedPast(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	lyon := NewServer(Config{Store: NewMemoryStore(), CollectEvery: time.Millisecond})
+	lyon := NewServer(Config{Store: NewMemoryStore()})
 	defer func() { _ = lyon.Close(context.Background()) }()
-	paris := NewServer(Config{Store: NewMemoryStore(), CollectEvery: time.Millisecond})
+	paris := NewServer(Config{Store: NewMemoryStore()})
 	defer func() { _ = paris.Close(context.Background()) }()
 
 	tr, sc := Pipe()
@@ -164,12 +175,17 @@ func TestAParticipantBehindALinkIsNotCollectedPast(t *testing.T) {
 		}
 		return m.Tombstones()
 	}
-	until(t, "Paris to give the tombstone back", func() bool { return tombstones(paris) == 0 })
-
-	// Lyon must not: the reader is one of its participants and has said nothing
-	// since it went away. Ten passes of its collector to be sure.
-	until(t, "Lyon to hold the deletion", func() bool { return tombstones(lyon) == 1 })
-	time.Sleep(10 * time.Millisecond)
+	until(t, "Paris to hold the deletion", func() bool { return tombstones(paris) == 1 })
+	until(t, "Lyon to hold it too", func() bool { return tombstones(lyon) == 1 })
+	until(t, "Paris to give the tombstone back", func() bool {
+		document(paris).collect()
+		return tombstones(paris) == 0
+	})
+	// Lyon must not, however often it is asked: the reader is one of its
+	// participants and has said nothing since it went away.
+	for range 10 {
+		document(lyon).collect()
+	}
 	if got := tombstones(lyon); got != 1 {
 		t.Fatalf("Lyon gave back the tombstone its own reader has not delivered: %d left", got)
 	}
