@@ -74,11 +74,19 @@ type opsMsg struct{ Operations []byte }
 // A presenceMsg carries one encoded awareness update. It is never persisted.
 type presenceMsg struct{ Update []byte }
 
-// An ackMsg carries a participant's encoded version, per part: what it has
-// applied, as of sending. It is how the server learns what every participant
-// has certainly seen, which is the one thing a stable version needs and the one
-// thing a fan-out server does not otherwise know.
-type ackMsg struct{ Version []byte }
+// An ackMsg carries a participant's encoded version and its encoded clocks: what
+// it has applied as of sending, and how far each of its map parts has counted.
+// It is how the server learns what every participant has certainly seen, which
+// a stable version needs, and how far each of them will write next, which such
+// a version does not say and cannot: a site that has seen nothing writes at
+// clock one however far along everyone else is. See document.clockFloor.
+//
+// Clocks may be empty, which is what an older participant sends. That holds the
+// server's answer back rather than making it wrong.
+type ackMsg struct {
+	Version []byte
+	Clocks  []byte
+}
 
 // appendBytes writes a length-prefixed field.
 func appendBytes(dst, field []byte) []byte {
@@ -192,10 +200,14 @@ func decodeClient(data []byte) (byte, any, error) {
 		return kindPresence, presenceMsg{Update: update}, nil
 	case kindAcknowledge:
 		version, ok := f.copied()
+		if !ok {
+			return 0, nil, ErrProtocol
+		}
+		clocks, ok := f.copied()
 		if !ok || !f.done() {
 			return 0, nil, ErrProtocol
 		}
-		return kindAcknowledge, ackMsg{Version: version}, nil
+		return kindAcknowledge, ackMsg{Version: version, Clocks: clocks}, nil
 	default:
 		return 0, nil, ErrProtocol
 	}
@@ -281,7 +293,7 @@ func encodeClient(kind byte, msg any) ([]byte, error) {
 
 // encodeAck writes a participant's version.
 func encodeAck(m ackMsg) []byte {
-	return appendBytes([]byte{kindAcknowledge}, m.Version)
+	return appendBytes(appendBytes([]byte{kindAcknowledge}, m.Version), m.Clocks)
 }
 
 // encodeServer writes one message a server sends.

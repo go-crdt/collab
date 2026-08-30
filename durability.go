@@ -122,7 +122,11 @@ func (d *document) collect() {
 	if !ok {
 		return
 	}
-	if n := d.doc.Collect(stable); n > 0 {
+	below, promised := d.clockFloor()
+	if !promised {
+		return
+	}
+	if n := d.doc.Collect(stable, below); n > 0 {
 		d.dirty = true
 	}
 }

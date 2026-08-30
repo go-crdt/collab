@@ -237,3 +237,73 @@ func TestCollectableIsTheMeetOverEverySiteSeen(t *testing.T) {
 		t.Fatal("a third site that has said nothing did not hold the answer back")
 	}
 }
+
+// The rule clockFloor states, on its own: nobody here means no promise, a site
+// that has not said where its clocks stand means no promise, and otherwise the
+// answer is the least of what they said — part by part, with a part somebody
+// does not have left out entirely, because that is a part they could write to
+// next at clock one.
+func TestTheClockFloorIsTheLeastEverybodyPromised(t *testing.T) {
+	cells := crdt.Part{Kind: crdt.PartMap, Name: "cells"}
+	notes := crdt.Part{Kind: crdt.PartMap, Name: "notes"}
+
+	d := &document{doc: crdt.NewComposite(serverSite)}
+	if _, ok := d.clockFloor(); ok {
+		t.Fatal("a document nobody has been in promised something")
+	}
+
+	// One site, which has joined and said nothing about its clocks.
+	d.seen = map[crdt.SiteID]crdt.CompositeVersion{1: nil}
+	if _, ok := d.clockFloor(); ok {
+		t.Fatal("a site that has said nothing did not hold the answer back")
+	}
+
+	// It speaks, and is the whole of the answer.
+	d.reached = map[crdt.SiteID]crdt.CompositeClocks{1: {cells: 9, notes: 4}}
+	got, ok := d.clockFloor()
+	if !ok {
+		t.Fatal("a room of one that has spoken promised nothing")
+	}
+	if got[cells] != 9 || got[notes] != 4 {
+		t.Fatalf("clockFloor = %v, want what the only site said", got)
+	}
+
+	// A second site, further along on one part and behind on the other.
+	d.seen[2] = nil
+	d.reached[2] = crdt.CompositeClocks{cells: 3, notes: 11}
+	got, _ = d.clockFloor()
+	if got[cells] != 3 || got[notes] != 4 {
+		t.Fatalf("clockFloor = %v, want the least of each", got)
+	}
+
+	// A third that does not have one of the parts at all: it could write to it
+	// next at clock one, so nothing can be promised about it.
+	d.seen[3] = nil
+	d.reached[3] = crdt.CompositeClocks{cells: 20}
+	got, ok = d.clockFloor()
+	if !ok {
+		t.Fatalf("clockFloor promised nothing at all: %v", got)
+	}
+	if _, named := got[notes]; named {
+		t.Fatalf("clockFloor = %v, want the part somebody does not have left out", got)
+	}
+	if got[cells] != 3 {
+		t.Fatalf("clockFloor = %v, want the least on the part everybody has", got)
+	}
+
+	// And when there is no part everybody has, there is nothing to promise.
+	d.reached[3] = crdt.CompositeClocks{{Kind: crdt.PartMap, Name: "elsewhere"}: 20}
+	if got, ok := d.clockFloor(); ok {
+		t.Fatalf("clockFloor promised %v with no part in common", got)
+	}
+
+	// And a document whose version everybody agrees on but whose clocks nobody
+	// has promised is left alone rather than collected against nothing.
+	empty := crdt.CompositeVersion{}
+	d.seen = map[crdt.SiteID]crdt.CompositeVersion{1: empty, 2: empty}
+	if _, ok := d.collectable(); !ok {
+		t.Fatal("the fixture is wrong: there is no version to collect against")
+	}
+	d.reached = nil
+	d.collect()
+}

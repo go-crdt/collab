@@ -101,7 +101,7 @@ func meet(a, b crdt.CompositeVersion) crdt.CompositeVersion {
 // A version that does not decode is a protocol error like any other malformed
 // message: this is a participant describing itself, and a description nobody
 // can read is not one to be guessed at.
-func (d *document) acknowledge(sub *subscriber, raw []byte) error {
+func (d *document) acknowledge(sub *subscriber, raw, raw2 []byte) error {
 	var have crdt.CompositeVersion
 	if len(raw) > 0 {
 		if err := have.UnmarshalBinary(raw); err != nil {
@@ -109,6 +109,12 @@ func (d *document) acknowledge(sub *subscriber, raw []byte) error {
 		}
 	} else {
 		have = crdt.CompositeVersion{}
+	}
+	var clocks crdt.CompositeClocks
+	if len(raw2) > 0 {
+		if err := clocks.UnmarshalBinary(raw2); err != nil {
+			return fail(errInvalid, "collab: malformed acknowledgement")
+		}
 	}
 	d.mu.Lock()
 	sub.have = have
@@ -120,6 +126,10 @@ func (d *document) acknowledge(sub *subscriber, raw []byte) error {
 		d.seen = map[crdt.SiteID]crdt.CompositeVersion{}
 	}
 	d.seen[sub.site] = have
+	if d.reached == nil {
+		d.reached = map[crdt.SiteID]crdt.CompositeClocks{}
+	}
+	d.reached[sub.site] = clocks
 	d.mu.Unlock()
 	return nil
 }
@@ -164,6 +174,70 @@ func (d *document) collectable() (crdt.CompositeVersion, bool) {
 			continue
 		}
 		out = meet(out, have)
+	}
+	return out, true
+}
+
+// clockFloor is the second thing [crdt.Map.Collect] asks for: a promise that no
+// operation with a clock at or under it can still arrive at that part.
+//
+// [document.collectable] answers the first — a version everybody has delivered
+// — and it is not enough on its own. A version says which operations everybody
+// holds; it says nothing about the clocks of the ones still in flight, and a
+// site that has seen nothing writes at clock one however far along everyone
+// else is. A write carrying such a clock can beat a deletion everybody has
+// already delivered, and a replica that dropped the tombstone has nothing left
+// to compare it against. See crdt's TestCollectingLosesAComparisonALaterWriteNeeded.
+//
+// A participant says where its own clocks stand, and a Lamport clock only goes
+// up, so what it says bounds everything it will write from then on. The floor
+// is the least of those over every site that has been here. A site that has not
+// said, or that is too old to say, takes the answer to nothing — which is the
+// same shape as the version and the same safe direction.
+//
+// Why the server and not a replica: a replica does not know who is out there,
+// and the site whose write is still on its way is exactly the one it has never
+// heard from.
+//
+// A participant that says something untrue about its own clocks cannot raise
+// this, because it is the least of what everybody said. It can only pin it
+// down, which costs space and nothing else. What it can do is say a high clock
+// and then write below it — and that is refused where every other operation
+// that would resurrect a collected key is refused, by [crdt.Map.Collect]'s
+// guard, loudly, since [crdt.Composite.Apply] passes it on. Deciding who may
+// speak for whom is [Config.AuthorizeOperations].
+func (d *document) clockFloor() (crdt.CompositeClocks, bool) {
+	if len(d.seen) == 0 {
+		return nil, false
+	}
+	var out crdt.CompositeClocks
+	for site := range d.seen {
+		theirs, said := d.reached[site]
+		if !said || len(theirs) == 0 {
+			return nil, false
+		}
+		if out == nil {
+			out = crdt.CompositeClocks{}
+			for part, clock := range theirs {
+				out[part] = clock
+			}
+			continue
+		}
+		for part, clock := range out {
+			mine, named := theirs[part]
+			if !named {
+				// A part this participant does not have is a part it could
+				// write to next at clock one.
+				delete(out, part)
+				continue
+			}
+			if mine < clock {
+				out[part] = mine
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil, false
 	}
 	return out, true
 }

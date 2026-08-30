@@ -42,10 +42,15 @@ func TestAnAcknowledgementGoesOverTheWire(t *testing.T) {
 func TestAnUnreadableAcknowledgementIsRefused(t *testing.T) {
 	d := &document{}
 	sub := &subscriber{site: 1}
-	if err := d.acknowledge(sub, []byte{0xff, 0xff, 0xff}); err == nil {
+	if err := d.acknowledge(sub, []byte{0xff, 0xff, 0xff}, nil); err == nil {
 		t.Fatal("an unreadable version was accepted")
 	}
-	if err := d.acknowledge(sub, nil); err != nil {
+	// And the clocks beside it, which arrive from a peer and are read the same
+	// way: unreadable is refused, absent is a participant too old to say.
+	if err := d.acknowledge(sub, nil, []byte{0xff, 0xff, 0xff}); err == nil {
+		t.Fatal("unreadable clocks were accepted")
+	}
+	if err := d.acknowledge(sub, nil, nil); err != nil {
 		t.Fatalf("an empty version was refused: %v", err)
 	}
 	if sub.have == nil {

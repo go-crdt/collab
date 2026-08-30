@@ -443,8 +443,16 @@ type document struct {
 	// seen is the last version each site acknowledged, kept against the site and
 	// not the session so that it survives a dropped carrier. It is what this
 	// document may be collected against; see [document.collectable].
-	seen  map[crdt.SiteID]crdt.CompositeVersion
-	dirty bool
+	seen map[crdt.SiteID]crdt.CompositeVersion
+	// joined is what each map part's clock had reached when a site arrived. A
+	// participant handed this document writes later than that, whatever it
+	// does, so it is the bound on a site that has written nothing yet — the
+	// one thing [crdt.Map.LastClocks] cannot speak for. See
+	// [document.clockFloor].
+	// reached is how far each site said its own map parts had counted, which is
+	// what bounds what it will write next. See [document.clockFloor].
+	reached map[crdt.SiteID]crdt.CompositeClocks
+	dirty   bool
 	// emptySince is when the last participant left, and the zero time while
 	// anybody is here. See evictIdle.
 	emptySince time.Time
@@ -757,7 +765,7 @@ func (d *document) handle(ctx context.Context, sub *subscriber, kind byte, msg a
 		if !ok {
 			return fail(errInvalid, "collab: malformed acknowledgement")
 		}
-		return d.acknowledge(sub, a.Version)
+		return d.acknowledge(sub, a.Version, a.Clocks)
 	default:
 		return fail(errInvalid, "collab: only operations, presence and acknowledgements may follow a join")
 	}
