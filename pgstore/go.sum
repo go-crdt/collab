@@ -1,5 +1,5 @@
-github.com/andybalholm/brotli v1.2.2 h1:HzTuoo2ErYQqf5qvcJInB8uvqSVxRttzkFexPWtnceM=
-github.com/andybalholm/brotli v1.2.2/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
+github.com/andybalholm/brotli v1.2.3 h1:8H1qwOkl2LPfjf3YezB90JnCliZb6SInJ/OJkEbA5NQ=
+github.com/andybalholm/brotli v1.2.3/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
@@ -7,14 +7,10 @@ github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6p
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/go-crdt/collab v0.22.0 h1:KENFpKnPbxevRoVYVR/1zkvoTmdUD8J/hqCShjPG8uM=
-github.com/go-crdt/collab v0.22.0/go.mod h1:qFQL8coVt3j8WZrMTNeLK8R9XfthYhTwLD1Bq4TvX3M=
-github.com/go-crdt/collab v0.33.0 h1:bFswNxL+bXSgLY9JLVF6iOEDADM11HkdeU6uA3S72co=
-github.com/go-crdt/collab v0.33.0/go.mod h1:YbO+X4Tq/FOQzsui7vreO9U+ucblThW42ifdlRA4qqs=
-github.com/go-crdt/crdt v0.32.0 h1:H2B6OAVyJMtKzdTjP6Aq2Py2l1951OwabHhiEa1j5BA=
-github.com/go-crdt/crdt v0.32.0/go.mod h1:vbfvns9B9FUaMi2sPKzMYttKmbxfgO7EK3Yu82SrlYw=
-github.com/go-crdt/crdt v0.35.0 h1:8IGUNQo7+S9MfdTFX2miW2l+DxYClDyg+4qmYAmXpnY=
-github.com/go-crdt/crdt v0.35.0/go.mod h1:vbfvns9B9FUaMi2sPKzMYttKmbxfgO7EK3Yu82SrlYw=
+github.com/go-crdt/collab v0.34.0 h1:WlVszwMwG4FuzapLMxHHUzQ0wjzcfIh6zOhTCFOjXgk=
+github.com/go-crdt/collab v0.34.0/go.mod h1:9VrQAxb4LT2HZ0FbaEakA7PdlGdvTseF1MFJ8+fzLx4=
+github.com/go-crdt/crdt v0.36.0 h1:YwCURJ+nQpwFB1yRhqiNr2yo8j3a6CPcw6+RbO1tjM4=
+github.com/go-crdt/crdt v0.36.0/go.mod h1:vbfvns9B9FUaMi2sPKzMYttKmbxfgO7EK3Yu82SrlYw=
 github.com/go-logr/logr v1.4.3 h1:CjnDlHq8ikf6E492q6eKboGOC0T8CDaOvkHCIg8idEI=
 github.com/go-logr/logr v1.4.3/go.mod h1:9T104GzyrTigFIr8wt5mBrctHMim0Nb2HLGrmQ40KvY=
 github.com/go-logr/stdr v1.2.2 h1:hSWxHoqTgW2S2qGc0LTAI563KZ5YKYRhT3MFKZMbjag=
