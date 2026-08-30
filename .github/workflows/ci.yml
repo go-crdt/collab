@@ -29,8 +29,8 @@ jobs:
   gofmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       - name: gofmt
@@ -47,8 +47,8 @@ jobs:
     name: generated code in sync
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       - uses: arduino/setup-protoc@v3
@@ -82,13 +82,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
       - run: go version
       - run: go vet ./...
       - run: go build ./...
@@ -167,8 +167,8 @@ jobs:
       run:
         working-directory: pgstore
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       - run: go vet ./...
@@ -217,8 +217,8 @@ jobs:
       run:
         working-directory: gitstore
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       - run: go vet ./...
@@ -258,13 +258,13 @@ jobs:
     env:
       COLLAB_REQUIRE_WASM: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
       - run: GOOS=js GOARCH=wasm go build ./...
       - name: Three replicas, two runtimes
         run: go test -v -run 'TestWasmConverges|TestOverWebSocket' ./...
@@ -303,13 +303,13 @@ jobs:
       # was a proof nobody was collecting.
       COLLAB_REQUIRE_BROWSER: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
       # Pinned, and deliberately. The handshake depends on launch flags whose
       # effect Chrome has changed before, and a floating browser turns that into
       # a lane that breaks on a day nobody touched this repository. Moving the
@@ -338,13 +338,13 @@ jobs:
           - { os: ubuntu-latest,    label: amd64 }
           - { os: ubuntu-24.04-arm, label: arm64 }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
       - run: go env GOARCH && go test ./...
 
   # Emulated architectures run everything except the WebAssembly test: Node under
@@ -364,8 +364,8 @@ jobs:
           - { goarch: ppc64le, qemu: qemu-ppc64le-static }
           - { goarch: s390x,   qemu: qemu-s390x-static }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       # This has not hung here. It hung in go-crdt/crdt, on the same runner
