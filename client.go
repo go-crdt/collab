@@ -3,6 +3,7 @@ package collab
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -188,6 +189,16 @@ func (c *Client) pushMissing(serverVersion []byte) error {
 func (c *Client) absorbWelcome(w welcomeMsg) error {
 	if snapshot := w.Snapshot; len(snapshot) > 0 {
 		doc, err := crdt.LoadComposite(c.site, snapshot)
+		if errors.Is(err, crdt.ErrUnknownFormat) {
+			// The server writes the snapshot format its own crdt knows, and a
+			// client cannot negotiate one: it reads the version byte or it does
+			// not. So this is a server ahead of this client, and the answer is
+			// to upgrade the client -- said here, because the alternative is an
+			// encoding error at a join and somebody looking for corrupt data.
+			return fmt.Errorf("%w: the server's snapshot is in a format this "+
+				"client cannot read, so it is running a newer build; upgrade "+
+				"the client, or the server's peers before the server", err)
+		}
 		if err != nil {
 			return err
 		}
