@@ -133,6 +133,7 @@ func TestDecodingCapabilitiesRefusesEveryWayItCanBeWrong(t *testing.T) {
 		{"an empty name", []byte{1, 0, 1, 1}},
 		{"no versions", []byte{1, 4, 't', 'e', 'x', 't', 0}},
 		{"versions past the bytes", []byte{1, 4, 't', 'e', 'x', 't', 0xFF, 1}},
+		{"fewer versions than promised", []byte{1, 1, 'a', 2, 1}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var got Capabilities
@@ -201,5 +202,15 @@ func TestEncodingRefusesWhatItCouldNotWriteTwice(t *testing.T) {
 func TestAFormatWithNoNameIsLeftOut(t *testing.T) {
 	if got := capabilityOf(crdt.Format(200)); got != "" {
 		t.Errorf("capabilityOf(unknown) = %q, want empty", got)
+	}
+}
+
+// capabilityOf is total over the formats crdt lists, which is what lets
+// readsOurSnapshots ask about each without a special case for a nameless one.
+func TestEveryFormatCrdtListsHasAName(t *testing.T) {
+	for _, f := range crdt.Formats() {
+		if capabilityOf(f) == "" {
+			t.Errorf("crdt lists %v and this build has no name for it", f)
+		}
 	}
 }

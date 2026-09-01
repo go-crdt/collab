@@ -122,7 +122,12 @@ func (s *Server) follow(ctx context.Context, peer Transport, document string, as
 
 	// A version this replica built cannot fail to encode.
 	have, _ := local.version().MarshalBinary()
-	if err := conn.Send(kindJoin, joinMsg{Document: document, Site: uint64(as), Have: have}); err != nil {
+	speaks, _ := Mine().MarshalBinary() // cannot fail; see joinOn
+	// A link is a participant, so the server it follows learns what it reads the
+	// same way a client's server does.
+	if err := conn.Send(kindJoin, joinMsg{
+		Document: document, Site: uint64(as), Have: have, Speaks: speaks,
+	}); err != nil {
 		return err
 	}
 	kind, first, err := conn.Recv()

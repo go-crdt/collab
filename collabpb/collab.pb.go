@@ -257,7 +257,16 @@ type Join struct {
 	//
 	// A document is a set of named parts, so this is a version per part —
 	// crdt.CompositeVersion, not one vector.
-	Have          []byte `protobuf:"bytes,3,opt,name=have,proto3" json:"have,omitempty"`
+	Have []byte `protobuf:"bytes,3,opt,name=have,proto3" json:"have,omitempty"`
+	// speaks is what the participant says it understands: collab.Capabilities,
+	// encoded. Empty from a participant that does not say, which every one built
+	// before this is.
+	//
+	// The server keeps it and uses it to avoid sending a snapshot in a format the
+	// participant cannot read — a snapshot travels, and a reader knows the version
+	// byte or refuses the bytes, so there is nothing to fall back on once it has
+	// been sent.
+	Speaks        []byte `protobuf:"bytes,4,opt,name=speaks,proto3" json:"speaks,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -313,6 +322,13 @@ func (x *Join) GetHave() []byte {
 	return nil
 }
 
+func (x *Join) GetSpeaks() []byte {
+	if x != nil {
+		return x.Speaks
+	}
+	return nil
+}
+
 // Welcome answers a Join with the state of the document at that moment.
 type Welcome struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -326,7 +342,13 @@ type Welcome struct {
 	// version is the server's encoded version, per part. A participant answers
 	// with whatever the server is missing, which is what lets work done while
 	// disconnected reach everyone else rather than being stranded.
-	Version       []byte `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"`
+	Version []byte `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"`
+	// speaks is what the server says it understands: collab.Capabilities,
+	// encoded. Empty from a server that does not say.
+	//
+	// A federated link is a participant, so this is how the server it follows
+	// learns what it can be sent.
+	Speaks        []byte `protobuf:"bytes,5,opt,name=speaks,proto3" json:"speaks,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -385,6 +407,13 @@ func (x *Welcome) GetPresence() [][]byte {
 func (x *Welcome) GetVersion() []byte {
 	if x != nil {
 		return x.Version
+	}
+	return nil
+}
+
+func (x *Welcome) GetSpeaks() []byte {
+	if x != nil {
+		return x.Speaks
 	}
 	return nil
 }
@@ -577,18 +606,20 @@ const file_collab_proto_rawDesc = "" +
 	"operations\x18\x02 \x01(\v2\x15.collab.v1.OperationsH\x00R\n" +
 	"operations\x121\n" +
 	"\bpresence\x18\x03 \x01(\v2\x13.collab.v1.PresenceH\x00R\bpresenceB\x06\n" +
-	"\x04body\"J\n" +
+	"\x04body\"b\n" +
 	"\x04Join\x12\x1a\n" +
 	"\bdocument\x18\x01 \x01(\tR\bdocument\x12\x12\n" +
 	"\x04site\x18\x02 \x01(\x04R\x04site\x12\x12\n" +
-	"\x04have\x18\x03 \x01(\fR\x04have\"{\n" +
+	"\x04have\x18\x03 \x01(\fR\x04have\x12\x16\n" +
+	"\x06speaks\x18\x04 \x01(\fR\x06speaks\"\x93\x01\n" +
 	"\aWelcome\x12\x1a\n" +
 	"\bsnapshot\x18\x01 \x01(\fR\bsnapshot\x12\x1e\n" +
 	"\n" +
 	"operations\x18\x02 \x01(\fR\n" +
 	"operations\x12\x1a\n" +
 	"\bpresence\x18\x03 \x03(\fR\bpresence\x12\x18\n" +
-	"\aversion\x18\x04 \x01(\fR\aversion\",\n" +
+	"\aversion\x18\x04 \x01(\fR\aversion\x12\x16\n" +
+	"\x06speaks\x18\x05 \x01(\fR\x06speaks\",\n" +
 	"\n" +
 	"Operations\x12\x1e\n" +
 	"\n" +
