@@ -46,7 +46,7 @@ func (c *grpcConn) Send(kind byte, msg any) error {
 			return ErrProtocol
 		}
 		out.Body = &collabpb.ClientMessage_Join{Join: &collabpb.Join{
-			Document: m.Document, Site: m.Site, Have: m.Have,
+			Document: m.Document, Site: m.Site, Have: m.Have, Speaks: m.Speaks,
 		}}
 	case kindOperation:
 		m, ok := msg.(opsMsg)
@@ -91,6 +91,7 @@ func (c *grpcConn) Recv() (byte, any, error) {
 			Operations: w.GetOperations(),
 			Version:    w.GetVersion(),
 			Presence:   w.GetPresence(),
+			Speaks:     w.GetSpeaks(),
 		}, nil
 	case *collabpb.ServerMessage_Operations:
 		return kindOperation, opsMsg{Operations: body.Operations.GetOperations()}, nil
@@ -180,7 +181,10 @@ func (c *grpcCarrier) Recv() (byte, any, error) {
 	switch body := in.GetBody().(type) {
 	case *collabpb.ClientMessage_Join:
 		j := body.Join
-		return kindJoin, joinMsg{Document: j.GetDocument(), Site: j.GetSite(), Have: j.GetHave()}, nil
+		return kindJoin, joinMsg{
+			Document: j.GetDocument(), Site: j.GetSite(),
+			Have: j.GetHave(), Speaks: j.GetSpeaks(),
+		}, nil
 	case *collabpb.ClientMessage_Operations:
 		return kindOperation, opsMsg{Operations: body.Operations.GetOperations()}, nil
 	case *collabpb.ClientMessage_Presence:
@@ -204,6 +208,7 @@ func (c *grpcCarrier) Send(kind byte, msg any) error {
 				Operations: w.Operations,
 				Version:    w.Version,
 				Presence:   w.Presence,
+				Speaks:     w.Speaks,
 			}},
 		})
 	case kindOperation:

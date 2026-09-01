@@ -158,15 +158,15 @@ func (c *Capabilities) UnmarshalBinary(data []byte) error {
 		if !ok || n == 0 || n > uint64(len(f.buf)) {
 			return ErrProtocol
 		}
-		versions := make([]byte, 0, n)
-		var last byte
-		for i := range n {
-			v, ok := f.bytes1()
-			if !ok || (i > 0 && v <= last) {
+		// n was held to what is left, so these bytes are there: reading them
+		// one at a time through a helper that checks again would be a line no
+		// test could reach.
+		versions := append([]byte(nil), f.buf[:n]...)
+		f.buf = f.buf[n:]
+		for i, v := range versions {
+			if i > 0 && v <= versions[i-1] {
 				return ErrProtocol
 			}
-			versions = append(versions, v)
-			last = v
 		}
 		out[this] = versions
 	}
@@ -175,4 +175,34 @@ func (c *Capabilities) UnmarshalBinary(data []byte) error {
 	}
 	*c = out
 	return nil
+}
+
+// readsOurSnapshots reports whether a peer that said this can read a composite
+// snapshot written by this build.
+//
+// Every format in one: a composite embeds a text, a list and a map, so a peer
+// that reads composites and not texts reads nothing this would send it. A peer
+// that said nothing reads nothing as far as this can tell, which is the answer
+// that keeps it safe.
+func readsOurSnapshots(said []byte) bool {
+	if len(said) == 0 {
+		return false
+	}
+	var speaks Capabilities
+	if err := speaks.UnmarshalBinary(said); err != nil {
+		// A peer whose advertisement cannot be read has not said anything this
+		// can act on. Refusing the session over it would turn a garbled
+		// courtesy into an outage.
+		return false
+	}
+	for _, f := range crdt.Formats() {
+		// Every format crdt lists has a name here -- capabilityOf is total over
+		// crdt.Formats and a test says so -- so an unnamed one would be a format
+		// added there and not here, and the honest answer for it is that this
+		// build cannot say whether the peer reads it.
+		if !speaks.Accepts(capabilityOf(f), crdt.Writes(f)) {
+			return false
+		}
+	}
+	return true
 }

@@ -60,6 +60,16 @@ message Join {
   // A document is a set of named parts, so this is a version per part —
   // crdt.CompositeVersion, not one vector.
   bytes have = 3;
+
+  // speaks is what the participant says it understands: collab.Capabilities,
+  // encoded. Empty from a participant that does not say, which every one built
+  // before this is.
+  //
+  // The server keeps it and uses it to avoid sending a snapshot in a format the
+  // participant cannot read — a snapshot travels, and a reader knows the version
+  // byte or refuses the bytes, so there is nothing to fall back on once it has
+  // been sent.
+  bytes speaks = 4;
 }
 
 // Welcome answers a Join with the state of the document at that moment.
@@ -78,6 +88,13 @@ message Welcome {
   // with whatever the server is missing, which is what lets work done while
   // disconnected reach everyone else rather than being stranded.
   bytes version = 4;
+
+  // speaks is what the server says it understands: collab.Capabilities,
+  // encoded. Empty from a server that does not say.
+  //
+  // A federated link is a participant, so this is how the server it follows
+  // learns what it can be sent.
+  bytes speaks = 5;
 }
 
 // Operations carries operations addressed to the parts of a document, encoded

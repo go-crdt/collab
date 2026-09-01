@@ -109,7 +109,14 @@ func Join(ctx context.Context, transport Transport, cfg ClientConfig) (*Client, 
 // would be dropped by transmit on its way out.
 func joinOn(ctx context.Context, cancel context.CancelFunc, transport Transport, cfg ClientConfig) (*Client, error) {
 	local := crdt.NewComposite(cfg.Site)
-	join := joinMsg{Document: cfg.Document, Site: uint64(cfg.Site)}
+	// What this build understands, so the server can hand over a whole document
+	// as a snapshot rather than as its history. A server built before this
+	// ignores it; a transport that cannot carry it yet drops it, and the server
+	// then sends operations, which always work.
+	// Cannot fail: Mine names no capability twice and none with no versions,
+	// which is all MarshalBinary refuses.
+	speaks, _ := Mine().MarshalBinary()
+	join := joinMsg{Document: cfg.Document, Site: uint64(cfg.Site), Speaks: speaks}
 	if len(cfg.Resume) > 0 {
 		resumed, err := crdt.LoadComposite(cfg.Site, cfg.Resume)
 		if err != nil {

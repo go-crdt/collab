@@ -148,17 +148,6 @@ func (f *frame) uvarint() (uint64, bool) {
 // caller's buffer, so anything kept from it must be copied — which is what the
 // decoders below do, since a WebSocket message is read into a buffer the
 // transport may reuse.
-// bytes1 takes one byte, for the fields that are a single small number and
-// would be a varint saying the same thing in more room.
-func (f *frame) bytes1() (byte, bool) {
-	if len(f.buf) == 0 {
-		return 0, false
-	}
-	b := f.buf[0]
-	f.buf = f.buf[1:]
-	return b, true
-}
-
 func (f *frame) bytes() ([]byte, bool) {
 	n, ok := f.uvarint()
 	if !ok || n > uint64(len(f.buf)) {

@@ -717,12 +717,25 @@ func (d *document) join(j joinMsg) (*subscriber, error) {
 	// document is only ever collected against a version every site that has
 	// been in it has acknowledged. See [document.collectable], and what
 	// happened when that was the meet over the open sessions instead.
-	if len(j.Have) == 0 {
-		welcome.Snapshot = d.doc.Snapshot()
-	} else {
+	// A snapshot is the cheap way to hand over a whole document and the only
+	// thing here whose format a participant may not be able to read: a reader
+	// knows the version byte or refuses the bytes, and by then it has been sent.
+	// Operations carry no such number and always work.
+	//
+	// So the snapshot is the fast path and it is unlocked by saying so. A
+	// participant that has not said what it reads gets the history instead --
+	// slower, larger, and right, which is the way round this should fail. It is
+	// the same rule as [Capabilities.Accepts]: silence is not acceptance, and the
+	// participant that says nothing is exactly the older build this protects.
+	switch {
+	case len(j.Have) > 0:
 		// These operations came from this document, so they are valid by
 		// construction and cannot fail to encode.
 		welcome.Operations, _ = crdt.AppendPartOps(nil, d.doc.OpsSince(held))
+	case readsOurSnapshots(j.Speaks):
+		welcome.Snapshot = d.doc.Snapshot()
+	default:
+		welcome.Operations, _ = crdt.AppendPartOps(nil, d.doc.OpsSince(nil))
 	}
 	for _, update := range d.presence.State() {
 		raw, _ := update.MarshalBinary() // cannot fail for an update we made
