@@ -746,6 +746,21 @@ func (d *document) join(j joinMsg) (*subscriber, error) {
 	// will ever see.
 	welcome.Version, _ = d.doc.Version().MarshalBinary()
 
+	// And what this server understands, because a handshake in which only one
+	// side introduces itself is half a handshake. Nothing here reads it yet: the
+	// participant sends operations, which carry no format version, so there is
+	// nothing for it to check today.
+	//
+	// It is filled anyway, and not on speculation -- the reader is known and
+	// close. crdt#80 adds an operation kind a peer refuses if it does not
+	// understand it, and refusing to send one is a decision each side has to
+	// make about the other. A field that exists on the wire and is always empty
+	// is worse than no field: it reads as supported and says nothing, which is
+	// what makes a later peer trust it.
+	//
+	// Cannot fail; see joinOn.
+	welcome.Speaks, _ = Mine().MarshalBinary()
+
 	sub := &subscriber{
 		site: crdt.SiteID(j.Site),
 		out:  make(chan wireMsg, d.backlog+1),

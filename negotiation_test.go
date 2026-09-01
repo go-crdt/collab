@@ -92,3 +92,39 @@ func newTestDocument(t *testing.T) *document {
 	}
 	return doc
 }
+
+// Both sides introduce themselves. Nothing reads the server's half yet -- a
+// participant sends operations, which carry no format version -- but a field
+// that exists and is always empty reads as supported and says nothing, which is
+// what makes a later peer trust it.
+func TestTheServerSaysWhatItUnderstandsToo(t *testing.T) {
+	d := newTestDocument(t)
+	sub, err := d.join(joinMsg{Site: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := (<-sub.out).msg.(welcomeMsg)
+	if len(w.Speaks) == 0 {
+		t.Fatal("the server said nothing about itself")
+	}
+	var said Capabilities
+	if err := said.UnmarshalBinary(w.Speaks); err != nil {
+		t.Fatalf("what the server said does not decode: %v", err)
+	}
+	// It says the same thing a participant would, from the same place.
+	mine := Mine()
+	for name, versions := range mine {
+		for _, v := range versions {
+			if !said.Accepts(name, v) {
+				t.Errorf("the server did not claim %s version %d, which this build reads", name, v)
+			}
+		}
+	}
+	if said.Accepts(CapText, 7) {
+		t.Error("the server claimed a text version crdt refuses")
+	}
+	// A participant that says nothing still hears the server.
+	if len(mine) == 0 {
+		t.Fatal("this build understands nothing, so the test proves nothing")
+	}
+}
