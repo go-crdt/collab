@@ -46,6 +46,9 @@ type joinMsg struct {
 	Document string
 	// Site is the participant's replica identity; see [crdt.DeriveSiteID].
 	Site uint64
+	// Speaks is what the sender says it can read: an opaque block, empty from
+	// any peer that does not say. Nothing writes one yet; see readAdvertisement.
+	Speaks []byte
 	// Have is the participant's encoded version, per part, sent when rejoining a
 	// document it already holds. Empty means "send everything".
 	Have []byte
@@ -53,6 +56,9 @@ type joinMsg struct {
 
 // A welcomeMsg answers a join with the state of the document at that moment.
 type welcomeMsg struct {
+	// Speaks is what the server says it can read: an opaque block, empty from
+	// any server that does not say. Nothing writes one yet; see readAdvertisement.
+	Speaks []byte
 	// Snapshot is the whole document, sent to a participant that is new to it.
 	// Empty when Operations were sent instead.
 	Snapshot []byte
@@ -168,6 +174,40 @@ func (f *frame) copied() ([]byte, bool) {
 // nothing more.
 func (f *frame) done() bool { return len(f.buf) == 0 }
 
+// readAdvertisement reads the optional trailing block in which a peer says what
+// it speaks, and reports nothing for a peer that says nothing.
+//
+// Nothing sends one yet, and that is the point of this half. A peer built before
+// this reads a join and a welcome to the end and refuses anything after them, so
+// there is nowhere to put an advertisement until enough peers have somewhere to
+// put it. The room has to ship first and be sent to a release later -- the order
+// [crdt.OpSuperseded] shipped in, and the one collab#98 cost a retract for
+// skipping.
+//
+// Opaque on purpose. What a peer says about itself is decided by whatever first
+// needs to ask, and giving the bytes a meaning now would be deciding it without
+// a caller. The wire's promise is only that the bytes may be there and will not
+// be mistaken for a protocol error.
+//
+// The same shape as the clocks on an [ackMsg], and for the same reason.
+func readAdvertisement(f *frame) ([]byte, error) {
+	var speaks []byte
+	if !f.done() {
+		var ok bool
+		// An empty block is refused rather than read as an empty advertisement.
+		// A peer with nothing to say says nothing, so accepting a zero-length
+		// one would be a second way to say the same thing -- and this wire is
+		// held to one encoding per meaning everywhere else.
+		if speaks, ok = f.copied(); !ok || len(speaks) == 0 {
+			return nil, ErrProtocol
+		}
+	}
+	if !f.done() {
+		return nil, ErrProtocol
+	}
+	return speaks, nil
+}
+
 // decodeClient reads a message a participant sent. The kind is returned so the
 // caller can tell a join from what may follow it.
 func decodeClient(data []byte) (byte, any, error) {
@@ -182,10 +222,16 @@ func decodeClient(data []byte) (byte, any, error) {
 		have, ok3 := f.copied()
 		// A document name reaches a store and a log, and crosses into
 		// JavaScript, so it is held to being text like everything else here.
-		if !ok1 || !ok2 || !ok3 || !f.done() || !utf8.Valid(name) {
+		if !ok1 || !ok2 || !ok3 || !utf8.Valid(name) {
 			return 0, nil, ErrProtocol
 		}
-		return kindJoin, joinMsg{Document: string(name), Site: site, Have: have}, nil
+		speaks, err := readAdvertisement(f)
+		if err != nil {
+			return 0, nil, err
+		}
+		return kindJoin, joinMsg{
+			Document: string(name), Site: site, Have: have, Speaks: speaks,
+		}, nil
 	case kindOperation:
 		ops, ok := f.copied()
 		if !ok || !f.done() {
@@ -246,11 +292,13 @@ func decodeServer(data []byte) (byte, any, error) {
 			}
 			presence = append(presence, one)
 		}
-		if !f.done() {
-			return 0, nil, ErrProtocol
+		speaks, err := readAdvertisement(f)
+		if err != nil {
+			return 0, nil, err
 		}
 		return kindWelcome, welcomeMsg{
-			Snapshot: snapshot, Operations: ops, Version: version, Presence: presence,
+			Snapshot: snapshot, Operations: ops, Version: version,
+			Presence: presence, Speaks: speaks,
 		}, nil
 	case kindOperation:
 		ops, ok := f.copied()
