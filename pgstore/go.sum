@@ -9,6 +9,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/go-crdt/collab v0.36.1 h1:2NTn1iKFoUHnNSeD2hAyy+8bCnpeUI57W7yQ1CY5bko=
 github.com/go-crdt/collab v0.36.1/go.mod h1:CNtopa+kzRg3jfb2bES9+rEIavVrb52IbDcfVV05+6E=
+github.com/go-crdt/collab v0.37.0 h1:tLtDqao5GODY2pxE/wcEA8U9I/rPdN4LvjEPeE4/QwA=
+github.com/go-crdt/collab v0.37.0/go.mod h1:kxTeZDZ6p8wC9gEkf2iWgFg2870lYliHJyCC6vDlsAs=
 github.com/go-crdt/crdt v0.39.0 h1:DJimBDQqmdqKVCAiU4k1aCWPgXeZ+id/FbO09DklTBw=
 github.com/go-crdt/crdt v0.39.0/go.mod h1:vbfvns9B9FUaMi2sPKzMYttKmbxfgO7EK3Yu82SrlYw=
 github.com/go-logr/logr v1.4.3 h1:CjnDlHq8ikf6E492q6eKboGOC0T8CDaOvkHCIg8idEI=
