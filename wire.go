@@ -105,7 +105,8 @@ func encodeJoin(m joinMsg) []byte {
 	out := []byte{kindJoin}
 	out = appendBytes(out, []byte(m.Document))
 	out = binary.AppendUvarint(out, m.Site)
-	return appendBytes(out, m.Have)
+	out = appendBytes(out, m.Have)
+	return appendAdvertisement(out, m.Speaks)
 }
 
 func encodeWelcome(m welcomeMsg) []byte {
@@ -117,7 +118,7 @@ func encodeWelcome(m welcomeMsg) []byte {
 	for _, p := range m.Presence {
 		out = appendBytes(out, p)
 	}
-	return out
+	return appendAdvertisement(out, m.Speaks)
 }
 
 func encodeOps(m opsMsg) []byte {
@@ -173,6 +174,25 @@ func (f *frame) copied() ([]byte, bool) {
 // Trailing bytes are refused: a message is decoded from its own encoding and
 // nothing more.
 func (f *frame) done() bool { return len(f.buf) == 0 }
+
+// appendAdvertisement writes the optional trailing block, and writes nothing for
+// a peer with nothing to say.
+//
+// Nothing wrote one until now. The room went out first because a peer built
+// before it reads a join and a welcome to the end and refuses anything after
+// them, so an advertisement had nowhere to go until enough peers had somewhere
+// to put it -- the order OpSuperseded shipped in, and the one collab#98 cost a
+// retract for skipping.
+//
+// What settled it was not time passing but a fact: there are no production
+// servers on this project. A peer built before the room does not exist to be
+// broken, so waiting for it to disappear was waiting for nothing.
+func appendAdvertisement(dst, speaks []byte) []byte {
+	if len(speaks) == 0 {
+		return dst
+	}
+	return appendBytes(dst, speaks)
+}
 
 // readAdvertisement reads the optional trailing block in which a peer says what
 // it speaks, and reports nothing for a peer that says nothing.

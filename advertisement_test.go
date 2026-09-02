@@ -69,15 +69,52 @@ func TestAJoinAndAWelcomeHaveRoomForAnAdvertisement(t *testing.T) {
 	}
 }
 
-// Nothing writes one yet, which is the whole of what makes this safe to ship.
-func TestNothingSendsAnAdvertisementYet(t *testing.T) {
-	j, err := encodeClient(kindJoin, joinMsg{Document: "d", Site: 1, Speaks: []byte("x")})
+// The encoders send it now, on the wires that had only the room for it.
+//
+// The room went out first (#107) because a peer built before it refuses trailing
+// bytes. What settled the wait was not time passing but a fact: there are no
+// production servers on this project, so the peer that would have been broken
+// does not exist.
+func TestEveryWireSendsTheAdvertisement(t *testing.T) {
+	said, err := Mine().MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, m, err := decodeClient(j); err != nil {
+
+	j, err := encodeClient(kindJoin, joinMsg{Document: "d", Site: 1, Speaks: said})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kind, msg, err := decodeClient(j)
+	if err != nil || kind != kindJoin {
+		t.Fatalf("a join carrying an advertisement did not decode: %v", err)
+	}
+	if !bytes.Equal(msg.(joinMsg).Speaks, said) {
+		t.Fatal("the join's advertisement did not survive the hand-rolled wire")
+	}
+
+	w, err := encodeServer(kindWelcome, welcomeMsg{Snapshot: []byte("s"), Speaks: said})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, m, err := decodeServer(w); err != nil {
+		t.Fatalf("a welcome carrying an advertisement did not decode: %v", err)
+	} else if !bytes.Equal(m.(welcomeMsg).Speaks, said) {
+		t.Fatal("the welcome's advertisement did not survive")
+	}
+
+	// And a peer with nothing to say still writes nothing, so the two ways of
+	// saying nothing do not both exist on the wire.
+	quiet, err := encodeClient(kindJoin, joinMsg{Document: "d", Site: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quiet) >= len(j) {
+		t.Fatal("a join with nothing to say is no smaller than one with something")
+	}
+	if _, m, err := decodeClient(quiet); err != nil {
 		t.Fatal(err)
 	} else if len(m.(joinMsg).Speaks) != 0 {
-		t.Fatal("the encoder sent an advertisement; a peer built before this would refuse the message")
+		t.Fatal("a peer that said nothing came back having said something")
 	}
 }
