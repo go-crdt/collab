@@ -25,7 +25,24 @@ func GRPC(conn grpc.ClientConnInterface) Transport { return &grpcTransport{conn:
 type grpcTransport struct{ conn grpc.ClientConnInterface }
 
 func (t *grpcTransport) open(ctx context.Context) (carrierConn, error) {
-	stream, err := collabpb.NewCollabClient(t.conn).Session(ctx)
+	// gRPC's default receive limit is four mebibytes, which is meant for
+	// request-response traffic. A session's first message is not that: it is a
+	// whole document, either as a snapshot or -- for a participant that cannot
+	// read this build's snapshot format -- as its entire history, which measures
+	// about three and a quarter times larger.
+	//
+	// So the peer least able to be upgraded is the one that hits the limit, and
+	// it is told "received message larger than max", which names a resource and
+	// not the version mismatch that caused it. Measured: a 199 457-character
+	// document is 1.5 MB as a snapshot and 5.0 MB as operations, and a stock
+	// client is refused at the second while reading the first.
+	//
+	// The WebSocket carrier has raised this since it was written, for the same
+	// reason and with the same constant. This is a call option rather than a
+	// dial option because the connection belongs to whoever built it; the call
+	// is ours.
+	stream, err := collabpb.NewCollabClient(t.conn).Session(ctx,
+		grpc.MaxCallRecvMsgSize(maxMessage))
 	if err != nil {
 		return nil, err
 	}
