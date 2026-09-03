@@ -12,8 +12,8 @@ go 1.26.4
 // upgrade here turns into a refusal rather than a silent no-op -- but the
 // refusal is the second line of defence, not the first.
 require (
-	github.com/go-crdt/collab v0.39.0
-	github.com/go-crdt/crdt v0.41.0
+	github.com/go-crdt/collab v0.40.0
+	github.com/go-crdt/crdt v0.42.0
 )
 
 require (
