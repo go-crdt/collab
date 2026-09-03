@@ -127,25 +127,38 @@ func joinOn(ctx context.Context, cancel context.CancelFunc, transport Transport,
 		join.Have, _ = local.Version().MarshalBinary()
 	}
 
-	conn, err := transport.open(ctx)
+	conn, welcome, err := openAndBeWelcomed(ctx, transport, join)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	if err := conn.Send(kindJoin, join); err != nil {
-		cancel()
-		return nil, err
-	}
-
-	kind, first, err := conn.Recv()
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	welcome, ok := first.(welcomeMsg)
-	if kind != kindWelcome || !ok {
-		cancel()
-		return nil, ErrProtocol
+	// A snapshot this build cannot read means an older server that never heard
+	// the advertisement -- one that had would have sent operations instead.
+	//
+	// There is a way through, and it has been in the protocol since long before
+	// any of this: a join that says what the participant holds gets operations
+	// rather than a snapshot, and operations carry no format version to be wrong
+	// about. Saying "I hold nothing" out loud is not the same as saying nothing
+	// at all, and here it is the difference between a document arriving and a
+	// participant being locked out.
+	//
+	// A second join is not allowed on one connection -- the server closes it --
+	// so this is a fresh one, and the first is let go.
+	//
+	// Without it a new build could hold a session on an old server indefinitely,
+	// because Resume sends a version and so takes the same branch, and die the
+	// moment it joined afresh. A tab that works until it is reloaded is the
+	// worst shape a failure can take: nothing looks wrong until everything is.
+	if unreadable(local, welcome) {
+		_ = conn.Close()
+		// An empty version encodes to two bytes, which is what makes it "I hold
+		// nothing" rather than "I did not say". It cannot fail to encode.
+		join.Have, _ = crdt.CompositeVersion{}.MarshalBinary()
+		conn, welcome, err = openAndBeWelcomed(ctx, transport, join)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
 	}
 
 	c := &Client{
@@ -190,6 +203,44 @@ func (c *Client) pushMissing(serverVersion []byte) error {
 	ops := c.doc.OpsSince(held)
 	c.mu.Unlock()
 	return c.publish(ops)
+}
+
+// openAndBeWelcomed opens a carrier, joins on it, and reads the welcome back.
+//
+// Its own function because a participant may have to do it twice: once as
+// itself, and once saying it holds nothing, for a server too old to know what
+// this build can read.
+func openAndBeWelcomed(ctx context.Context, transport Transport, join joinMsg) (carrierConn, welcomeMsg, error) {
+	conn, err := transport.open(ctx)
+	if err != nil {
+		return nil, welcomeMsg{}, err
+	}
+	if err := conn.Send(kindJoin, join); err != nil {
+		_ = conn.Close()
+		return nil, welcomeMsg{}, err
+	}
+	kind, first, err := conn.Recv()
+	if err != nil {
+		_ = conn.Close()
+		return nil, welcomeMsg{}, err
+	}
+	welcome, ok := first.(welcomeMsg)
+	if kind != kindWelcome || !ok {
+		_ = conn.Close()
+		return nil, welcomeMsg{}, ErrProtocol
+	}
+	return conn, welcome, nil
+}
+
+// unreadable reports a welcome carrying a snapshot in a format this build has no
+// reader for. It asks by trying, because the version byte alone does not say
+// what the parts inside a composite are written in.
+func unreadable(site *crdt.Composite, w welcomeMsg) bool {
+	if len(w.Snapshot) == 0 {
+		return false
+	}
+	_, err := crdt.LoadComposite(site.Site(), w.Snapshot)
+	return errors.Is(err, crdt.ErrUnknownFormat)
 }
 
 // absorbWelcome adopts the state the server opened with.
