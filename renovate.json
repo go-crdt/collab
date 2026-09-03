@@ -1,4 +1,19 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>go-crdt/.github"]
+  "extends": [
+    "github>go-crdt/.github"
+  ],
+  "packageRules": [
+    {
+      "description": "The migration module is pinned to an OLD crdt on purpose: it exists to read a snapshot format the current one has forgotten, so raising it makes it unable to do the only thing it is for. Rewrite refuses at run time when the pin has been lifted, and its own CI lane goes red -- but a guard that has to fire every month is a guard somebody eventually overrides.",
+      "matchFileNames": [
+        "migrate/go.mod"
+      ],
+      "matchPackageNames": [
+        "github.com/go-crdt/crdt",
+        "github.com/go-crdt/collab"
+      ],
+      "enabled": false
+    }
+  ]
 }
