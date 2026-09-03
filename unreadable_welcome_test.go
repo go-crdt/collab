@@ -56,6 +56,65 @@ func TestAnUnreadableSnapshotIsRecognisedByTrying(t *testing.T) {
 	}
 }
 
+// Whatever the document holds. Only the text format has moved, so a composite
+// can carry a perfectly readable list beside a text in a format that is gone --
+// and its own outer version byte is current, which is why the question has to be
+// asked by trying.
+//
+// Before the retry existed this made the failure depend on content: a new
+// participant could join an old server for a list-only document and read it, and
+// be refused the moment somebody typed one character into it. Silent and
+// intermittent, which is worse than a clean refusal.
+func TestTheRetryDoesNotDependOnWhatTheDocumentHolds(t *testing.T) {
+	c := crdt.NewComposite(1)
+	list, err := c.List("l")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := list.Insert(0, []byte("a list nobody changed")); err != nil {
+		t.Fatal(err)
+	}
+	text, err := c.Text("t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := text.Insert(0, "one character was typed"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Only the text part is stamped; the list and the composite stay current.
+	snapshot := c.Snapshot()
+	stamped := append([]byte(nil), snapshot...)
+	at := bytes.Index(stamped[4:], []byte("crdt"))
+	if at < 0 {
+		t.Fatal("no text part in the composite")
+	}
+	stamped[4+at+4] = 6
+	if stamped[4] != snapshot[4] {
+		t.Fatal("the composite's own version was changed; only the text should be")
+	}
+	if _, err := crdt.LoadComposite(2, stamped); !errors.Is(err, crdt.ErrUnknownFormat) {
+		t.Fatalf("the fixture is not the case under test: %v", err)
+	}
+	if !unreadable(crdt.NewComposite(2), welcomeMsg{Snapshot: stamped}) {
+		t.Fatal("a composite whose only dead part is its text was taken as readable")
+	}
+
+	// And the list on its own is still readable, which is what made the old
+	// behaviour depend on content.
+	only := crdt.NewComposite(1)
+	l2, err := only.List("l")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l2.Insert(0, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if unreadable(crdt.NewComposite(2), welcomeMsg{Snapshot: only.Snapshot()}) {
+		t.Fatal("a list-only document was taken as unreadable")
+	}
+}
+
 // Saying "I hold nothing" is not the same as saying nothing: only the first
 // takes the operations branch, on any server, old or new.
 func TestAnEmptyVersionAsksForTheHistory(t *testing.T) {
