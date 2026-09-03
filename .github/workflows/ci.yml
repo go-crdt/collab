@@ -193,6 +193,33 @@ jobs:
   # rather than pretended to. What they need is the git binaries the runner
   # already has, and no network at all.
   #
+  # The migration module is pinned to an OLD crdt on purpose -- it exists to read
+  # a format the current one has forgotten -- so it cannot be tested by the root
+  # module's job, and a dependency-update rule must not raise it. Its own test
+  # refuses the build if the pin has been lifted, and this lane is where that
+  # refusal would be seen.
+  migrate:
+    name: migration module
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: migrate
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - run: go vet ./...
+      - run: go test -race -v ./...
+      - name: Test + 100% coverage gate
+        run: |
+          go test -coverpkg=github.com/go-crdt/collab/migrate -coverprofile=cover.out ./...
+          go tool cover -func=cover.out | tail -n 15
+          cov=$(go tool cover -func=cover.out | tail -1 | awk '{print $3}' | tr -d '%')
+          echo "coverage: ${cov}%"
+          awk -v t="$cov" 'BEGIN { exit !(t+0 >= 100.0) }' || {
+            echo "::error::coverage ${cov}% < 100%"; exit 1; }
+
   # The coverage gate is SPLIT, and deliberately so. gitstore.go is the logic —
   # what a document is, where it goes, how a release is a tag on a commit that
   # already exists — and it is held to the org's 100%. gogit.go is the adapter,
