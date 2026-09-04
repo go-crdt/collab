@@ -5,6 +5,7 @@ package collab_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,5 +179,79 @@ func TestFollowEndsWhenCancelled(t *testing.T) {
 	case <-done:
 	case <-time.After(settle):
 		t.Fatal("a cancelled link did not end")
+	}
+}
+
+// A link must carry what its follower ALREADY HOLDS, not only what it learns
+// afterwards.
+//
+// [TestAServerFollowsAnother] sends work both ways, but every keystroke in it is
+// typed after the link is up. That is the easy half: the link is a subscriber by
+// then, so anything the local document learns is relayed. The half nobody had
+// written down is the work that was already there when the link opened — a
+// second datacentre that ran on its own for an afternoon, or, far more ordinary,
+// a link that dropped and came back.
+//
+// A link catches ITSELF up from the peer and, without this, says nothing about
+// what it holds. The peer never hears those operations, and it never recovers on
+// its own: every later operation of the same site waits on a predecessor the
+// peer will never be sent, so the site that did the work is stranded for good.
+func TestALinkCarriesWhatTheFollowerAlreadyHeld(t *testing.T) {
+	srvA, connA := serve(t, collab.Config{Store: collab.NewMemoryStore()})
+	srvB, connB := serve(t, collab.Config{Store: collab.NewMemoryStore()})
+
+	// Ada works on A and Grace works on B, each on their own server, with no
+	// link between them. BOTH sides already hold work when the link opens,
+	// which is what a second datacentre coming back after a partition looks
+	// like -- and what a link that dropped and reconnected looks like too.
+	ada := join(t, connA, collab.ClientConfig{Document: "doc", Site: 1})
+	if err := body(t, ada).Insert(0, "depuis A"); err != nil {
+		t.Fatal(err)
+	}
+	awaitFor(t, ada, "Ada's own text to land on A", settleJS, func() bool {
+		return text(t, ada) == "depuis A"
+	})
+
+	grace := join(t, connB, collab.ClientConfig{Document: "doc", Site: 2})
+	if err := body(t, grace).Insert(0, "avant le lien"); err != nil {
+		t.Fatal(err)
+	}
+	// Waiting for GRACE to show her own text proves only that her client echoed
+	// it locally; her operations may still be in flight to B. A second
+	// participant on B seeing them is what proves B's replica holds the work
+	// BEFORE the link exists -- and without that, the link's subscriber catches
+	// them as an ordinary broadcast and the test passes on a race.
+	bob := join(t, connB, collab.ClientConfig{Document: "doc", Site: 3})
+	awaitFor(t, bob, "Grace's text to reach B's replica", settleJS, func() bool {
+		return text(t, bob) == "avant le lien"
+	})
+
+	// Only now does B follow A.
+	linked := make(chan error, 1)
+	go func() { linked <- srvB.Follow(t.Context(), collab.GRPC(connA), "doc", 999) }()
+
+	// Ada must be able to read the afternoon's work B did on its own.
+	awaitFor(t, ada, "the work B already held to cross the link", settleJS, func() bool {
+		return strings.Contains(text(t, ada), "avant le lien")
+	})
+
+	// And Grace is not stranded: her NEXT keystroke must arrive too, which is
+	// the part that does not heal by itself once the first is lost.
+	if err := body(t, grace).Insert(grace0(t, grace), " et apres"); err != nil {
+		t.Fatal(err)
+	}
+	awaitFor(t, ada, "Grace's later keystroke to arrive as well", settleJS, func() bool {
+		return strings.Contains(text(t, ada), " et apres")
+	})
+
+	awaitBoth(t, ada, grace, "the two servers to agree", func() bool {
+		return text(t, ada) == text(t, grace)
+	})
+
+	_ = srvA
+	select {
+	case err := <-linked:
+		t.Fatalf("the link ended: %v", err)
+	case <-time.After(100 * time.Millisecond):
 	}
 }

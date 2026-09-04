@@ -5,6 +5,7 @@ package collab
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -144,6 +145,31 @@ func TestFollowEndsOnEveryWayThePeerCanFail(t *testing.T) {
 			}
 		})
 	}
+
+	// The link answers a welcome by offering what the peer is missing, and the
+	// version it answers is the peer's own. A peer that cannot say where it
+	// stands is one this link cannot serve: deciding for itself would mean
+	// sending everything to a peer whose reply nobody can trust.
+	//
+	// This one is not in the table above, and that is the point. Every case
+	// there ends the link, so every case there passes if the link ends for ANY
+	// reason -- and [followed] gives up after five seconds, so "it returned an
+	// error" is satisfied by a link that simply hung. Measured: with offer
+	// swallowing the version error, the table case still passed. Naming the
+	// error is what makes the assertion about the refusal rather than about the
+	// deadline.
+	t.Run("a welcome whose version is not one", func(t *testing.T) {
+		err := followed(t, &brokenPeer{
+			firstMsg: welcomeWith(welcomeMsg{Version: []byte{0xff, 0xff}}),
+		})
+		var se *sessionError
+		if !errors.As(err, &se) || se.kind != errInvalid {
+			t.Fatalf("Follow ended with %v, want a refusal of the version", err)
+		}
+		if !strings.Contains(err.Error(), "version") {
+			t.Fatalf("the error does not say what was wrong: %v", err)
+		}
+	})
 
 	// And one that is not a failure: a peer that sends presence, which a link
 	// has no use for and steps over rather than refusing — a peer running a
