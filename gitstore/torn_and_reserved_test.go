@@ -182,3 +182,39 @@ func TestANameTheFilesystemFoldsOntoAnotherDocumentIsRefused(t *testing.T) {
 		t.Fatalf("Documents() = %v", docs)
 	}
 }
+
+// dirsFolded lists the documents as a case-folding filesystem would: the
+// directory that exists is shown under another spelling than the one asked
+// for. This keeps the refusal covered on a filesystem that tells names apart.
+type dirsFolded struct{ repository }
+
+func (d dirsFolded) dirs() ([]string, error) {
+	names, err := d.repository.dirs()
+	for i := range names {
+		names[i] = strings.ToUpper(names[i])
+	}
+	return names, err
+}
+
+func TestANameTheListingSpellsDifferentlyIsRefusedThroughTheSeam(t *testing.T) {
+	ctx := context.Background()
+	s := store(t)
+	if err := s.Save(ctx, "doc", paper(t, 1, "mine").Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+	s.repo = dirsFolded{s.repo}
+	if _, err := s.Load(ctx, "doc"); err == nil || !strings.Contains(err.Error(), "another name") {
+		t.Fatalf("Load: %v, want the aliasing named", err)
+	}
+	if err := s.Save(ctx, "doc", paper(t, 2, "theirs").Snapshot()); err == nil || !strings.Contains(err.Error(), "another name") {
+		t.Fatalf("Save: %v, want a refusal", err)
+	}
+	s.repo = s.repo.(dirsFolded).repository
+	got, err := s.Load(ctx, "doc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := paperText(t, got); text != "mine" {
+		t.Fatalf("the document now reads %q", text)
+	}
+}

@@ -1,8 +1,11 @@
+//go:build !js
+
 package collab
 
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -233,5 +236,78 @@ func TestADirStoreRefusesANameTheFilesystemFoldsOntoAnother(t *testing.T) {
 	body, _ := c.Text("body")
 	if body.String() != "document A" {
 		t.Fatalf("document A reads %q through the server", body.String())
+	}
+}
+
+// folded is a directory entry as a case-folding filesystem would list it:
+// the name on disk, which is not the name that was asked for.
+type folded struct{ name string }
+
+func (f folded) Name() string             { return f.name }
+func (folded) IsDir() bool                { return false }
+func (folded) Type() os.FileMode          { return 0 }
+func (folded) Info() (os.FileInfo, error) { return nil, errors.New("not needed") }
+
+// The same refusal on a filesystem that tells names apart, through the seam:
+// the file exists (statFile answers) and the listing shows it under another
+// name, which is exactly what a folding filesystem shows. This is what keeps
+// the refusal covered on Linux, where the real-filesystem test above skips.
+func TestADirStoreRefusesWhatTheListingNamesDifferently(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := NewDirStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(ctx, "aaa", written(t, "document A")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSites(ctx, "aaa", []byte("sites")); err != nil {
+		t.Fatal(err)
+	}
+	real := base64.URLEncoding.EncodeToString([]byte("aaa"))
+	// The same spelling with the case of the last letter swapped: what a
+	// folding filesystem would show for a file written under the other.
+	last := real[len(real)-1:]
+	if strings.ToUpper(last) == last {
+		last = strings.ToLower(last)
+	} else {
+		last = strings.ToUpper(last)
+	}
+	other := real[:len(real)-1] + last
+	if other == real {
+		t.Fatalf("pick a name whose encoding ends in a letter: %s", real)
+	}
+	was, wasStat := readDir, statFile
+	defer func() { readDir, statFile = was, wasStat }()
+	readDir = func(string) ([]os.DirEntry, error) { return []os.DirEntry{folded{other}}, nil }
+	statFile = func(string) (os.FileInfo, error) { return nil, nil }
+
+	if _, err := store.Load(ctx, "aaa"); err == nil || !strings.Contains(err.Error(), "another name") {
+		t.Fatalf("Load: %v, want the aliasing named", err)
+	}
+	if err := store.Save(ctx, "aaa", written(t, "document B")); err == nil || !strings.Contains(err.Error(), "another name") {
+		t.Fatalf("Save: %v, want a refusal", err)
+	}
+	if _, err := store.LoadSites(ctx, "aaa"); err == nil || !strings.Contains(err.Error(), "another name") {
+		t.Fatalf("LoadSites: %v, want the aliasing named", err)
+	}
+	if err := store.Release(ctx, "aaa", written(t, "document A")); err == nil || !strings.Contains(err.Error(), "another name") {
+		t.Fatalf("Release: %v, want the aliasing named", err)
+	}
+	// The refused save left no temp file and the document is untouched.
+	readDir, statFile = was, wasStat
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), tempPrefix) {
+			t.Fatalf("a temp file was left: %s", e.Name())
+		}
+	}
+	got, err := store.Load(ctx, "aaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text, _ := bodyOf(t, got); text != "document A" {
+		t.Fatalf("the document now reads %q", text)
 	}
 }
