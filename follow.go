@@ -141,6 +141,10 @@ func (s *Server) follow(ctx context.Context, peer Transport, document string, as
 	if err := local.adopt(ctx, sub, welcome); err != nil {
 		return err
 	}
+	// And the other direction, which adopt does not do: see [offer].
+	if err := offer(conn, local, welcome.Version); err != nil {
+		return err
+	}
 
 	// The session is up and the local replica holds what it was missing. This
 	// is the only place that can be said, and it is said before either loop
@@ -256,6 +260,43 @@ func (d *document) version() crdt.CompositeVersion {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.doc.Version()
+}
+
+// opsSince reports what this replica holds that a peer at held does not, for a
+// link deciding what to offer. The sibling of [document.version]: one says what
+// we have, the other what they are owed.
+func (d *document) opsSince(held crdt.CompositeVersion) []crdt.PartOps {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.doc.OpsSince(held)
+}
+
+// offer tells the peer what this replica holds and it does not, from the
+// version its welcome carried.
+//
+// A link that only adopts is half a participant. It catches ITSELF up and says
+// nothing about the work its own server already had, so a second datacentre
+// that ran alone for an afternoon -- or, far more ordinary, a link that dropped
+// and came back -- strands that work: the peer never hears those operations,
+// and it does not recover on its own, because every later operation of the same
+// site waits on a predecessor the peer will never be sent.
+//
+// This is [Client.pushMissing] for a link, and the welcome has always carried
+// the version it needs, including from a build that predates any of this.
+func offer(conn carrierConn, local *document, version []byte) error {
+	var held crdt.CompositeVersion
+	if len(version) > 0 {
+		if err := held.UnmarshalBinary(version); err != nil {
+			return fail(errInvalid, "collab: malformed version")
+		}
+	}
+	ops := local.opsSince(held)
+	if len(ops) == 0 {
+		return nil
+	}
+	// These operations came from this document, so they cannot fail to encode.
+	raw, _ := crdt.AppendPartOps(nil, ops)
+	return conn.Send(kindOperation, opsMsg{Operations: raw})
 }
 
 // adopt merges what a peer sent when the link joined: the operations this
