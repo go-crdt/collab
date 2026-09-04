@@ -109,7 +109,11 @@ func (t *Tiered) Load(ctx context.Context, document string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("collab: reading %q from the hot store: %w", document, err)
 	}
-	if len(hot) > 0 {
+	// nil, and only nil, is "not in the hot store": a zero-length answer is a
+	// store's own refusal or a torn file, and falling through to the archive
+	// would serve a STALE document as the current one and write it back over
+	// the hot copy at the next save.
+	if hot != nil {
 		return hot, nil
 	}
 

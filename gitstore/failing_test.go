@@ -196,6 +196,10 @@ func TestEveryWayTheRepositoryCanRefuse(t *testing.T) {
 		{atResolv, "resolving a revision", func(s *Store) error { _, err := s.At("d", "v1"); return err }},
 		{atFileAt, "reading a file at a revision", func(s *Store) error { _, err := s.At("d", "v1"); return err }},
 		{atDirs, "listing the repository", func(s *Store) error { _, err := s.Documents(); return err }},
+		// A document that exists is checked against the listing, so that a
+		// filesystem answering for another name is caught; a listing that
+		// fails is reported rather than guessed around.
+		{atDirs, "checking which name the filesystem answered for", func(s *Store) error { _, err := s.Load(ctx, "d"); return err }},
 	}
 	for _, c := range cases {
 		t.Run(string(c.at), func(t *testing.T) {

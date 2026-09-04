@@ -353,7 +353,14 @@ func (s *Server) open(ctx context.Context, name string) (*document, error) {
 		return nil, fail(errInternal, "collab: reading document %q: %v", name, err)
 	}
 	doc := crdt.NewComposite(serverSite)
-	if len(snapshot) > 0 {
+	// nil is "none yet"; a present, empty snapshot is a torn write. Opening it
+	// as a new document would make the loss permanent at the next save. Every
+	// store refuses it before it gets here; this is the last line, for a store
+	// somebody else wrote.
+	if snapshot != nil && len(snapshot) == 0 {
+		return nil, fail(errInternal, "collab: stored document %q is empty: a torn write, refused rather than opened as a new document", name)
+	}
+	if snapshot != nil {
 		if doc, err = crdt.LoadComposite(serverSite, snapshot); err != nil {
 			return nil, fail(errInternal, "collab: stored document %q is unreadable: %v", name, err)
 		}

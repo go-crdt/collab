@@ -80,6 +80,7 @@ var (
 	removeFile = os.Remove
 	readFile   = os.ReadFile
 	readDir    = os.ReadDir
+	statFile   = os.Lstat
 	mkdirAll   = os.MkdirAll
 )
 
@@ -143,6 +144,17 @@ func (s *DirStore) Load(_ context.Context, document string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("collab: reading document %q: %w", document, err)
 	}
+	if err := s.answersFor(path); err != nil {
+		return nil, fmt.Errorf("collab: reading document %q: %w", document, err)
+	}
+	if len(raw) == 0 {
+		// A zero-length file is what a crash between creating and writing
+		// leaves, and what a full disk leaves. It is NOT a new document, and
+		// calling it one is the worst thing a store can do: the server opens an
+		// empty replica and the next save makes the loss permanent. See
+		// [Store] for the contract: nil is "none yet", nothing else is.
+		return nil, fmt.Errorf("collab: document %q is empty on disk, which is a torn write and not a new document", document)
+	}
 	// Documents written before this store compressed them are passed through,
 	// so a store that has been running keeps working and migrates itself one
 	// save at a time.
@@ -188,10 +200,43 @@ func (s *DirStore) Save(_ context.Context, document string, snapshot []byte) err
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("collab: closing document %q: %w", document, err)
 	}
+	if err := s.answersFor(path); err != nil {
+		return fmt.Errorf("collab: writing document %q: %w", document, err)
+	}
 	if err := renameFile(name, path); err != nil {
 		return fmt.Errorf("collab: replacing document %q: %w", document, err)
 	}
 	return nil
+}
+
+// answersFor checks that a path which exists is the file this store wrote
+// under exactly that name, and not one the filesystem answered for.
+//
+// The encoding of a document name is injective on a POSIX filesystem and NOT
+// on one that folds case — the macOS default and NTFS — where "aaa" and "aaG"
+// encode to "YWFh" and "YWFH" and land in one file. A store cannot know which
+// kind of filesystem it is on, and it does not have to: when a path exists, the
+// directory listing says under which name, and a name that is not ours is a
+// document that is not ours. Reading it would serve somebody else's document;
+// writing it would overwrite theirs. Both are refused, loudly, which is the
+// only answer that loses nothing.
+//
+// A path that does not exist is new and answers for nobody.
+func (s *DirStore) answersFor(path string) error {
+	if _, err := statFile(path); err != nil {
+		return nil
+	}
+	entries, err := readDir(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("listing %s: %w", filepath.Dir(path), err)
+	}
+	base := filepath.Base(path)
+	for _, e := range entries {
+		if e.Name() == base {
+			return nil
+		}
+	}
+	return fmt.Errorf("the filesystem answers for %q with a file of another name: this filesystem does not tell two document names apart", base)
 }
 
 // Documents returns the names of the documents held, which is what a caller
@@ -270,6 +315,9 @@ func (s *DirStore) Release(ctx context.Context, document string, want []byte) er
 		}
 		return fmt.Errorf("collab: reading document %q: %w", document, err)
 	}
+	if err := s.answersFor(path); err != nil {
+		return fmt.Errorf("collab: releasing document %q: %w", document, err)
+	}
 	unpacked, err := unpack(stored)
 	if err != nil {
 		// Unreadable is not "holds what you expected", and it is certainly not
@@ -314,6 +362,9 @@ func (s *DirStore) LoadSites(_ context.Context, document string) ([]byte, error)
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
+		return nil, fmt.Errorf("collab: reading the participants of %q: %w", document, err)
+	}
+	if err := s.answersFor(path); err != nil {
 		return nil, fmt.Errorf("collab: reading the participants of %q: %w", document, err)
 	}
 	return held, nil

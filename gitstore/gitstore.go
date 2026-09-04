@@ -227,7 +227,15 @@ func defaultFileFor(part crdt.Part) (string, bool) {
 	if clean == "/" {
 		return "", false
 	}
-	return strings.TrimPrefix(clean, "/"), true
+	rel := strings.TrimPrefix(clean, "/")
+	// The rendered files share the document's directory with the snapshot and
+	// with git's own metadata. A part named after either would overwrite it —
+	// and a part name reaches this from any participant of the document. The
+	// comparison folds case because the filesystem may.
+	if reserved(rel) {
+		return "", false
+	}
+	return rel, true
 }
 
 // ErrNoDocument reports a document with no name, which cannot have a directory.
@@ -263,6 +271,16 @@ func dirFor(document string) (string, error) {
 		fmt.Fprintf(&b, "%%%02X", c)
 	}
 	return b.String(), nil
+}
+
+// reserved reports whether a rendered-file path would land on something that
+// is not a rendered file: the snapshot, or git's own directory.
+func reserved(rel string) bool {
+	first := rel
+	if i := strings.IndexByte(rel, '/'); i >= 0 {
+		first = rel[:i]
+	}
+	return strings.EqualFold(first, stateFile) || strings.EqualFold(first, ".git")
 }
 
 // pathSafe is the set that stands for itself: what a person reads without
@@ -336,7 +354,38 @@ func (s *Store) Load(_ context.Context, document string) ([]byte, error) {
 		// here" starts an empty one and saves it over what it could not read.
 		return nil, fmt.Errorf("gitstore: reading %q: %w", document, err)
 	}
+	if err := s.answersFor(dir); err != nil {
+		return nil, fmt.Errorf("gitstore: reading %q: %w", document, err)
+	}
+	if len(raw) == 0 {
+		// The state file is created with O_TRUNC and written in place, so a
+		// crash between the two leaves exactly this: a zero-length file that
+		// is not a new document. See the same refusal in [collab.DirStore].
+		return nil, fmt.Errorf("gitstore: %q is empty in the worktree, which is a torn write and not a new document", document)
+	}
 	return raw, nil
+}
+
+// answersFor checks that a document directory which exists is the one this
+// store wrote under exactly that name. Names are percent-encoded so that a
+// person can read them, which keeps case, and a filesystem that folds case —
+// the macOS default and NTFS — answers for "doc" with "Doc". Serving that would
+// hand one document's history to another; writing it would overwrite it.
+// A directory that is not there is new and answers for nobody.
+func (s *Store) answersFor(dir string) error {
+	if _, err := s.repo.open(path.Join(dir, stateFile)); err != nil {
+		return nil
+	}
+	dirs, err := s.repo.dirs()
+	if err != nil {
+		return fmt.Errorf("listing the documents: %w", err)
+	}
+	for _, d := range dirs {
+		if d == dir {
+			return nil
+		}
+	}
+	return fmt.Errorf("the filesystem answers for %q with a directory of another name: this filesystem does not tell two document names apart", dir)
 }
 
 // read returns a file's whole contents, and distinguishes a file that is not
@@ -421,6 +470,12 @@ func (s *Store) Save(ctx context.Context, document string, snapshot []byte) erro
 	dir, err := dirFor(document)
 	if err != nil {
 		return err
+	}
+	// Before a byte is written: on a filesystem that folds case this
+	// directory may belong to another document, and writing into it would
+	// overwrite that one's snapshot and commit the overwrite.
+	if err := s.answersFor(dir); err != nil {
+		return fmt.Errorf("gitstore: writing %q: %w", document, err)
 	}
 	files, err := s.place(document, dir, snapshot)
 	if err != nil {
