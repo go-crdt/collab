@@ -5,6 +5,7 @@ package collab
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -891,8 +892,24 @@ func (d *document) applyOperations(ctx context.Context, from *subscriber, raw []
 	// termination this needs — an operation that has been round a loop of
 	// servers adds nothing the second time and stops there.
 	//
-	// ParsePartOps guarantees what Apply would check, so this cannot fail.
-	absorbed, _ := d.doc.ApplyAbsorbed(batches...)
+	// ParsePartOps guarantees what Apply would VALIDATE; what it cannot
+	// guarantee is a map write below the document's collect floor, which is
+	// refused as a resurrection (crdt.ErrStranded) rather than applied. That
+	// refusal reaches the participant as an error, exactly as Composite.Apply
+	// would give a client: a write that vanished with no word is the one
+	// outcome worse than a refused one. What was absorbed before it is still
+	// passed on, so a loop of servers terminates as before.
+	absorbed, err := d.doc.ApplyAbsorbed(batches...)
+	if err != nil {
+		if len(absorbed) > 0 {
+			relay, _ := crdt.AppendPartOps(nil, absorbed)
+			d.dirty = true
+			d.broadcast(from, operationsMessage(relay))
+		}
+		// The cause is kept, so a binding or a test can ask errors.Is for
+		// crdt.ErrStranded rather than parse the wording.
+		return &sessionError{kind: errInvalid, msg: fmt.Sprintf("collab: operations refused: %v", err), cause: err}
+	}
 	if len(absorbed) == 0 {
 		return nil
 	}
