@@ -16,6 +16,11 @@ import (
 // Implementations must be safe for concurrent use.
 type Store interface {
 	// Load returns the snapshot for a document, or nil if there is none yet.
+	//
+	// nil, and only nil, means "none yet". A zero-length snapshot is not an
+	// empty document — a document has a header — it is a torn write, and a
+	// store must refuse it rather than answer nil: the server would open an
+	// empty replica and the next save would make the loss permanent.
 	// Returning nil is how a store says "new document", and is not an error.
 	Load(ctx context.Context, document string) ([]byte, error)
 
