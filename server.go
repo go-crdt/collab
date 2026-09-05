@@ -378,7 +378,14 @@ func (s *Server) open(ctx context.Context, name string) (*document, error) {
 		if len(raw) > 0 {
 			held, said, err := decodeSites(raw)
 			if err != nil {
-				return nil, fail(errInternal, "collab: the participants stored for %q are unreadable: %v", name, err)
+				// Refused rather than opened as "nobody has been here". That
+				// second answer is not the safe one: a participant that has
+				// only ever read is in no version vector, so forgetting the
+				// file forgets it entirely and the floor moves past it —
+				// measured, CollectedBelow 1 becomes 3 and the reader comes
+				// back holding a key the writer deleted. The repair is named
+				// because it is a real one, and because it costs something.
+				return nil, fail(errInternal, "collab: the participants stored for %q are unreadable: %v; the document is refused rather than collected against a set nobody wrote — removing the participants file opens it, at the price of forgetting who was here, after which nothing is collected until every writer the snapshot names has come back and acknowledged", name, err)
 			}
 			// The union, not the stored set. A site the document names is one
 			// that has written here, whatever a store remembers, and forgetting
@@ -1024,9 +1031,17 @@ func (d *document) persist(ctx context.Context) error {
 		sitesErr = keeper.SaveSites(ctx, d.name, sites)
 	}
 	if sitesErr != nil {
-		// The snapshot is saved and this is not, which is the direction that
-		// costs nothing: a document that comes back knowing fewer participants
-		// collects less than it could, and never more.
+		// The snapshot is saved and this is not. That is the cheaper
+		// direction, and it is not a free one. For every site the snapshot's
+		// own version vector names it is safe: those come back seeded as
+		// "has said nothing", which holds the floor entirely. But a
+		// participant that has only ever read is in no version vector at all —
+		// it is the reason this file exists — so losing the file loses it, and
+		// the floor moves UP past it. Measured, a writer and a reader: with the
+		// participants kept, cells.CollectedBelow is 1 and the reader
+		// converges; with them lost, it is 3 and the reader comes back holding
+		// a key the writer deleted, versions equal. So they are owed again
+		// rather than given up on.
 		d.mu.Lock()
 		d.sitesDirty = true
 		d.mu.Unlock()
