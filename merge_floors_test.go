@@ -173,7 +173,7 @@ func TestMergingIsSymmetricWhenOneSideCollected(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(ab, ba) {
-		t.Fatalf("the two orders gave different bytes: %d and %d", len(ab), len(ba))
+		t.Fatalf("the two orders gave different bytes:\n  first  %d bytes %x\n  second %d bytes %x", len(ab), ab, len(ba), ba)
 	}
 	cells := keysOf(t, ab, "cells")
 	if cells.CollectedBelow() == 0 {
@@ -220,7 +220,7 @@ func TestMergingWithAPurgedSideKeepsThePurge(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(ab, ba) {
-		t.Fatalf("the two orders gave different bytes: %d and %d", len(ab), len(ba))
+		t.Fatalf("the two orders gave different bytes:\n  first  %d bytes %x\n  second %d bytes %x", len(ab), ab, len(ba), ba)
 	}
 	merged := textOf(t, ab, "body")
 	if got := merged.String(); got != "world" {
@@ -280,7 +280,7 @@ func TestMergingKeepsTheHigherFloorWhenEitherSideCouldBeTheBase(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(ab, ba) {
-		t.Fatalf("the two orders gave different bytes: %d and %d", len(ab), len(ba))
+		t.Fatalf("the two orders gave different bytes:\n  first  %d bytes %x\n  second %d bytes %x", len(ab), ab, len(ba), ba)
 	}
 	if textOf(t, ab, "body").PurgedBelow() == 0 {
 		t.Fatal("the merge undid the purge")
@@ -475,7 +475,7 @@ func TestMergingKeepsBothSidesWhenTheFloorsAreEqual(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(ab, ba) {
-		t.Fatalf("equal floors merged asymmetrically: %d and %d bytes", len(ab), len(ba))
+		t.Fatalf("equal floors merged asymmetrically:\n  first  %d bytes %x\n  second %d bytes %x", len(ab), ab, len(ba), ba)
 	}
 	cells := keysOf(t, ab, "cells")
 	for _, key := range []string{"left", "right"} {
@@ -530,7 +530,7 @@ func TestMergingCrossedFloorsDeclinesOneEconomyAndNotTheOther(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(ab, ba) {
-		t.Fatalf("crossed floors merged asymmetrically: %d and %d bytes", len(ab), len(ba))
+		t.Fatalf("crossed floors merged asymmetrically:\n  first  %d bytes %x\n  second %d bytes %x", len(ab), ab, len(ba), ba)
 	}
 	for _, name := range []string{"one", "two"} {
 		if _, held := keysOf(t, ab, name).Get("k"); held {
@@ -653,5 +653,136 @@ func TestAMultiStoreRefusesRatherThanServingOneUnmergeableSide(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "store 1") {
 		t.Fatalf("the error does not name the store: %v", err)
+	}
+}
+
+// Two sides that collected to the SAME floor but gave up DIFFERENT tombstones.
+//
+// The floors cannot see which tombstones went, only how far each side reached,
+// so nothing separates the two — and a base chosen by a non-strict test would
+// be chosen by the argument order instead. Measured before the arms were made
+// strict: 34 bytes each way, and not the same 34 bytes. The visible document is
+// the same either way, which is what makes it a byte-level defect and not a
+// data-loss one: it is gitstore's merge driver, where two instances resolving
+// one conflict must reach the same commit, that pays for it.
+//
+// Two deleting sites are what make the fixture possible: a stable version can
+// cover one site's deletion without covering the other's, and a single site's
+// cannot.
+func TestMergingIsSymmetricWhenTheFloorsAreEqualAndTheTombstonesAreNot(t *testing.T) {
+	cells := crdt.Part{Kind: crdt.PartMap, Name: "cells"}
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	one, two := crdt.NewComposite(1), crdt.NewComposite(2)
+	m1, err := one.Map("cells")
+	must(err)
+	var ops []crdt.PartOps
+	for _, k := range []string{"a", "b"} {
+		op, err := m1.Set(k, []byte(k))
+		must(err)
+		ops = append(ops, crdt.PartOps{Part: cells, Map: []crdt.MapOp{op}})
+	}
+	must(two.Apply(ops...))
+	m2, err := two.Map("cells")
+	must(err)
+	da, err := m1.Delete("a")
+	must(err)
+	db, err := m2.Delete("b")
+	must(err)
+	must(two.Apply(crdt.PartOps{Part: cells, Map: []crdt.MapOp{da}}))
+	must(one.Apply(crdt.PartOps{Part: cells, Map: []crdt.MapOp{db}}))
+	shared := one.Snapshot()
+
+	side := func(site crdt.SiteID, stable crdt.VersionVector) []byte {
+		t.Helper()
+		c, err := crdt.LoadComposite(site, shared)
+		must(err)
+		mm, err := c.Map("cells")
+		must(err)
+		if dropped := mm.Collect(stable, 99); dropped != 1 {
+			t.Fatalf("site %d dropped %d tombstones, want exactly one", site, dropped)
+		}
+		return c.Snapshot()
+	}
+	left := side(3, crdt.VersionVector{1: 3})  // site 1's deletion of "a"
+	right := side(4, crdt.VersionVector{2: 1}) // site 2's deletion of "b"
+
+	ab, err := collab.MergeSnapshots(left, right)
+	must(err)
+	ba, err := collab.MergeSnapshots(right, left)
+	must(err)
+	if !bytes.Equal(ab, ba) {
+		t.Fatalf("equal floors and unequal tombstones merged asymmetrically:\n  left-first  %d bytes %x\n  right-first %d bytes %x",
+			len(ab), ab, len(ba), ba)
+	}
+	m := keysOf(t, ab, "cells")
+	if got := m.CollectedBelow(); got != 99 {
+		t.Fatalf("the merge came back with floor %d, want the 99 both sides reached", got)
+	}
+	if keys := m.Keys(); len(keys) != 0 {
+		t.Fatalf("the merge brought back %v; both keys were deleted", keys)
+	}
+}
+
+// A text and a map may share a name — crdt keeps the kinds in separate
+// name-spaces — so the floors are keyed by the whole [crdt.Part] and not by its
+// name.
+//
+// ⚠ This test does NOT pin that choice, and no test can: keying by name alone
+// was tried, here and on the sharper fixture of a purged text beside a
+// collected map of the same name, and both keyings give the same bytes. The
+// base choice is only observable when one side's floor would discard what the
+// other holds, and a text's purge and a map's collect never do that to each
+// other. It is recorded as an equivalent mutant rather than left as a gap
+// somebody spends a day trying to close. What the test does establish is worth
+// having on its own: a shared name merges symmetrically and neither part loses
+// its floor.
+func TestFloorsOfATextAndAMapSharingANameDoNotCollide(t *testing.T) {
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	build := func(site crdt.SiteID, purgeText bool) []byte {
+		t.Helper()
+		c := crdt.NewComposite(site)
+		body, err := c.Text("shared")
+		must(err)
+		_, err = body.Insert(0, "gone")
+		must(err)
+		_, err = body.Delete(0, 4)
+		must(err)
+		m, err := c.Map("shared")
+		must(err)
+		_, err = m.Set("k", []byte("v"))
+		must(err)
+		if purgeText {
+			if body.Purge() == 0 {
+				t.Fatal("nothing was purged")
+			}
+		}
+		return c.Snapshot()
+	}
+	purged, plain := build(1, true), build(2, false)
+
+	// The purged side dominates on the text and neither has a map floor, so it
+	// is the base whichever way round the pair arrives.
+	ab, err := collab.MergeSnapshots(purged, plain)
+	must(err)
+	ba, err := collab.MergeSnapshots(plain, purged)
+	must(err)
+	if !bytes.Equal(ab, ba) {
+		t.Fatalf("a shared name merged asymmetrically:\n  first  %d bytes %x\n  second %d bytes %x", len(ab), ab, len(ba), ba)
+	}
+	if got := textOf(t, ab, "shared").PurgedBelow(); got == 0 {
+		t.Fatal("the merge undid the text's purge")
+	}
+	if _, held := keysOf(t, ab, "shared").Get("k"); !held {
+		t.Fatal("the map that shares the text's name lost its key")
 	}
 }

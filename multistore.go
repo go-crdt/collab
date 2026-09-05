@@ -130,9 +130,17 @@ func chooseBase(mine, yours *crdt.Composite, ours, theirs []byte) (base, from *c
 	// that one has an opinion.
 	fm, fy := floorsOf(mine), floorsOf(yours)
 	switch {
-	case dominates(fm, fy):
+	// Strictly, both ways. Two sides can reach the same floor on every part and
+	// still have given up DIFFERENT tombstones -- the floors cannot see which,
+	// only how far -- and a non-strict test makes both arms true, so the first
+	// one wins and the base is whichever argument came first. Measured: two
+	// maps collected to 99, one having dropped a's tombstone and the other b's,
+	// merged to 34 bytes each way and they were not the same 34 bytes. Equal
+	// floors have nothing to choose between them, so they fall to the tie-break
+	// below, which reads the pair rather than the order.
+	case dominates(fm, fy) && !dominates(fy, fm):
 		return mine, yours
-	case dominates(fy, fm):
+	case dominates(fy, fm) && !dominates(fm, fy):
 		return yours, mine
 	case bytes.Compare(ours, theirs) <= 0:
 		return mine, yours
