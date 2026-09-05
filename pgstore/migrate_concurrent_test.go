@@ -3,6 +3,7 @@ package pgstore_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -68,5 +69,23 @@ func TestMigrateFromSeveralServersAtOnce(t *testing.T) {
 	if len(failed) > 0 {
 		t.Fatalf("%d of %d concurrent Migrate calls failed, the first being: %v",
 			len(failed), rounds*servers, failed[0])
+	}
+}
+
+// A table name that is a plain identifier can still be a word SQL reserves,
+// and then the statement Migrate runs is not valid. What matters is that the
+// database's own words come back rather than a start-up that fails silently.
+func TestMigrateReportsAStatementTheDatabaseRefuses(t *testing.T) {
+	db := connect(t)
+	s, err := pgstore.New(db, pgstore.WithTable("user")) // a reserved word
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.Migrate(t.Context())
+	if err == nil {
+		t.Fatal("Migrate reported success for a table name SQL reserves")
+	}
+	if !strings.Contains(err.Error(), "creating user") || !strings.Contains(err.Error(), "syntax error") {
+		t.Fatalf("Migrate said %v, want the database's own complaint about the name", err)
 	}
 }

@@ -106,18 +106,21 @@ func (s *Store) Migrate(ctx context.Context) error {
 	// Rolling back after a commit is a no-op, so this needs no flag.
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, s.table); err != nil {
-		return fmt.Errorf("pgstore: creating %s: %w", s.table, err)
-	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+	// The lock and the create travel in one statement, so there is one place
+	// this can fail and one error to report. The table name is already known
+	// to be a plain identifier, which is what lets it be written into the SQL
+	// here as it is written into the CREATE below it.
+	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
+		SELECT pg_advisory_xact_lock(hashtext('%s'));
 		CREATE TABLE IF NOT EXISTS %s (
 			document   text PRIMARY KEY,
 			snapshot   bytea NOT NULL,
 			updated_at timestamptz NOT NULL DEFAULT now()
-		)`, s.table)); err != nil {
-		return fmt.Errorf("pgstore: creating %s: %w", s.table, err)
+		)`, s.table, s.table))
+	if err == nil {
+		err = tx.Commit()
 	}
-	if err := tx.Commit(); err != nil {
+	if err != nil {
 		return fmt.Errorf("pgstore: creating %s: %w", s.table, err)
 	}
 	return nil
