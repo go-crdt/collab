@@ -927,6 +927,16 @@ func (d *document) applyPresence(from *subscriber, raw []byte) error {
 	if err := update.UnmarshalBinary(raw); err != nil {
 		return fail(errInvalid, "collab: malformed presence")
 	}
+	// A session speaks for itself and for nobody else. The site in an update is
+	// chosen by whoever sent it, and without this a participant could move
+	// another user's cursor, announce their departure, or -- by inventing a
+	// fresh site per message -- grow the registry on this server and on every
+	// peer it is fanned out to without bound. A client publishes through
+	// awareness.Registry.Publish with its own site, and a link carries no
+	// presence at all, so nothing legitimate sends another site's.
+	if update.Site != from.site {
+		return fail(errInvalid, "collab: presence for site %d from the session of site %d", update.Site, from.site)
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if !d.presence.Apply(update) {

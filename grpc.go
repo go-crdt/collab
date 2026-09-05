@@ -139,8 +139,28 @@ type GRPCServer struct {
 }
 
 // GRPC presents a Server over gRPC. Register the result with
-// [collabpb.RegisterCollabServer] on any grpc.Server.
+// [collabpb.RegisterCollabServer] on a grpc.Server built with
+// [GRPCServerOptions] -- without them the server keeps gRPC's four-mebibyte
+// receive limit and refuses exactly the messages this protocol is largest in.
 func GRPCService(s *Server) *GRPCServer { return &GRPCServer{inner: s} }
+
+// GRPCServerOptions are what a grpc.Server carrying [GRPCService] needs:
+//
+//	srv := grpc.NewServer(collab.GRPCServerOptions()...)
+//	collabpb.RegisterCollabServer(srv, collab.GRPCService(s))
+//
+// gRPC's default receive limit is four mebibytes, meant for request-response
+// traffic. A session's largest message is not that: a participant coming back
+// from a spell offline sends everything it wrote while it was away, and a
+// rejoin carries a version and the operations behind it. The client call has
+// raised its own limit since this carrier was written; the server is built by
+// whoever runs it, so the library can only hand over the option -- and a server
+// missing it works for small documents and drops large ones with
+// "received message larger than max", which names a resource and not the
+// document that outgrew it.
+func GRPCServerOptions() []grpc.ServerOption {
+	return []grpc.ServerOption{grpc.MaxRecvMsgSize(maxMessage), grpc.MaxSendMsgSize(maxMessage)}
+}
 
 // Session is the service method: one bidirectional stream, one participant, one
 // document.
