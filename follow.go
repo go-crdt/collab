@@ -118,7 +118,19 @@ func (s *Server) follow(ctx context.Context, peer Transport, document string, as
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	// The carrier is closed only once the outbound goroutine has stopped
+	// touching it. Closing it from here while a Send was in flight is a data
+	// race on the stream -- gRPC says so under -race -- and defer runs
+	// last-in-first-out, so a plain `defer conn.Close()` registered here ran
+	// BEFORE the cancel above rather than after it. outboundStopped starts
+	// closed for the paths that return before the goroutine exists.
+	outboundStopped := make(chan struct{})
+	close(outboundStopped)
+	defer func() {
+		cancel()          // wake it if it is waiting rather than sending
+		<-outboundStopped // and let the send it is in finish
+		conn.Close()
+	}()
 
 	// A version this replica built cannot fail to encode.
 	have, _ := local.version().MarshalBinary()
@@ -170,7 +182,10 @@ func (s *Server) follow(ctx context.Context, peer Transport, document string, as
 	// acknowledgement says what this replica holds now, so a newer one says
 	// everything an older one would have and offering it is allowed to fail.
 	acks := make(chan wireMsg, 1)
+	running := make(chan struct{})
+	outboundStopped = running
 	go func() {
+		defer close(running)
 		defer cancel()
 		for {
 			// One message is chosen and then one send makes it, rather than a
