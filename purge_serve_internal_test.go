@@ -641,3 +641,127 @@ func TestAReplicaHoldingAPurgedDocumentStillFollowsAPeerAheadOfIt(t *testing.T) 
 		t.Fatalf("Lyon caught up with %d operations parked", pending)
 	}
 }
+
+// A refused join costs the arriving session its join and nothing else.
+//
+// The displacement that makes room for a returning tab used to run BEFORE the
+// welcome was composed, so a join a purged document could not answer threw the
+// incumbent off on its way to being refused: the site ended with no session at
+// all, which is worse than either outcome the displacement rule was choosing
+// between. Composing first is what makes the refusal cost only the refusal.
+func TestARefusedJoinLeavesTheSessionItWouldHaveDisplaced(t *testing.T) {
+	store := NewMemoryStore()
+	if err := store.Save(t.Context(), "doc", purgedSnapshot(t)); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(Config{Store: store})
+	t.Cleanup(func() { _ = srv.Close(context.Background()) })
+
+	speaks, err := Mine().MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The incumbent: seeded, because it says what it reads and holds nothing
+	// this server has not got.
+	d, sub, err := srv.openAndJoin(t.Context(), joinMsg{Document: "doc", Site: 5, Speaks: speaks})
+	if err != nil {
+		t.Fatalf("the incumbent could not join: %v", err)
+	}
+	t.Cleanup(func() { d.leave(context.WithoutCancel(t.Context()), sub) })
+
+	// The same site arrives again holding work written while it was away, which
+	// a document that has purged past it cannot answer.
+	offline, err := crdt.LoadComposite(5, writtenSnapshot(t, 5, "written while offline"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	have, err := offline.Version().MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := srv.openAndJoin(t.Context(), joinMsg{Document: "doc", Site: 5, Have: have, Speaks: speaks}); err == nil {
+		t.Fatal("a join that cannot be answered was accepted")
+	} else if !errors.Is(err, crdt.ErrPurged) {
+		t.Fatalf("the refusal does not carry the purge: %v", err)
+	}
+
+	// The incumbent is still here, still a subscriber, and still fed.
+	if sub.displaced.Load() {
+		t.Fatal("the refused join displaced the session it could not replace")
+	}
+	d.mu.Lock()
+	_, still := d.subs[sub]
+	if still {
+		d.broadcast(nil, operationsMessage([]byte("x")))
+	}
+	d.mu.Unlock()
+	if !still {
+		t.Fatal("the refused join removed the incumbent from the document")
+	}
+	select {
+	case <-sub.out: // the welcome
+	default:
+		t.Fatal("the incumbent lost its queued welcome")
+	}
+	select {
+	case <-sub.out: // the broadcast
+	default:
+		t.Fatal("the incumbent no longer receives what the document broadcasts")
+	}
+}
+
+// A participant that holds a part of its own and has never held the purged one
+// is refused, not sent a snapshot that would destroy it.
+//
+// This is the isolated shape of what covers() guards. The participant names
+// only its own part, so [crdt.Composite.CanServe] asks the purged part with an
+// empty version and refuses -- and covers() is then the only thing between this
+// participant and a snapshot that has never heard of the part it holds. Reading
+// an absent part as "nothing to lose" -- which is what covers would do without
+// its nil-map arithmetic -- sends that snapshot and the part is gone.
+func TestAParticipantHoldingOnlyAPartThisServerLacksIsRefused(t *testing.T) {
+	store := NewMemoryStore()
+	if err := store.Save(t.Context(), "doc", purgedSnapshot(t)); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(Config{Store: store})
+	t.Cleanup(func() { _ = srv.Close(context.Background()) })
+
+	// Its whole document is one map the server has never seen. It names no
+	// text at all, which is what makes the purged part answer an empty version.
+	its := crdt.NewComposite(6)
+	notes, err := its.Map("notes-of-its-own")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := notes.Set("k", []byte("only it has this")); err != nil {
+		t.Fatal(err)
+	}
+	have, err := its.Version().MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	speaks, err := Mine().MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	d, sub, err := srv.openAndJoin(t.Context(), joinMsg{Document: "doc", Site: 6, Have: have, Speaks: speaks})
+	if err == nil {
+		t.Cleanup(func() { d.leave(context.WithoutCancel(t.Context()), sub) })
+		var welcome welcomeMsg
+		select {
+		case msg := <-sub.out:
+			welcome, _ = msg.msg.(welcomeMsg)
+		default:
+		}
+		t.Fatalf("accepted with a %d-byte snapshot, which would replace the only part it holds",
+			len(welcome.Snapshot))
+	}
+	if !errors.Is(err, crdt.ErrPurged) {
+		t.Fatalf("the refusal does not carry the purge: %v", err)
+	}
+	if !strings.Contains(err.Error(), "discard work") {
+		t.Fatalf("the refusal does not say what it was avoiding: %v", err)
+	}
+}

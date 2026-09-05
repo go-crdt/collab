@@ -713,6 +713,25 @@ func (d *document) enrol(j joinMsg, answer bool) (*subscriber, error) {
 		return nil, errEvicted
 	}
 
+	site := crdt.SiteID(j.Site)
+	if site == serverSite {
+		return nil, fail(errInvalid, "collab: site %d is the server's own replica", serverSite)
+	}
+
+	// The welcome is composed BEFORE anybody is displaced, because composing it
+	// can refuse -- a document that has purged past this participant cannot
+	// serve it -- and a refusal must cost the arriving session its join and
+	// nothing else. Displacing first meant a refused join threw the incumbent
+	// off and gave the newcomer nothing, so a site that had a working session
+	// ended up with none at all, which is a worse answer than either outcome
+	// this was choosing between. Composing needs nothing of the subscriber.
+	var welcome welcomeMsg
+	if answer {
+		if err := d.compose(&welcome, j); err != nil {
+			return nil, err
+		}
+	}
+
 	// Two participants sharing a replica identity is not a merge conflict, it is
 	// silent data loss: both mint the same operation identities for different
 	// characters, and the version vector discards one of each pair. Neither is
@@ -723,12 +742,8 @@ func (d *document) enrol(j joinMsg, answer bool) (*subscriber, error) {
 	// actually happens: a participant whose connection dropped comes back long
 	// before the server notices the old one is dead, and would be locked out
 	// until a TCP timeout it cannot see. Displacing also makes a genuine clash
-	// loud — two tabs would take turns evicting each other — rather than losing
-	// characters quietly.
-	site := crdt.SiteID(j.Site)
-	if site == serverSite {
-		return nil, fail(errInvalid, "collab: site %d is the server's own replica", serverSite)
-	}
+	// loud -- two tabs would take turns evicting each other -- rather than
+	// losing characters quietly.
 	for other := range d.subs {
 		if other.site == site {
 			other.displaced.Store(true)
@@ -741,14 +756,10 @@ func (d *document) enrol(j joinMsg, answer bool) (*subscriber, error) {
 		site: crdt.SiteID(j.Site),
 		out:  make(chan wireMsg, d.backlog+1),
 	}
-	// Composed and queued before this subscriber is one the broadcast can see,
-	// so that nothing it is about to be told arrives ahead of the state it is
-	// being told about.
+	// Queued before this subscriber is one the broadcast can see, so that
+	// nothing it is about to be told arrives ahead of the state it is being
+	// told about.
 	if answer {
-		var welcome welcomeMsg
-		if err := d.compose(&welcome, j); err != nil {
-			return nil, err
-		}
 		sub.out <- wireMsg{kind: kindWelcome, msg: welcome}
 	}
 	d.subs[sub] = struct{}{}
