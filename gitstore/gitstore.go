@@ -37,9 +37,16 @@
 // A repository both of them can reach is a channel between them and not only a
 // record of what they did. [Store.Push] sends what this instance committed,
 // [Store.Pull] brings back what another one did and merges it, and what the two
-// of them disagree about is the state file — the one conflict in this design
-// that never needs a person, because a snapshot is a set of operations and
-// merging two sets of operations is what this package does for a living.
+// of them disagree about is the state file — a conflict that almost never needs
+// a person, because a snapshot is a set of operations and merging two sets of
+// operations is what this package does for a living.
+//
+// Almost, and not never. A replica that has purged text or collected a
+// tombstone has discarded something no operation can carry, so two of them that
+// have each discarded what the other still needs cannot be merged at all; see
+// [Merge] and [collab.ErrUnmergeable]. A pull then stops rather than committing
+// a document that is missing a paragraph, and the choice between the two is an
+// operator's.
 //
 // The latency is a pull interval rather than a link, and what it costs is a
 // repository both instances may reach rather than two servers up and reachable
@@ -710,19 +717,28 @@ var _ collab.Store = (*Store)(nil)
 // It is what makes a git repository a channel between instances rather than
 // only a record. Two servers sharing a repository will diverge — that is what
 // working separately means — and git will then report a conflict on the state
-// file, which is the one conflict in this design that never needs a person: a
-// snapshot is a set of operations, and the merge of two sets of operations is
-// what this package does for a living.
+// file, which is a conflict that almost never needs a person: a snapshot is a
+// set of operations, and the merge of two sets of operations is what this
+// package does for a living.
+//
+// Almost. It can refuse, and a caller has to be ready for that. Two instances
+// that have each purged text or collected a tombstone the other still needs
+// have each discarded something no operation carries, and no merge can put them
+// back together: that is [collab.ErrUnmergeable], and it is an operator's
+// decision rather than this function's. An operation that cannot be carried
+// onto the side kept is named too, rather than dropped.
 //
 // The rendered text is not merged and must not be. It is derived, so whichever
 // side of a conflict is taken is wrong: it is written again from the merged
 // state, and a conflict marker never reaches a document.
 //
 // Merging is symmetric to the byte — Merge(a, b) and Merge(b, a) encode
-// identically — because the snapshot encoding is canonical and both hold the
-// same operations. That is what a merge driver needs: two instances resolving
-// the same conflict independently must reach the same commit, or they have
-// merely disagreed somewhere new.
+// identically — because the snapshot encoding is canonical, both hold the same
+// operations, and the side merged onto is chosen from the pair rather than from
+// the argument order; see [collab.MergeSnapshots], which is where that choice
+// is made and explained. That is what a merge driver needs: two instances
+// resolving the same conflict independently must reach the same commit, or they
+// have merely disagreed somewhere new.
 //
 // It is [collab.MergeSnapshots], which is where this now lives: the operation
 // is about snapshots and not about git, it needs nothing this module has, and
@@ -868,6 +884,15 @@ func (s *Store) federate(ctx context.Context) {
 //
 // It does not push the merge afterwards. Whether the other instances see it now
 // or at the next save is a policy, and the operator is the one with the loop.
+//
+// One document that will not merge stops the whole pull, and no merge commit is
+// written. That is deliberate rather than convenient: a pull that skipped it
+// would commit their history as though this instance held all of it, and the
+// document it could not merge would then have no second chance, because the
+// next pull would find their commit already in this branch and say there was
+// nothing owed. Refusing leaves the branch without theirs, so the pull is
+// simply attempted again — and again, until somebody decides what to do about
+// the document. See [Merge] for what makes one refuse.
 func (s *Store) Pull(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

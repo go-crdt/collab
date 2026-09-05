@@ -707,8 +707,11 @@ func TestTheRepositoryGoingAway(t *testing.T) {
 // remote would be.
 //
 // They diverge, because working separately is what that means. Git then reports
-// a conflict on the state file, and that conflict is the one in this design
-// that never needs a person.
+// a conflict on the state file, and that conflict is one that almost never
+// needs a person — almost, because a side that has purged or collected may have
+// discarded what the other still needs, and [collab.ErrUnmergeable] says so
+// rather than handing back a document with a hole in it. Neither side here has
+// discarded anything, which is the ordinary case.
 func TestTwoInstancesSharingARepository(t *testing.T) {
 	// Paris and Lyon each hold the document and each edit it, having agreed on
 	// an opening line and then heard nothing from each other.

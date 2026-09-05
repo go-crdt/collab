@@ -3,6 +3,7 @@
 package collab
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,20 +11,74 @@ import (
 	"github.com/go-crdt/crdt"
 )
 
+// ErrUnmergeable reports two snapshots neither of which can be brought up to
+// the other, each having discarded what the other still needs.
+//
+// It is the one divergence [MergeSnapshots] cannot resolve, and there is no
+// operation that resolves it later either: what each side purged is in no
+// operation, so neither can be told about the other's past. An operator who
+// meets it has two documents and has to choose one; the merge will not choose
+// for them, because choosing here is losing text somebody wrote.
+var ErrUnmergeable = errors.New("collab: neither snapshot can serve the other")
+
 // MergeSnapshots combines two snapshots of the same document into one that
-// holds everything either of them held.
+// holds everything either of them still holds.
 //
 // It is the operation that makes a snapshot safe to keep in more than one
 // place. Two copies of a document that were written separately have not
 // disagreed about anything — a snapshot is a set of operations, and the union
 // of two sets of operations is a document, which is the whole reason this
-// project exists. Nothing here has to choose a side, and so nothing here can
-// lose what the other side did.
+// project exists.
 //
 // Either argument may be nil, which is how a store says it has never held the
-// document; merging with nothing gives back the other side. Merging is
-// symmetric to the byte, because the snapshot encoding is canonical and both
-// results hold the same operations.
+// document; merging with nothing gives back the other side.
+//
+// # It chooses a base, and the argument order is not what chooses it
+//
+// The union is built by carrying one side's operations onto the other, and the
+// side carried onto — the base — brings something the operations cannot: the
+// floors [crdt.Doc.Purge] and [crdt.Map.Collect] leave behind. Those live in
+// the snapshot and in no operation, so taking the first argument as the base
+// makes the argument order an input. That is not untidiness, it is loss in both
+// directions:
+//
+//   - A replica that purged text emits neither the insertions nor the deletions
+//     of a purged run, so making it the receiver instead of the base sends it a
+//     history with a hole in it and hands back the text it discarded.
+//     [crdt.Doc.CanServe] is the question to ask about that, and this used not
+//     to ask it.
+//   - A replica stale across a [crdt.Map.Collect], made the base over the
+//     collected side, advances its version past a deletion it never learns, and
+//     the deleted key is alive again. A map has no CanServe to catch that.
+//
+// So the base is chosen from the pair rather than from the order:
+//
+//   - A side the other cannot serve is the base. That is the correctness
+//     condition and not a preference: a replica that cannot hand over its
+//     deletions has to receive rather than send.
+//   - Otherwise the side that has given up more — floors at least the other's
+//     on every part — is the base, so that floors here only rise, as they do
+//     everywhere else in this system. A merge that lowered one would undo an
+//     operator's purge on every read and write the un-purged document back on
+//     the next save, which is a purge that can never be made to stick.
+//   - Floors that cross, each side having collected further than the other on a
+//     different part, cannot both be kept by one snapshot, so one economy is
+//     declined and the other side's tombstones are simply kept. Which side is
+//     kept is settled by comparing the bytes: arbitrary, but a function of the
+//     pair and not of the order, which is the property being bought.
+//
+// Merging is therefore still symmetric to the byte, and now for a reason it can
+// state: the encoding is canonical, both results hold the same operations, and
+// the argument order is not among the inputs.
+//
+// # What it cannot carry, it names
+//
+// It returns [ErrUnmergeable] when neither side can serve the other, and passes
+// on [crdt.ErrStranded] when an operation cannot be carried onto the base — a
+// write at or below a collected floor naming a key the base does not hold,
+// which is a key that would otherwise come back alive. Both of those used to be
+// a wrong document returned with a nil error, and a wrong document is found by
+// the person who wrote the paragraph rather than by the operator.
 func MergeSnapshots(ours, theirs []byte) ([]byte, error) {
 	if len(theirs) == 0 {
 		return ours, nil
@@ -42,12 +97,93 @@ func MergeSnapshots(ours, theirs []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("collab: reading their side: %w", err)
 	}
-	// Neither error below can happen and neither is carried. Their snapshot
-	// loaded, so it is causally complete: OpsSince returns operations that
-	// validate, Apply accepts them, and nothing is left waiting for something
-	// their snapshot did not hold.
-	_ = mine.Apply(yours.OpsSince(mine.Version())...)
-	return mine.Snapshot(), nil
+	base, from := chooseBase(mine, yours, ours, theirs)
+	if base == nil {
+		return nil, ErrUnmergeable
+	}
+	if err := base.Apply(from.OpsSince(base.Version())...); err != nil {
+		return nil, fmt.Errorf("collab: carrying one side onto the other: %w", err)
+	}
+	return base.Snapshot(), nil
+}
+
+// chooseBase returns the side to carry operations onto and the side to take
+// them from, or nil when neither side can be brought up to the other.
+//
+// ours and theirs are the bytes the two composites were read from, and are used
+// only to settle a tie; see [MergeSnapshots] for why they settle it that way.
+func chooseBase(mine, yours *crdt.Composite, ours, theirs []byte) (base, from *crdt.Composite) {
+	canMine := yours.CanServe(mine.Version()) == nil  // is mine safe as the base?
+	canYours := mine.CanServe(yours.Version()) == nil // is yours safe as the base?
+	switch {
+	case !canMine && !canYours:
+		return nil, nil
+	case !canMine:
+		return yours, mine
+	case !canYours:
+		return mine, yours
+	}
+	// Both directions are open, so this is no longer about what can be served
+	// but about which floors survive. A map has no CanServe, so for a collected
+	// map this rule is the only thing standing between a stale side and a key
+	// that comes back; for a purged text it agrees with the rule above wherever
+	// that one has an opinion.
+	fm, fy := floorsOf(mine), floorsOf(yours)
+	switch {
+	// Strictly, both ways. Two sides can reach the same floor on every part and
+	// still have given up DIFFERENT tombstones -- the floors cannot see which,
+	// only how far -- and a non-strict test makes both arms true, so the first
+	// one wins and the base is whichever argument came first. Measured: two
+	// maps collected to 99, one having dropped a's tombstone and the other b's,
+	// merged to 34 bytes each way and they were not the same 34 bytes. Equal
+	// floors have nothing to choose between them, so they fall to the tie-break
+	// below, which reads the pair rather than the order.
+	case dominates(fm, fy) && !dominates(fy, fm):
+		return mine, yours
+	case dominates(fy, fm) && !dominates(fm, fy):
+		return yours, mine
+	case bytes.Compare(ours, theirs) <= 0:
+		return mine, yours
+	}
+	return yours, mine
+}
+
+// floorsOf returns what each part of a document has given up: the clock a text
+// has purged below, or the one a map has collected below. A part with no floor
+// is absent rather than zero, so that a document that has given up nothing
+// dominates nothing and is dominated by everything.
+//
+// A list has neither, having had its collection withdrawn in crdt v0.35.0.
+func floorsOf(c *crdt.Composite) map[crdt.Part]uint64 {
+	floors := map[crdt.Part]uint64{}
+	for _, part := range c.Parts() {
+		// Parts names only parts this document already holds, so neither
+		// lookup can refuse the name; the errors are checked rather than
+		// dropped because a nil here would be a panic in a merge.
+		switch part.Kind {
+		case crdt.PartText:
+			if text, err := c.Text(part.Name); err == nil && text.PurgedBelow() > 0 {
+				floors[part] = text.PurgedBelow()
+			}
+		case crdt.PartMap:
+			if keys, err := c.Map(part.Name); err == nil && keys.CollectedBelow() > 0 {
+				floors[part] = keys.CollectedBelow()
+			}
+		}
+	}
+	return floors
+}
+
+// dominates reports whether a has given up at least as much as b everywhere b
+// has given up anything, which is the condition for a to be the base without
+// any floor going backwards.
+func dominates(a, b map[crdt.Part]uint64) bool {
+	for part, floor := range b {
+		if a[part] < floor {
+			return false
+		}
+	}
+	return true
 }
 
 // A MultiStore keeps every document in several stores at once.
@@ -91,6 +227,14 @@ func MergeSnapshots(ours, theirs []byte) ([]byte, error) {
 // document that is quietly missing a paragraph is worse than serving none: an
 // error stops at one document and an operator can fix it, while silent loss is
 // discovered by the person who wrote the paragraph.
+//
+// A merge that refuses fails the same way and for the same reason. Two stores
+// that have each discarded what the other still needs give [ErrUnmergeable],
+// and one that holds a write the other can no longer accept gives
+// [crdt.ErrStranded]; either way the document does not open, rather than
+// opening as whichever of the two [Load] happened to reach first. It takes a
+// store left behind by a purge or a collect to reach that at all — stores
+// written together hold the same bytes, and merging those carries nothing.
 //
 // # Writing tries every store, and fails if any refused
 //
