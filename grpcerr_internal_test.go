@@ -28,6 +28,7 @@ func TestTheGRPCBindingNamesEveryRefusal(t *testing.T) {
 		{errAborted, codes.Aborted},
 		{errInternal, codes.Internal},
 		{errRefused, codes.PermissionDenied},
+		{errPrecondition, codes.FailedPrecondition},
 	} {
 		err := asStatus(&sessionError{kind: tt.kind, msg: "because"})
 		if got := status.Code(err); got != tt.want {

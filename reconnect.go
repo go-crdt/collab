@@ -163,6 +163,13 @@ type LinkStatus struct {
 // business, not this package's, which is what [RetryPolicy.Permanent] is for.
 // The last ends the loop rather than being retried.
 //
+// A peer that has purged past this replica is the third kind and the one worth
+// naming, because retrying it can never work: it is answered by reseeding a
+// store and not by waiting. It is not decided here — a purge is a fact about a
+// deployment and can be fixed while the loop runs — so the error reaches
+// [RetryPolicy.Notify] through [LinkStatus.Err] carrying [crdt.ErrPurged], and
+// what to do about it is [RetryPolicy.Permanent]'s to say. See [Server.Follow].
+//
 // # Jitter
 //
 // The delay is drawn uniformly from the half-open band between half the current

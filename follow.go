@@ -63,6 +63,21 @@ import (
 // discover peers. It does not replicate presence: cursors are ephemeral and a
 // link that carried them would have to decide what a cursor in another
 // datacentre means when the link is a second behind.
+//
+// # A peer that has purged
+//
+// A peer that has discarded the characters this replica would need can send it
+// the whole document instead of the difference, and a link with nobody behind
+// it yet takes that and converges — which is how a fresh datacentre follows a
+// document that has been purged. A link into a server that already holds
+// participants cannot: a session already welcomed has no way to be re-seeded.
+// Then this returns, and the error carries [crdt.ErrPurged]. So does the one
+// from the other direction, a replica that has purged past the peer it was
+// asked to follow.
+//
+// Neither is worth retrying until somebody reseeds a store, which is why
+// [RetryPolicy.Permanent] is where an operator answers it:
+// errors.Is(err, crdt.ErrPurged) is the whole test.
 func (s *Server) Follow(ctx context.Context, peer Transport, document string, as crdt.SiteID) error {
 	return s.follow(ctx, peer, document, as, nil)
 }
@@ -105,7 +120,13 @@ func (s *Server) follow(ctx context.Context, peer Transport, document string, as
 	// The local replica first, so the link can say what it already has and be
 	// sent only the difference. Over a link between datacentres that is the
 	// difference between a keystroke and a document.
-	local, sub, err := s.openAndJoin(ctx, joinMsg{Document: document, Site: uint64(as)})
+	//
+	// Enrolled without an answer: a link needs the outbound queue and reads the
+	// replica directly for everything else, so a welcome composed here would be
+	// the whole document, encoded and thrown away -- and, on a document this
+	// replica holds purged, a refusal that would stop a server following the
+	// very peer that could seed it. See [document.enrol].
+	local, sub, err := s.openAndEnrol(ctx, joinMsg{Document: document, Site: uint64(as)}, false)
 	if err != nil {
 		return err
 	}
@@ -278,12 +299,20 @@ func (d *document) version() crdt.CompositeVersion {
 }
 
 // opsSince reports what this replica holds that a peer at held does not, for a
-// link deciding what to offer. The sibling of [document.version]: one says what
-// we have, the other what they are owed.
-func (d *document) opsSince(held crdt.CompositeVersion) []crdt.PartOps {
+// link deciding what to offer, or [crdt.ErrPurged] if a purge here has taken
+// what the peer would need. The sibling of [document.version]: one says what we
+// have, the other what they are owed.
+//
+// The refusal is asked for before the answer is built rather than after,
+// because [crdt.Composite.OpsSince] cannot report a hole -- what a purge took
+// is simply not in what it returns.
+func (d *document) opsSince(held crdt.CompositeVersion) ([]crdt.PartOps, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.doc.OpsSince(held)
+	if err := d.doc.CanServe(held); err != nil {
+		return nil, err
+	}
+	return d.doc.OpsSince(held), nil
 }
 
 // offer tells the peer what this replica holds and it does not, from the
@@ -305,7 +334,15 @@ func offer(conn carrierConn, local *document, version []byte) error {
 			return fail(errInvalid, "collab: malformed version")
 		}
 	}
-	ops := local.opsSince(held)
+	ops, err := local.opsSince(held)
+	if err != nil {
+		// The other direction of the same rule, and the one with no way out: a
+		// link carries operations and acknowledgements, and only a welcome
+		// carries a snapshot -- so there is nothing to fall back to here. A
+		// replica that has purged past the peer it is following must stop
+		// rather than push a history with a hole into it.
+		return fmt.Errorf("collab: this replica has purged past the peer it follows, so following it would send a history with a hole; reseed the peer from this replica rather than link them: %w", err)
+	}
 	if len(ops) == 0 {
 		return nil
 	}
@@ -320,18 +357,83 @@ func offer(conn carrierConn, local *document, version []byte) error {
 // It goes through the same path an ordinary participant's operations do, so a
 // peer cannot get anything past the checks by sending it in a welcome.
 //
-// A welcome carries either operations or a whole snapshot, and this only reads
-// the first, because a link always says what it has: an empty version still
-// encodes to two bytes, so the peer never takes its "this participant is new"
-// branch. A snapshot arriving here is a peer that answered something other than
-// what was asked, which is a protocol error rather than a second path to
-// maintain.
+// A welcome carries either operations or a whole snapshot. A link always says
+// what it has -- an empty version still encodes to two bytes, so the peer never
+// takes its "this participant is new" branch -- so for four versions a snapshot
+// arriving here was treated as a peer answering something other than what was
+// asked, and refused as a protocol error.
+//
+// There is now one reason a peer answers a version with a snapshot, and it is
+// the reason this whole path exists: the peer has purged past this replica and
+// the difference does not exist to be sent. Refusing it left a purged document
+// unfederatable -- a fresh second datacentre could never follow one -- so it is
+// taken, under the conditions [document.seed] states.
 func (d *document) adopt(ctx context.Context, from *subscriber, w welcomeMsg) error {
 	if len(w.Snapshot) > 0 {
-		return ErrProtocol
+		return d.seed(from, w.Snapshot)
 	}
 	if len(w.Operations) == 0 {
 		return nil
 	}
 	return d.applyOperations(ctx, from, w.Operations)
+}
+
+// seed replaces this replica with the peer's, which is what a peer that has
+// purged past this link answers with instead of the difference.
+//
+// # Only when nobody is behind it
+//
+// This is the whole of the asymmetry between a client and a server. A client's
+// replica is its own, and adopting a snapshot is what an ordinary first join
+// already does. A server's replica has participants behind it, and the protocol
+// has no message that re-seeds a session already welcomed -- so a server that
+// swapped its document under live participants would strand every one of them,
+// which is the defect this exists to fix rather than a licence to repeat it.
+//
+// So it is taken only where the link is this document's ONLY subscriber, which
+// in practice means at startup, before anybody has joined -- the moment a
+// federation is actually set up. Every other time it refuses, loudly, and an
+// operator reseeds this server's store from the peer instead. Dropping the
+// other subscribers so that they rejoin was considered and does not work: the
+// machinery exists, but a room is disconnected to fix a link, which is a bigger
+// promise than this defect earns.
+//
+// # And only when nothing is lost
+//
+// The peer checked, before it sent this, that its version contains what this
+// link said it held. It is checked again here because that was two messages
+// ago: a participant can join, type and leave in between, and the check is what
+// makes this lossless rather than nearly lossless.
+//
+// Both conditions are read under d.mu with the swap, so neither can go stale
+// between being asked and being acted on.
+func (d *document) seed(link *subscriber, snapshot []byte) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, ours := d.subs[link]; !ours || len(d.subs) != 1 {
+		return fmt.Errorf("collab: %w: the peer answered with a snapshot because it has purged past this replica, and this server cannot take one while %d other participants hold this document; reseed this server's store from the peer instead", crdt.ErrPurged, len(d.subs)-1)
+	}
+	doc, err := crdt.LoadComposite(serverSite, snapshot)
+	if err != nil {
+		return fmt.Errorf("collab: the peer's snapshot cannot be read: %w", err)
+	}
+	if !covers(doc.Version(), d.doc.Version()) {
+		return fmt.Errorf("collab: %w: the peer answered with a snapshot because it has purged past this replica, but this replica holds work the peer has not got, and taking it would discard that work", crdt.ErrPurged)
+	}
+	d.doc = doc
+	// Dirty, so this server's own store learns what it now holds rather than
+	// being seeded again on every restart.
+	d.dirty = true
+	// The union, not the replacement -- the same rule and the same reason as
+	// [sitesIn], reached through a different door. A site the new document
+	// names has written here and is owed an acknowledgement before anything of
+	// its is collected; a site already recorded stays recorded, because one
+	// that has only ever read is in no version vector at all.
+	for site := range sitesIn(doc) {
+		if _, known := d.seen[site]; !known {
+			d.seen[site] = nil
+			d.sitesDirty = true
+		}
+	}
+	return nil
 }

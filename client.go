@@ -33,6 +33,13 @@ type ClientConfig struct {
 	// [Client.Snapshot]. When set, the participant keeps the work it did while
 	// disconnected and is sent only what it missed, rather than the whole
 	// document.
+	//
+	// A server that can no longer say what this snapshot missed refuses the
+	// join rather than answering with a history that has a hole in it: that is
+	// a document purged past this version, and the error carries
+	// [crdt.ErrPurged]. Nothing is lost by it — these bytes are still the
+	// caller's — but the participant cannot be caught up from that server and
+	// has to be reseeded from it instead.
 	Resume []byte
 }
 
@@ -264,6 +271,17 @@ func (c *Client) absorbWelcome(w welcomeMsg) error {
 		// read from by whoever holds its handles, unlike one that is still
 		// being built by Join.
 		c.mu.Lock()
+		// A snapshot REPLACES this replica, so it is taken only where it
+		// already contains what this replica holds. For a first join that is
+		// trivially true and costs one comparison of an empty map; for a server
+		// that answers a rejoin with a snapshot because it has purged past this
+		// participant, the server asked the same question first. This is the
+		// guard at the point where the loss would actually happen, and it is
+		// what catches a server that is wrong or lying about it.
+		if !covers(doc.Version(), c.doc.Version()) {
+			c.mu.Unlock()
+			return fmt.Errorf("collab: %w: the server answered with a snapshot that does not contain work this replica holds, and adopting it would discard that work", crdt.ErrPurged)
+		}
 		c.doc = doc
 		c.mu.Unlock()
 	} else if err := c.applyOperations(w.Operations); err != nil {
