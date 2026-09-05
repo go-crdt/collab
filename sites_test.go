@@ -4,7 +4,11 @@ package collab
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
+	"fmt"
+	"hash/crc32"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -199,5 +203,246 @@ func TestAStoreThatWillNotKeepTheParticipantsSaysSo(t *testing.T) {
 	d.mu.Unlock()
 	if !owed {
 		t.Fatal("the participants were given up on rather than kept for the next save")
+	}
+}
+
+// countRaised counts the counters in got that stand ABOVE the matching ones in
+// want. That is the unsafe direction: collectable() is a meet over what the
+// participants acknowledged, so raising one lifts the collect floor past a
+// participant that is away, and its rejoin is then answered with a superseded
+// run — advancing its version vector without telling it what the operation did.
+func countRaised(want, got crdt.CompositeVersion) int {
+	raised := 0
+	for part, vector := range got {
+		for site, counter := range vector {
+			if counter > want[part][site] {
+				raised++
+			}
+		}
+	}
+	return raised
+}
+
+// Participants that have rotted are refused, rather than read back as a
+// different set of people.
+//
+// Every single-bit flip of what encodeSites writes must be refused. How big
+// the hole was is measured, not remembered, by
+// TestEverySingleBitFlipOfTheParticipantsIsCaught below, which runs the same
+// census over the body alone and over the whole file: dense varints have almost
+// no redundancy to trip over, so the structural checks let a quarter of the
+// flips through as a DIFFERENT set of people. A CRC32C detects every single-bit
+// error there is, so the answer here is none.
+func TestAParticipantsFileThatHasRottedIsRefused(t *testing.T) {
+	cells := crdt.Part{Kind: crdt.PartMap, Name: "cells"}
+	seen := map[crdt.SiteID]crdt.CompositeVersion{
+		1: {cells: crdt.VersionVector{1: 4, 2: 1}},
+		2: {cells: crdt.VersionVector{1: 1, 2: 5}},
+		7: nil,
+	}
+	reached := map[crdt.SiteID]crdt.CompositeClocks{1: {cells: 11}, 2: {cells: 9}}
+	raw, err := encodeSites(seen, reached)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	accepted, raised := 0, 0
+	first := ""
+	for i := range raw {
+		for bit := 0; bit < 8; bit++ {
+			bad := append([]byte(nil), raw...)
+			bad[i] ^= 1 << bit
+			got, _, err := decodeSites(bad)
+			if err != nil {
+				// Refused is the answer; it must stay the documented one.
+				if !errors.Is(err, crdt.ErrMalformed) {
+					t.Fatalf("byte %d bit %d was refused with %v, want ErrMalformed", i, bit, err)
+				}
+				continue
+			}
+			accepted++
+			up := 0
+			for site, version := range got {
+				up += countRaised(seen[site], version)
+			}
+			if up > 0 {
+				raised += up
+				if first == "" {
+					first = fmt.Sprintf("byte %d bit %d reads back %v, which raises %d counter(s)", i, bit, got, up)
+				}
+			}
+		}
+	}
+	if accepted > 0 {
+		t.Fatalf("%d of %d single-bit flips were read back as participants rather than refused, %d of them raising a counter: %s",
+			accepted, len(raw)*8, raised, first)
+	}
+
+	// And it is the checksum that refuses, not a structural check that happened
+	// to trip: asking which error is the point of the fix.
+	rotted := append([]byte(nil), raw...)
+	rotted[len(rotted)-1] ^= 1
+	_, _, err = decodeSites(rotted)
+	if err == nil {
+		t.Fatal("a flip in the last byte was accepted")
+	}
+	if !errors.Is(err, crdt.ErrMalformed) {
+		t.Fatalf("the refusal is %v, want it to be ErrMalformed", err)
+	}
+	if !strings.Contains(err.Error(), "checksum") {
+		t.Fatalf("the refusal is %q, want it to name the checksum", err)
+	}
+}
+
+// What is written now carries its own magic and its own checksum, so that a
+// store which hands back bytes that rotted is caught rather than believed.
+func TestAParticipantsFileSavedNowCarriesItsChecksum(t *testing.T) {
+	cells := crdt.Part{Kind: crdt.PartMap, Name: "cells"}
+	raw, err := encodeSites(
+		map[crdt.SiteID]crdt.CompositeVersion{1: {cells: crdt.VersionVector{1: 4}}},
+		map[crdt.SiteID]crdt.CompositeClocks{1: {cells: 11}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Spelled out rather than taken from the constant: what is being pinned is
+	// the bytes on disk, which a later reader has to recognise.
+	if len(raw) < 9 || string(raw[:5]) != "crdts" {
+		t.Fatalf("the participants begin %q, want them to begin %q", raw[:min(5, len(raw))], "crdts")
+	}
+	if got, want := crc32.Checksum(raw[9:], checksumTable), binary.BigEndian.Uint32(raw[5:9]); got != want {
+		t.Fatalf("the checksum written is %08x, and the body's is %08x", want, got)
+	}
+
+	// A header with nothing behind it is not a participants file either.
+	short := append([]byte("crdts"), 0, 0)
+	if _, _, err := decodeSites(short); !errors.Is(err, crdt.ErrMalformed) {
+		t.Fatalf("decodeSites(%q) = %v, want ErrMalformed", short, err)
+	}
+}
+
+// Participants written before there was a checksum are still read, and gain one
+// at the next save — the same story compression and the document's own checksum
+// each told, with nothing to migrate.
+//
+// This one passes with the fix and without it. It is a compatibility guard, not
+// the proof; the proof is TestAParticipantsFileThatHasRottedIsRefused.
+func TestParticipantsWrittenBeforeThereWasAChecksumAreStillRead(t *testing.T) {
+	// One site, id 1, that has joined and said nothing.
+	seen, reached, err := decodeSites([]byte{1, 1, 0, 0})
+	if err != nil {
+		t.Fatalf("a file written before the checksum existed was refused: %v", err)
+	}
+	if v, named := seen[1]; len(seen) != 1 || !named || v != nil {
+		t.Fatalf("read back %v, want one site that has said nothing", seen)
+	}
+	if len(reached) != 0 {
+		t.Fatalf("read back clocks %v, want none", reached)
+	}
+
+	// And a full one, assembled the way the encoder used to write it.
+	cells := crdt.Part{Kind: crdt.PartMap, Name: "cells"}
+	version, err := crdt.CompositeVersion{cells: crdt.VersionVector{1: 4}}.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clocks, err := crdt.CompositeClocks{cells: 11}.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := binary.AppendUvarint(nil, 1)
+	legacy = binary.AppendUvarint(legacy, 1)
+	legacy = binary.AppendUvarint(legacy, uint64(len(version)))
+	legacy = append(legacy, version...)
+	legacy = binary.AppendUvarint(legacy, uint64(len(clocks)))
+	legacy = append(legacy, clocks...)
+
+	seen, reached, err = decodeSites(legacy)
+	if err != nil {
+		t.Fatalf("a full file written before the checksum existed was refused: %v", err)
+	}
+	if seen[1][cells][1] != 4 || reached[1][cells] != 11 {
+		t.Fatalf("read back seen=%v reached=%v", seen, reached)
+	}
+}
+
+// The census the comment on [sitesMagic] cites, kept in the tree so its figures
+// are produced rather than remembered. It flips every single bit of a real
+// participants file twice over: once through the body alone, which is what
+// decodeSites saw before there was a checksum, and once through the whole file
+// as it is written now.
+//
+// The first count is the size of the hole; the second is zero, because a CRC32C
+// detects every single-bit error there is.
+func TestEverySingleBitFlipOfTheParticipantsIsCaught(t *testing.T) {
+	cells := crdt.Part{Kind: crdt.PartMap, Name: "cells"}
+	notes := crdt.Part{Kind: crdt.PartText, Name: "notes"}
+	seen := map[crdt.SiteID]crdt.CompositeVersion{
+		1: {cells: crdt.VersionVector{1: 4, 2: 1}, notes: crdt.VersionVector{1: 3}},
+		2: {cells: crdt.VersionVector{1: 1, 2: 5}},
+		7: {notes: crdt.VersionVector{7: 2}},
+		9: nil,
+	}
+	reached := map[crdt.SiteID]crdt.CompositeClocks{1: {cells: 11}, 2: {cells: 9}, 7: {notes: 4}}
+	whole, err := encodeSites(seen, reached)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := whole[len(sitesMagic)+4:] // what decodeSites read before the checksum
+
+	same := func(a, b map[crdt.SiteID]crdt.CompositeVersion) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for site, av := range a {
+			bv, ok := b[site]
+			if !ok || !reflect.DeepEqual(av, bv) {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Without the checksum: the body decoded on its own, which is the legacy
+	// path and exactly what a rotted file used to reach.
+	var refusedBody, differentBody int
+	for i := range body {
+		for bit := range 8 {
+			flipped := append([]byte(nil), body...)
+			flipped[i] ^= 1 << bit
+			got, _, err := decodeSites(flipped)
+			switch {
+			case err != nil:
+				refusedBody++
+			case !same(got, seen):
+				differentBody++
+			}
+		}
+	}
+	// With it: the same flips through the file as it is written today.
+	var refusedWhole, differentWhole int
+	for i := range whole {
+		for bit := range 8 {
+			flipped := append([]byte(nil), whole...)
+			flipped[i] ^= 1 << bit
+			got, _, err := decodeSites(flipped)
+			switch {
+			case err != nil:
+				refusedWhole++
+			case !same(got, seen):
+				differentWhole++
+			}
+		}
+	}
+	t.Logf("body alone (%d bytes, %d flips): %d refused, %d decoded a DIFFERENT set",
+		len(body), 8*len(body), refusedBody, differentBody)
+	t.Logf("whole file (%d bytes, %d flips): %d refused, %d decoded a DIFFERENT set",
+		len(whole), 8*len(whole), refusedWhole, differentWhole)
+
+	if differentBody == 0 {
+		t.Fatal("no flip of the body decoded into a different set, so this measures nothing")
+	}
+	if differentWhole != 0 {
+		t.Errorf("%d single-bit flips still decode into a different participant set", differentWhole)
 	}
 }

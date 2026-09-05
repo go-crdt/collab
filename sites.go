@@ -4,10 +4,57 @@ package collab
 
 import (
 	"encoding/binary"
+	"fmt"
+	"hash/crc32"
 	"sort"
 
 	"github.com/go-crdt/crdt"
 )
+
+// sitesMagic marks a participants file that carries a checksum of what follows
+// it. A file written before this existed is recognised by not starting with it
+// and read as it is; it gains the checksum the next time it is saved, one
+// document at a time, with nothing to migrate. It is in the same family as
+// crdt's own "crdtc" and dircompress's "crdtz" and "crdth", and deliberately
+// none of them.
+//
+// # Why these bytes carry a checksum at all
+//
+// Rot, not forgery: anything that can write the file can recompute any checksum
+// in it, so this is not authentication and does not pretend to be. That is
+// dircompress.go's reasoning, and CRC32C is its choice for its reasons — one
+// hardware instruction on every architecture this builds for.
+//
+// What is different here is which way a corruption points. A document that rots
+// is a document nobody wrote; a participants file that rots can be a collect
+// floor nobody wrote, and a floor does harm by moving UP. decodeSites' checks
+// below are structure only, and dense varints have almost no redundancy to trip
+// over. TestEverySingleBitFlipOfTheParticipantsIsCaught measures it rather than
+// asserting it, on a four-site file, and prints both counts: of 760 single-bit
+// flips of the body alone — which is what decodeSites saw before this existed —
+// 413 were refused by the structural checks and 216 decoded cleanly into a
+// DIFFERENT participant set. This was the one file in the store with nothing
+// underneath it. A CRC32C detects every single-bit error and every burst up to
+// 32 bits, so the same census over the file as it is written now refuses all
+// 832 and decodes none of them into anything.
+//
+// # What it is not, and what is left
+//
+// The checksum is over the encoded body, where pack() checksums what it
+// decompresses to. There is no compressor in between here, so the stored bytes
+// are the encoding and the corruption that "survives the decompressor" has no
+// equivalent.
+//
+// And it does not bind the document: a file restored from the wrong backup, or
+// swapped with another document's, is misdelivery rather than rot, and nothing
+// here would notice. Naming it rather than implying it is covered.
+//
+// The residual is one file: a participants file written before this existed
+// whose first five bytes happened to be these. It would have to say it holds 99
+// sites whose lowest id is 114, followed by a 100-byte version blob beginning
+// 't', 's'. If one existed its checksum would fail and it would be refused,
+// never misread — the safe direction.
+var sitesMagic = [...]byte{'c', 'r', 'd', 't', 's'}
 
 // What a document remembers about the people who have been in it, written down
 // so that letting go of the document does not forget them. See [SiteStore].
@@ -18,7 +65,9 @@ import (
 // which is the answer that keeps a document collectable only when it should be.
 //
 // Sorted by site, so that two servers holding the same thing write the same
-// bytes and a store can be compared with itself.
+// bytes and a store can be compared with itself — which a checksum of those
+// bytes leaves exactly as it was, since the same body gives the same four
+// bytes.
 func encodeSites(seen map[crdt.SiteID]crdt.CompositeVersion, reached map[crdt.SiteID]crdt.CompositeClocks) ([]byte, error) {
 	sites := make([]crdt.SiteID, 0, len(seen))
 	for site := range seen {
@@ -26,9 +75,9 @@ func encodeSites(seen map[crdt.SiteID]crdt.CompositeVersion, reached map[crdt.Si
 	}
 	sort.Slice(sites, func(i, j int) bool { return sites[i] < sites[j] })
 
-	out := binary.AppendUvarint(nil, uint64(len(sites)))
+	body := binary.AppendUvarint(nil, uint64(len(sites)))
 	for _, site := range sites {
-		out = binary.AppendUvarint(out, uint64(site))
+		body = binary.AppendUvarint(body, uint64(site))
 		var version, clocks []byte
 		if v := seen[site]; v != nil {
 			raw, err := v.MarshalBinary()
@@ -44,18 +93,40 @@ func encodeSites(seen map[crdt.SiteID]crdt.CompositeVersion, reached map[crdt.Si
 			}
 			clocks = raw
 		}
-		out = binary.AppendUvarint(out, uint64(len(version)))
-		out = append(out, version...)
-		out = binary.AppendUvarint(out, uint64(len(clocks)))
-		out = append(out, clocks...)
+		body = binary.AppendUvarint(body, uint64(len(version)))
+		body = append(body, version...)
+		body = binary.AppendUvarint(body, uint64(len(clocks)))
+		body = append(body, clocks...)
 	}
-	return out, nil
+	out := make([]byte, 0, len(sitesMagic)+4+len(body))
+	out = append(out, sitesMagic[:]...)
+	out = binary.BigEndian.AppendUint32(out, crc32.Checksum(body, checksumTable))
+	return append(out, body...), nil
 }
 
 // decodeSites reads what encodeSites wrote, and refuses anything else: these
 // bytes come back from a store, which is somewhere else and may have been
-// anywhere.
+// anywhere. Every refusal is [crdt.ErrMalformed], and the message says which
+// one it was — a file that has rotted and a file that is not one at all are the
+// same answer to the server and different news to whoever has to act on it.
+//
+// A file written before there was a checksum has no magic, and is read as it
+// is. See [sitesMagic].
 func decodeSites(in []byte) (map[crdt.SiteID]crdt.CompositeVersion, map[crdt.SiteID]crdt.CompositeClocks, error) {
+	if hasMagic(in, sitesMagic) {
+		body := in[len(sitesMagic):]
+		if len(body) < 4 {
+			return nil, nil, fmt.Errorf("collab: checksummed participants whose body is %d bytes, which is not enough for a checksum: %w", len(in)-len(sitesMagic), crdt.ErrMalformed)
+		}
+		want := binary.BigEndian.Uint32(body[:4])
+		if got := crc32.Checksum(body[4:], checksumTable); got != want {
+			// Refusing is the whole point. Accepted instead, this is a collect
+			// floor nobody wrote, and a floor that has moved up is written into
+			// the next snapshot as CollectedBelow and never comes back.
+			return nil, nil, fmt.Errorf("collab: the participants do not match their checksum (%08x, want %08x); they have been corrupted: %w", got, want, crdt.ErrMalformed)
+		}
+		in = body[4:]
+	}
 	r := &siteReader{buf: in}
 	n, ok := r.uvarint()
 	if !ok || n > uint64(len(r.buf)) {

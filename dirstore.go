@@ -367,6 +367,14 @@ func (s *DirStore) LoadSites(_ context.Context, document string) ([]byte, error)
 	if err := s.answersFor(path); err != nil {
 		return nil, fmt.Errorf("collab: reading the participants of %q: %w", document, err)
 	}
+	if len(held) == 0 {
+		// The same refusal a zero-length snapshot gets, for the same reason and
+		// with more at stake: nil means "nobody recorded yet", and a present
+		// empty file is a torn write. Read as nil it would forget a participant
+		// that has only ever read -- which is the whole reason these bytes
+		// exist -- and the floor would move past it. See [Store] and sites.go.
+		return nil, fmt.Errorf("collab: the participants of %q are empty on disk, which is a torn write and not an absence", document)
+	}
 	return held, nil
 }
 
@@ -374,8 +382,19 @@ func (s *DirStore) LoadSites(_ context.Context, document string) ([]byte, error)
 // a snapshot is: a half-written one would be read back as unreadable and take
 // the document down with it.
 //
-// The bytes are stored as they arrive. A snapshot is packed because it is large
-// and repetitive; this is neither.
+// The bytes are stored as they arrive, and not for want of anything to
+// compress: measured, brotli takes a two-participant blob from 57 bytes to 36,
+// and a sixty-four-participant one from 15233 to 362. It is a set of version
+// vectors over the same site ids, which is the most repetitive thing in the
+// store. They are stored as they arrive because [encodeSites] promises that two
+// servers holding the same thing write the same bytes, and a compressor inside
+// that promise weakens it into "as long as nobody upgraded" — which is why
+// dircompress.go exists on the storage side rather than in crdt.
+//
+// Their integrity is not this store's business either. What arrives already
+// carries its own magic and its own CRC32C, put there by the encoder that owns
+// the format, so a participants file that rots is refused wherever it was kept
+// rather than only here.
 func (s *DirStore) SaveSites(_ context.Context, document string, sites []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

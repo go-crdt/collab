@@ -40,7 +40,9 @@ type Store interface {
 //
 // A store that can keep a little more says so by implementing this. What it is
 // given is opaque: the server owns the encoding, a store keeps the bytes and
-// gives them back.
+// gives them back. They carry their own magic and their own checksum, so a
+// store that gives back bytes that rotted is caught rather than believed, and
+// a store that cannot checksum what it keeps has nothing to add here.
 //
 // A store that does not implement it loses nothing it had. The server falls
 // back to the sites the document names, which is what every store did before
