@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -225,12 +226,12 @@ func countRaised(want, got crdt.CompositeVersion) int {
 // Participants that have rotted are refused, rather than read back as a
 // different set of people.
 //
-// Every single-bit flip of what encodeSites writes. Before there was a checksum
-// this was measured on a four-site file: of 784 flips, 426 were refused by the
-// structural checks, none read back unchanged, and 358 — 45.7% — decoded
-// cleanly into a DIFFERENT participant set, 49 of those in the unsafe
-// direction. Dense varints have almost no redundancy to trip over, which is why
-// the structural checks catch so little. A CRC32C detects every single-bit
+// Every single-bit flip of what encodeSites writes must be refused. How big
+// the hole was is measured, not remembered, by
+// TestEverySingleBitFlipOfTheParticipantsIsCaught below, which runs the same
+// census over the body alone and over the whole file: dense varints have almost
+// no redundancy to trip over, so the structural checks let a quarter of the
+// flips through as a DIFFERENT set of people. A CRC32C detects every single-bit
 // error there is, so the answer here is none.
 func TestAParticipantsFileThatHasRottedIsRefused(t *testing.T) {
 	cells := crdt.Part{Kind: crdt.PartMap, Name: "cells"}
@@ -362,5 +363,86 @@ func TestParticipantsWrittenBeforeThereWasAChecksumAreStillRead(t *testing.T) {
 	}
 	if seen[1][cells][1] != 4 || reached[1][cells] != 11 {
 		t.Fatalf("read back seen=%v reached=%v", seen, reached)
+	}
+}
+
+// The census the comment on [sitesMagic] cites, kept in the tree so its figures
+// are produced rather than remembered. It flips every single bit of a real
+// participants file twice over: once through the body alone, which is what
+// decodeSites saw before there was a checksum, and once through the whole file
+// as it is written now.
+//
+// The first count is the size of the hole; the second is zero, because a CRC32C
+// detects every single-bit error there is.
+func TestEverySingleBitFlipOfTheParticipantsIsCaught(t *testing.T) {
+	cells := crdt.Part{Kind: crdt.PartMap, Name: "cells"}
+	notes := crdt.Part{Kind: crdt.PartText, Name: "notes"}
+	seen := map[crdt.SiteID]crdt.CompositeVersion{
+		1: {cells: crdt.VersionVector{1: 4, 2: 1}, notes: crdt.VersionVector{1: 3}},
+		2: {cells: crdt.VersionVector{1: 1, 2: 5}},
+		7: {notes: crdt.VersionVector{7: 2}},
+		9: nil,
+	}
+	reached := map[crdt.SiteID]crdt.CompositeClocks{1: {cells: 11}, 2: {cells: 9}, 7: {notes: 4}}
+	whole, err := encodeSites(seen, reached)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := whole[len(sitesMagic)+4:] // what decodeSites read before the checksum
+
+	same := func(a, b map[crdt.SiteID]crdt.CompositeVersion) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for site, av := range a {
+			bv, ok := b[site]
+			if !ok || !reflect.DeepEqual(av, bv) {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Without the checksum: the body decoded on its own, which is the legacy
+	// path and exactly what a rotted file used to reach.
+	var refusedBody, differentBody int
+	for i := range body {
+		for bit := range 8 {
+			flipped := append([]byte(nil), body...)
+			flipped[i] ^= 1 << bit
+			got, _, err := decodeSites(flipped)
+			switch {
+			case err != nil:
+				refusedBody++
+			case !same(got, seen):
+				differentBody++
+			}
+		}
+	}
+	// With it: the same flips through the file as it is written today.
+	var refusedWhole, differentWhole int
+	for i := range whole {
+		for bit := range 8 {
+			flipped := append([]byte(nil), whole...)
+			flipped[i] ^= 1 << bit
+			got, _, err := decodeSites(flipped)
+			switch {
+			case err != nil:
+				refusedWhole++
+			case !same(got, seen):
+				differentWhole++
+			}
+		}
+	}
+	t.Logf("body alone (%d bytes, %d flips): %d refused, %d decoded a DIFFERENT set",
+		len(body), 8*len(body), refusedBody, differentBody)
+	t.Logf("whole file (%d bytes, %d flips): %d refused, %d decoded a DIFFERENT set",
+		len(whole), 8*len(whole), refusedWhole, differentWhole)
+
+	if differentBody == 0 {
+		t.Fatal("no flip of the body decoded into a different set, so this measures nothing")
+	}
+	if differentWhole != 0 {
+		t.Errorf("%d single-bit flips still decode into a different participant set", differentWhole)
 	}
 }

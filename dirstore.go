@@ -367,6 +367,14 @@ func (s *DirStore) LoadSites(_ context.Context, document string) ([]byte, error)
 	if err := s.answersFor(path); err != nil {
 		return nil, fmt.Errorf("collab: reading the participants of %q: %w", document, err)
 	}
+	if len(held) == 0 {
+		// The same refusal a zero-length snapshot gets, for the same reason and
+		// with more at stake: nil means "nobody recorded yet", and a present
+		// empty file is a torn write. Read as nil it would forget a participant
+		// that has only ever read -- which is the whole reason these bytes
+		// exist -- and the floor would move past it. See [Store] and sites.go.
+		return nil, fmt.Errorf("collab: the participants of %q are empty on disk, which is a torn write and not an absence", document)
+	}
 	return held, nil
 }
 

@@ -240,9 +240,63 @@ func TestABitFlipInTheParticipantsFileNoLongerCollectsPastAnAbsentOne(t *testing
 			m, _ := d2.doc.Map("cells")
 			below := m.CollectedBelow()
 			d2.mu.Unlock()
+			// Two-sided on purpose. "No superseded run" alone is an absence,
+			// and a server that collected NOTHING would satisfy it: measured,
+			// with document.collectable() stubbed to collect nothing this
+			// subtest still passed. So the floor having moved is asserted too.
+			if below == 0 {
+				t.Fatal("an intact document collected nothing, so the other half of this proves nothing")
+			}
 			if superseded != 0 {
 				t.Fatalf("after collecting, B's rejoin is answered with %d superseded run(s); cells.CollectedBelow=%d", superseded, below)
 			}
 		})
 	}
 }
+
+// A participants file truncated to nothing is a torn write, not an absence.
+//
+// The checksum cannot see it: there are no bytes to check. Read as "nobody has
+// been recorded" it would forget a participant that has only ever read — which
+// is the whole reason these bytes are kept — and the collect floor would move
+// past it, which is the same permanent divergence a raised counter causes. It
+// is refused twice: by the store, which knows the file is there, and by the
+// server, for a store that does not.
+func TestParticipantsTruncatedToNothingAreRefused(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := NewDirStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSites(ctx, "d", []byte("who was here")); err != nil {
+		t.Fatal(err)
+	}
+	path, err := store.sitesPath("d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadSites(ctx, "d"); err == nil || !strings.Contains(err.Error(), "torn write") {
+		t.Fatalf("LoadSites: %v, want the torn write named", err)
+	}
+
+	// And the server's own last line, for a store that hands back a present
+	// empty blob instead of refusing it.
+	srv := NewServer(Config{Store: emptySites{Store: NewMemoryStore()}})
+	t.Cleanup(func() { _ = srv.Close(context.Background()) })
+	transport, conn := Pipe()
+	go func() { _ = srv.ServePipe(ctx, conn) }()
+	if _, err := Join(ctx, transport, ClientConfig{Document: "d", Site: 1}); err == nil {
+		t.Fatal("the server opened a document whose participants file was empty")
+	}
+}
+
+// emptySites hands back a present, zero-length participants blob — what a store
+// that does not know the contract does for a torn file.
+type emptySites struct{ Store }
+
+func (emptySites) LoadSites(context.Context, string) ([]byte, error) { return []byte{}, nil }
+func (emptySites) SaveSites(context.Context, string, []byte) error   { return nil }

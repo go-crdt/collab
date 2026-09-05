@@ -29,11 +29,14 @@ import (
 // is a document nobody wrote; a participants file that rots can be a collect
 // floor nobody wrote, and a floor does harm by moving UP. decodeSites' checks
 // below are structure only, and dense varints have almost no redundancy to trip
-// over: measured on a four-site file, 358 of 784 single-bit flips — 45.7% —
-// decoded cleanly into a DIFFERENT participant set, where the same measurement
-// on a document's file gave 10.7%. The one file here with nothing underneath it
-// was the one four times more exposed. A CRC32C detects every single-bit error
-// and every burst up to 32 bits, which is every one of those 358.
+// over. TestEverySingleBitFlipOfTheParticipantsIsCaught measures it rather than
+// asserting it, on a four-site file, and prints both counts: of 760 single-bit
+// flips of the body alone — which is what decodeSites saw before this existed —
+// 413 were refused by the structural checks and 216 decoded cleanly into a
+// DIFFERENT participant set. This was the one file in the store with nothing
+// underneath it. A CRC32C detects every single-bit error and every burst up to
+// 32 bits, so the same census over the file as it is written now refuses all
+// 832 and decodes none of them into anything.
 //
 // # What it is not, and what is left
 //
@@ -113,7 +116,7 @@ func decodeSites(in []byte) (map[crdt.SiteID]crdt.CompositeVersion, map[crdt.Sit
 	if hasMagic(in, sitesMagic) {
 		body := in[len(sitesMagic):]
 		if len(body) < 4 {
-			return nil, nil, fmt.Errorf("collab: checksummed participants of %d bytes, which is not enough for one: %w", len(in), crdt.ErrMalformed)
+			return nil, nil, fmt.Errorf("collab: checksummed participants whose body is %d bytes, which is not enough for a checksum: %w", len(in)-len(sitesMagic), crdt.ErrMalformed)
 		}
 		want := binary.BigEndian.Uint32(body[:4])
 		if got := crc32.Checksum(body[4:], checksumTable); got != want {

@@ -375,7 +375,11 @@ func (s *Server) open(ctx context.Context, name string) (*document, error) {
 		if err != nil {
 			return nil, fail(errInternal, "collab: reading the participants of %q: %v", name, err)
 		}
-		if len(raw) > 0 {
+		// nil, and only nil, is "nobody has been recorded yet". A store that
+		// hands back a present but empty blob has handed back a torn file, and
+		// decodeSites refuses it below rather than this reading it as an
+		// absence -- the degradation this whole refusal exists to avoid.
+		if raw != nil {
 			held, said, err := decodeSites(raw)
 			if err != nil {
 				// Refused rather than opened as "nobody has been here". That
