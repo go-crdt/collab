@@ -190,6 +190,12 @@ func (s *Server) evictIdle(ctx context.Context, idle time.Duration) {
 // has joined one is in it — so the replica handed back by the second attempt
 // cannot go idle while this session is joining it.
 func (s *Server) openAndJoin(ctx context.Context, join joinMsg) (*document, *subscriber, error) {
+	return s.openAndEnrol(ctx, join, true)
+}
+
+// openAndEnrol is openAndJoin with a say over whether the participant is
+// answered, for a link joining its own server's document. See [document.enrol].
+func (s *Server) openAndEnrol(ctx context.Context, join joinMsg, answer bool) (*document, *subscriber, error) {
 	for ctx.Err() == nil {
 		doc, err := s.open(ctx, join.Document)
 		if err != nil {
@@ -201,7 +207,7 @@ func (s *Server) openAndJoin(ctx context.Context, join joinMsg) (*document, *sub
 			// test steps in and evicts the document.
 			s.betweenOpenAndJoin(doc)
 		}
-		sub, err := doc.join(join)
+		sub, err := doc.enrol(join, answer)
 		if errors.Is(err, errEvicted) {
 			// The document was let go of between being handed over and being
 			// joined. open waits for the eviction to finish, so asking again

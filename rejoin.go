@@ -177,7 +177,17 @@ func (c *Client) attach(ctx context.Context, transport Transport) (carrierConn, 
 	// Have is what makes this a rejoin rather than a first join. Without it the
 	// server sends a snapshot, and a snapshot replaces the replica — taking
 	// with it everything edited while there was nowhere to send it.
-	join := joinMsg{Document: c.document, Site: uint64(c.site), Have: have}
+	//
+	// Speaks changes no branch on any server that can answer, because Have is
+	// asked about first. It is here for the server that cannot: one that has
+	// been reseeded from a purged snapshot while this participant was away has
+	// no difference to send, and without knowing what this build reads it can
+	// only refuse — locking a participant out for good over an outage it did
+	// not cause. With it, a participant holding nothing the server has not got
+	// is seeded, which is provably lossless and is what the server checks
+	// before it sends one. Cannot fail; see joinOn.
+	speaks, _ := Mine().MarshalBinary()
+	join := joinMsg{Document: c.document, Site: uint64(c.site), Have: have, Speaks: speaks}
 	if err := conn.Send(kindJoin, join); err != nil {
 		return fail(err)
 	}

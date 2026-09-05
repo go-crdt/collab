@@ -30,6 +30,11 @@ const (
 	errInternal
 	// errRefused is Authorize saying no.
 	errRefused
+	// errPrecondition is this replica being in no state to answer, whatever the
+	// participant does. A purge here has taken what catching it up would need,
+	// and neither retrying nor rejoining changes that: the state has to be
+	// fixed first. See [document.join] and [purgedPast].
+	errPrecondition
 )
 
 // A sessionError is one of the above, with what to tell the participant.

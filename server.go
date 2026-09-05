@@ -682,6 +682,31 @@ func pump(stream carrier, sub *subscriber) error {
 var errEvicted = errors.New("collab: the document was evicted; ask again")
 
 func (d *document) join(j joinMsg) (*subscriber, error) {
+	return d.enrol(j, true)
+}
+
+// enrol is join with a say over whether the participant is answered at all.
+//
+// Everybody joining over a carrier is: a welcome is what a session opens with.
+// A link is not. It joins its OWN server's document to get an outbound queue,
+// and never reads the answer — [Server.follow] takes what it needs from the
+// replica directly, through [document.version] and [document.opsSince], and its
+// outbound loop drops every message that is not an operation. So the welcome
+// composed for a link has always been built, queued and thrown away: the whole
+// document, encoded, on every Follow.
+//
+// That was waste and is now worse than waste. A document that has purged has no
+// answer to compose for a participant that said nothing — which is what the
+// local join says, because it has not opened the replica yet and has nothing to
+// say — so composing one would refuse a link its own replica, and a server
+// could not follow anybody for a document it holds purged, including the peer
+// that could seed it. Not composing it is both the cheaper and the correct
+// answer, and the two are the same answer.
+//
+// The welcome stays inside the lock rather than becoming a second step, because
+// what makes it safe is that nothing can be applied between the state a
+// participant is told about and the queue it starts receiving on.
+func (d *document) enrol(j joinMsg, answer bool) (*subscriber, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.evicted {
@@ -712,68 +737,20 @@ func (d *document) join(j joinMsg) (*subscriber, error) {
 		}
 	}
 
-	welcome := welcomeMsg{}
-	var held crdt.CompositeVersion
-	if have := j.Have; len(have) > 0 {
-		if err := held.UnmarshalBinary(have); err != nil {
-			return nil, fail(errInvalid, "collab: malformed version")
-		}
-	}
-	// A participant that says nothing about what it holds is sent the whole
-	// document. Everybody else is sent the difference, and there is no third
-	// case to check for: the difference can always be made, because this
-	// document is only ever collected against a version every site that has
-	// been in it has acknowledged. See [document.collectable], and what
-	// happened when that was the meet over the open sessions instead.
-	// A snapshot is the cheap way to hand over a whole document and the only
-	// thing here whose format a participant may not be able to read: a reader
-	// knows the version byte or refuses the bytes, and by then it has been sent.
-	// Operations carry no such number and always work.
-	//
-	// So the snapshot is the fast path and it is unlocked by saying so. A
-	// participant that has not said what it reads gets the history instead --
-	// slower, larger, and right, which is the way round this should fail. It is
-	// the same rule as [Capabilities.Accepts]: silence is not acceptance, and the
-	// participant that says nothing is exactly the older build this protects.
-	switch {
-	case len(j.Have) > 0:
-		// These operations came from this document, so they are valid by
-		// construction and cannot fail to encode.
-		welcome.Operations, _ = crdt.AppendPartOps(nil, d.doc.OpsSince(held))
-	case readsOurSnapshots(j.Speaks):
-		welcome.Snapshot = d.doc.Snapshot()
-	default:
-		welcome.Operations, _ = crdt.AppendPartOps(nil, d.doc.OpsSince(nil))
-	}
-	for _, update := range d.presence.State() {
-		raw, _ := update.MarshalBinary() // cannot fail for an update we made
-		welcome.Presence = append(welcome.Presence, raw)
-	}
-	// Telling the participant where the server stands is what lets it push work
-	// done while it was disconnected, rather than holding operations nobody else
-	// will ever see.
-	welcome.Version, _ = d.doc.Version().MarshalBinary()
-
-	// And what this server understands, because a handshake in which only one
-	// side introduces itself is half a handshake. Nothing here reads it yet: the
-	// participant sends operations, which carry no format version, so there is
-	// nothing for it to check today.
-	//
-	// It is filled anyway, and not on speculation -- the reader is known and
-	// close. crdt#80 adds an operation kind a peer refuses if it does not
-	// understand it, and refusing to send one is a decision each side has to
-	// make about the other. A field that exists on the wire and is always empty
-	// is worse than no field: it reads as supported and says nothing, which is
-	// what makes a later peer trust it.
-	//
-	// Cannot fail; see joinOn.
-	welcome.Speaks, _ = Mine().MarshalBinary()
-
 	sub := &subscriber{
 		site: crdt.SiteID(j.Site),
 		out:  make(chan wireMsg, d.backlog+1),
 	}
-	sub.out <- wireMsg{kind: kindWelcome, msg: welcome}
+	// Composed and queued before this subscriber is one the broadcast can see,
+	// so that nothing it is about to be told arrives ahead of the state it is
+	// being told about.
+	if answer {
+		var welcome welcomeMsg
+		if err := d.compose(&welcome, j); err != nil {
+			return nil, err
+		}
+		sub.out <- wireMsg{kind: kindWelcome, msg: welcome}
+	}
 	d.subs[sub] = struct{}{}
 	// A site nobody has heard from holds collection back rather than being
 	// absent from the question. Recording it here, and not on its first
@@ -1035,10 +1012,151 @@ func (d *document) persist(ctx context.Context) error {
 	return nil
 }
 
+// compose fills in what a session is opened with: what this replica holds that
+// the participant does not, where the server stands, who else is here, and what
+// this build speaks. Called under d.mu, from [document.enrol].
+//
+// It returns an error where there is no answer to give, and that refusal ends
+// the session before it starts: see the purge below.
+func (d *document) compose(welcome *welcomeMsg, j joinMsg) error {
+	var held crdt.CompositeVersion
+	if have := j.Have; len(have) > 0 {
+		if err := held.UnmarshalBinary(have); err != nil {
+			return fail(errInvalid, "collab: malformed version")
+		}
+	}
+	// A participant that says nothing about what it holds is sent the whole
+	// document. Everybody else is sent the difference.
+	//
+	// A snapshot is the cheap way to hand over a whole document and the only
+	// thing here whose format a participant may not be able to read: a reader
+	// knows the version byte or refuses the bytes, and by then it has been sent.
+	// Operations carry no such number and always work.
+	//
+	// So the snapshot is the fast path and it is unlocked by saying so. A
+	// participant that has not said what it reads gets the history instead --
+	// slower, larger, and right, which is the way round this should fail. It is
+	// the same rule as [Capabilities.Accepts]: silence is not acceptance, and the
+	// participant that says nothing is exactly the older build this protects.
+	//
+	// # The difference cannot always be made
+	//
+	// This said, for four versions, that there was no third case to check for,
+	// "because this document is only ever collected against a version every
+	// site that has been in it has acknowledged". That argument is sound and it
+	// is about COLLECTION, whose floor is this server's to hold; see
+	// [document.collectable] and what happened when that was the meet over the
+	// open sessions instead. It says nothing about a PURGE, which no
+	// acknowledgement bounds and which no part of this package performs: a
+	// purged document arrives from outside the server entirely, through its
+	// store -- an operator's gitstore, a MultiStore merge of a purged side, a
+	// pgstore row, a Resume snapshot from a crdt-level tool.
+	//
+	// A purged run is in no [crdt.Composite.OpsSince] at all, so serving the
+	// difference across one hands the participant a history with a hole and it
+	// parks everything that followed, for ever, with no error anywhere. That is
+	// what [crdt.Composite.CanServe] is for, and the rule here is: this replica
+	// never serves a history it knows has a hole. Where a snapshot serves the
+	// participant exactly it sends one; otherwise the join is refused and the
+	// refusal names the purge. Silence is not one of the outcomes.
+	switch {
+	case len(j.Have) > 0:
+		err := d.doc.CanServe(held)
+		switch {
+		case err == nil:
+			// These operations came from this document, so they are valid by
+			// construction and cannot fail to encode.
+			welcome.Operations, _ = crdt.AppendPartOps(nil, d.doc.OpsSince(held))
+		case !readsOurSnapshots(j.Speaks):
+			return purgedPast(d.name, err, "it has not said what snapshots it reads")
+		case !covers(d.doc.Version(), held):
+			// The load-bearing half. A snapshot REPLACES a replica, so sending
+			// one to a participant holding work this server has not got would
+			// trade a silent divergence for silent data loss -- and it would do
+			// it to every build already deployed, which cannot be taught to
+			// refuse. Sending one only where this replica already contains
+			// everything the participant holds means it has nothing to lose.
+			// See [Client.attach], which warned about exactly this.
+			return purgedPast(d.name, err, "a snapshot would discard work only it holds")
+		default:
+			welcome.Snapshot = d.doc.Snapshot()
+		}
+	case readsOurSnapshots(j.Speaks):
+		welcome.Snapshot = d.doc.Snapshot()
+	default:
+		// An empty vector, because that is what this participant is: it has
+		// said nothing, so it holds nothing this replica can count on. And it
+		// has said nothing about what it reads either, so there is no snapshot
+		// to fall back to.
+		if err := d.doc.CanServe(nil); err != nil {
+			return purgedPast(d.name, err, "it said nothing about what it holds or reads")
+		}
+		welcome.Operations, _ = crdt.AppendPartOps(nil, d.doc.OpsSince(nil))
+	}
+	for _, update := range d.presence.State() {
+		raw, _ := update.MarshalBinary() // cannot fail for an update we made
+		welcome.Presence = append(welcome.Presence, raw)
+	}
+	// Telling the participant where the server stands is what lets it push work
+	// done while it was disconnected, rather than holding operations nobody else
+	// will ever see.
+	welcome.Version, _ = d.doc.Version().MarshalBinary()
+
+	// And what this server understands, because a handshake in which only one
+	// side introduces itself is half a handshake. Nothing here reads it yet: the
+	// participant sends operations, which carry no format version, so there is
+	// nothing for it to check today.
+	//
+	// It is filled anyway, and not on speculation -- the reader is known and
+	// close. crdt#80 adds an operation kind a peer refuses if it does not
+	// understand it, and refusing to send one is a decision each side has to
+	// make about the other. A field that exists on the wire and is always empty
+	// is worse than no field: it reads as supported and says nothing, which is
+	// what makes a later peer trust it.
+	//
+	// Cannot fail; see joinOn.
+	welcome.Speaks, _ = Mine().MarshalBinary()
+	return nil
+}
+
 func operationsMessage(raw []byte) wireMsg {
 	return wireMsg{kind: kindOperation, msg: opsMsg{Operations: raw}}
 }
 
 func presenceMessage(raw []byte) wireMsg {
 	return wireMsg{kind: kindPresence, msg: presenceMsg{Update: raw}}
+}
+
+// covers reports whether ours holds everything held names.
+//
+// [crdt.VersionVector] keeps this unexported, so it is computed here. A nil map
+// indexes to zero, which is the answer wanted: a part or a site ours does not
+// name is one it holds nothing of.
+func covers(ours, held crdt.CompositeVersion) bool {
+	for part, theirs := range held {
+		mine := ours[part]
+		for site, seq := range theirs {
+			if mine[site] < seq {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// purgedPast refuses a join this replica cannot answer without leaving a hole
+// in what it sends.
+//
+// The cause is kept, so a binding or a test can ask errors.Is for
+// [crdt.ErrPurged] rather than parse the wording -- the same shape
+// [document.applyOperations] uses for a stranded write. The wording leads with
+// the purge, the document and the remedy because a WebSocket close frame keeps
+// only the first 120 bytes of it (see closing), and because the one thing a
+// person reading this has to learn is that waiting will not help.
+func purgedPast(document string, cause error, why string) error {
+	return &sessionError{
+		kind:  errPrecondition,
+		msg:   fmt.Sprintf("collab: document %q has purged past this participant; reseed it rather than wait -- %s", document, why),
+		cause: cause,
+	}
 }

@@ -198,6 +198,11 @@ func asStatus(err error) error {
 		code = codes.ResourceExhausted
 	case errAborted:
 		code = codes.Aborted
+	case errPrecondition:
+		// Not Internal, which reads "try again", and not ResourceExhausted,
+		// which this package uses for "rejoin to be caught up". Neither is
+		// true of a purge: the answer is to fix the state and come back.
+		code = codes.FailedPrecondition
 	}
 	return status.Error(code, se.msg)
 }

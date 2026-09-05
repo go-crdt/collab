@@ -50,8 +50,12 @@ func TestAClientSaysWhenTheServerIsAheadOfIt(t *testing.T) {
 		}
 	}
 
-	// And a snapshot it can read is still read.
-	fresh := &Client{site: 3}
+	// And a snapshot it can read is still read. It is given the replica a real
+	// client always has by the time a welcome reaches it -- joinOn builds one
+	// before it absorbs anything -- because adopting a snapshot now compares it
+	// against what this replica holds before replacing it. The unreadable case
+	// above never gets that far, and is left as it was.
+	fresh := &Client{site: 3, doc: crdt.NewComposite(3)}
 	if err := fresh.absorbWelcome(welcomeMsg{Snapshot: snapshot}); err != nil {
 		t.Fatalf("a snapshot this client can read was refused: %v", err)
 	}
