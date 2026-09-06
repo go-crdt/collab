@@ -52,4 +52,53 @@
 // the whole document or, for a participant that says what it already has, only
 // what it missed. After that, operations and presence flow both ways until
 // either side hangs up.
+//
+// # What this protects, and what it does not
+//
+// Nothing here is encrypted or signed. The server reads every document it
+// holds, a store holds them in the clear, and a participant is whoever the
+// transport says it is. That is a choice with a reason, and the reason is
+// structural rather than a matter of effort.
+//
+// A server that merges cannot be blind, and a server that is blind cannot
+// merge. This one merges: it applies operations, hands a joining participant a
+// snapshot built from them, and collects tombstones once every participant has
+// delivered. Every one of those reads the document. Encrypting it end to end
+// would leave the server with bytes it cannot combine, which is a different
+// design and not a setting.
+//
+// The field splits along exactly that line, and it is worth naming where the
+// neighbours stand:
+//
+//   - Automerge and Yjs encrypt nothing in the format. Automerge's chunk header
+//     carries four bytes of a truncated SHA-256, which detects a chunk that
+//     changed and authenticates nobody; Yjs's updates carry no digest at all.
+//   - Jazz states authorization as row-level policy that its serving node
+//     applies before accepting a write and before shipping a row — which it can
+//     only do by reading the row. Its relay links are a separate kind of peer,
+//     defined as having no permission subject at all.
+//   - Evolu does encrypt end to end, and pays for it exactly here: its server is
+//     called a Relay and holds encrypted changes it reconciles by fingerprints
+//     over ranges of timestamps. It never merges anything, because it cannot.
+//
+// So what is actually underneath a deployment of this package:
+//
+//   - The transport. A session runs over WebSocket or gRPC, and under TLS both
+//     authenticate the server and give every message a MAC — which is stronger
+//     than a checksum and covers forgery, not merely rot. Running either without
+//     TLS puts the document on the wire in the clear.
+//   - Whoever the caller lets in. This package does not authenticate: a server
+//     serves the sessions its host hands it, and [Config.Authorize] is where a
+//     host decides who those are.
+//   - The store, against a medium that changes bytes rather than against
+//     somebody who writes them. [PackSnapshot] and [CheckSnapshot] carry a
+//     CRC32C, and anything that can write a stored document can recompute one.
+//
+// And what a participant can do once it is in: everything a replica can do to a
+// document it holds. It can write anywhere and delete anything — a CRDT
+// converges on what it is told, and does not adjudicate — and it can hand over
+// operations another site made, which is worse than it sounds and is not
+// refused by default. [OwnSiteOnly] is the one-line policy that refuses it, and
+// [Config.AuthorizeOperations] is where a federating deployment writes a
+// narrower one. Neither is a stricter merge: the merge is not the lever.
 package collab

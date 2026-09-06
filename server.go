@@ -190,9 +190,19 @@ type Config struct {
 	// and refusing ends the session.
 	//
 	// Authorize runs once, when somebody joins, and decides whether that site
-	// may be in this document. That is the whole story for a participant: a
-	// participant speaks for itself, and the site it joined as is the site its
-	// operations carry.
+	// may be in this document. That is the whole story for an HONEST
+	// participant: it speaks for itself, and the site it joined as is the site
+	// its operations carry.
+	//
+	// It is not enforced. A session may hand over operations another site made,
+	// and with no policy here the server applies them: measured, a session
+	// joined as site 1 wrote a document as site 2 and advanced the server's
+	// version vector for site 2, which never joined. That is not only wrong
+	// attribution -- a site identity is half of an operation's name, so two
+	// writers on one identity produce different characters with the same ID and
+	// two replicas given both silently hold different text. [OwnSiteOnly] is
+	// the policy that refuses it, in one line, for a deployment that does not
+	// federate.
 	//
 	// It is not the whole story for a link. [Server.Follow] joins as one site
 	// and then relays the work of everyone on the server it follows, so what
