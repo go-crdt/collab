@@ -567,6 +567,12 @@ func TestASupervisedParticipantIsSeededWhenItsServerWasReseededWhileItWasAway(t 
 	defer cancel()
 	store := NewMemoryStore()
 	paris := NewServer(Config{Store: store})
+	// A coarse clock, on purpose: one that advances in steps rather than
+	// continuously. The Windows lane has one, and this test timed out there
+	// while passing everywhere else -- so it is modelled here, and the
+	// dependence is deterministic on every machine rather than rare on one.
+	// What it is about is the wait for eviction below.
+	paris.now = func() time.Time { return time.Now().Truncate(20 * time.Millisecond) }
 	t.Cleanup(func() { _ = paris.Close(context.Background()) })
 
 	peer := &breakable{srv: paris, ctx: ctx}
@@ -588,8 +594,16 @@ func TestASupervisedParticipantIsSeededWhenItsServerWasReseededWhileItWasAway(t 
 	awaitTrue(t, "the server to be left alone with the document", 10*time.Second, func() bool {
 		return serverSubs(paris, "paper") == 0
 	})
-	paris.Housekeep(ctx, time.Nanosecond)
+	// Housekeep is asked again on every turn of the wait rather than once.
+	//
+	// It evicts a document whose emptySince is strictly before now minus the
+	// threshold, and the threshold here is a nanosecond -- below the resolution
+	// of any clock. When the reading that stamped emptySince and the reading
+	// inside Housekeep land in the same tick, nothing is evicted, and one call
+	// means one chance. Modelled with a clock truncated to 20ms, a single call
+	// failed six runs out of eight; on the Windows lane it failed for real.
 	awaitTrue(t, "the server to let the document go", 10*time.Second, func() bool {
+		paris.Housekeep(ctx, time.Nanosecond)
 		return paris.Documents() == 0
 	})
 	if err := store.Save(ctx, "paper", purgedSnapshot(t)); err != nil {
