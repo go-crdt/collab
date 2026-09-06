@@ -542,7 +542,24 @@ func (c *Client) Close() error {
 	// Record the reason before tearing the stream down, so that a deliberate
 	// close reports itself rather than the transport reporting a cancelled
 	// context — which tells the caller nothing about who cancelled it.
-	c.fail(ErrClosed)
+	//
+	// It has the last word rather than the first, which fail() would give it.
+	// A supervised client between attempts already holds the error that ended
+	// the attempt, so fail() was a no-op there and Err() went on reporting
+	// "pipe closed" after the caller had closed it deliberately — the one
+	// thing Err's own documentation promises it will not do.
+	//
+	// A session that has already ended keeps the reason it ended of, though:
+	// Close arriving afterwards is not why it stopped, and rewriting that
+	// would lose the only account of it.
+	c.mu.Lock()
+	down := c.down
+	select {
+	case <-c.finished:
+	default:
+		c.err = ErrClosed
+	}
+	c.mu.Unlock()
 
 	// Close the sending side and let the server finish reading what is already
 	// on its way, rather than cancelling underneath it.
@@ -568,9 +585,15 @@ func (c *Client) Close() error {
 	conn := c.conn
 	_ = conn.Close()
 	c.send.Unlock()
-	select {
-	case <-c.finished:
-	case <-time.After(closeGrace):
+	// And there is nothing to wait for when there is no session to drain. A
+	// supervised client between attempts has no carrier the server is reading
+	// from, so the grace was two seconds of waiting for something that could
+	// not arrive — on the path a caller takes to close a tab.
+	if !down {
+		select {
+		case <-c.finished:
+		case <-time.After(closeGrace):
+		}
 	}
 	c.cancel()
 	<-c.finished
