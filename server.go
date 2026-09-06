@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-crdt/crdt"
 	"github.com/go-crdt/crdt/awareness"
@@ -589,6 +590,14 @@ func (s *Server) session(stream carrier) error {
 	case len(join.Document) > maxDocumentName:
 		return fail(errInvalid, "collab: a document name may be %d bytes and this one is %d",
 			maxDocumentName, len(join.Document))
+	case !utf8.ValidString(join.Document):
+		// Here rather than only in one carrier's decoder, which is where this
+		// lived: wire.go refused it and gRPC's protobuf refused it, so a name
+		// that is not text was accepted over Pipe and refused over the two
+		// carriers a deployment actually uses. A rule that holds on some
+		// carriers is not a rule, and the document name reaches a store, a log
+		// and JavaScript whichever way it arrived.
+		return fail(errInvalid, "collab: a document name must be text, and this one is not valid UTF-8")
 	}
 
 	if s.authorize != nil {
