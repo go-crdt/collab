@@ -7,8 +7,8 @@ github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6p
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/go-crdt/collab v0.52.0 h1:3gdj9PD0tCPg0aNrzXlvUXFKsnS8Wfe4QYqkaNXSwVQ=
-github.com/go-crdt/collab v0.52.0/go.mod h1:dmtPYbUZDAfWf550XMRxBFrTYweOdhtG/pV8nVNtdVA=
+github.com/go-crdt/collab v0.53.0 h1:+OS2D73G6jfOzA13Ul0cUztkEIOscMUzRi2yr68+tDc=
+github.com/go-crdt/collab v0.53.0/go.mod h1:dmtPYbUZDAfWf550XMRxBFrTYweOdhtG/pV8nVNtdVA=
 github.com/go-crdt/crdt v0.46.0 h1:Ppup+K/zLvM1trmBz83ENvEVcOTi3fFGnihvJMRL2yc=
 github.com/go-crdt/crdt v0.46.0/go.mod h1:vbfvns9B9FUaMi2sPKzMYttKmbxfgO7EK3Yu82SrlYw=
 github.com/go-logr/logr v1.4.3 h1:CjnDlHq8ikf6E492q6eKboGOC0T8CDaOvkHCIg8idEI=
