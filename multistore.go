@@ -236,6 +236,21 @@ func dominates(a, b map[crdt.Part]uint64) bool {
 // store left behind by a purge or a collect to reach that at all — stores
 // written together hold the same bytes, and merging those carries nothing.
 //
+// # Reading stops at the first store that refuses, and that is on purpose
+//
+// A member whose Load fails -- a file that rotted, a database that is down --
+// fails the whole read. Redundancy here buys durability, not availability: one
+// unreadable replica takes the document down even though a good copy is beside
+// it, and an operator meeting that has to repair or remove the bad store rather
+// than wait for a failover that is not coming.
+//
+// Serving the members that did answer would be worse than it looks. A snapshot
+// is a set of operations and the merge is their union, so a member left out is
+// not a smaller document, it is a document missing whatever only that member
+// held -- and the [Save] that follows writes the merge of the others over it,
+// which makes the loss permanent. Refusing keeps the operator's options open;
+// answering closes them silently.
+//
 // # Writing tries every store, and fails if any refused
 //
 // [Save] writes to all of them even after one has failed, so that a store being
