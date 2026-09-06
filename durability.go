@@ -161,26 +161,64 @@ func (s *Server) evictIdle(ctx context.Context, idle time.Duration) {
 	}
 	s.mu.Unlock()
 
+	// A document is only let go of once it is safely down. Nothing is left to
+	// return an error to, so the failure is reported where an operator can see
+	// it -- and the replica STAYS, holding the edits the store would not take.
+	//
+	// Dropping it is what this used to do, and it turned a store that was
+	// briefly unwell into work that no longer exists: the last participant
+	// leaves, the document goes idle, the save is refused, and everything since
+	// the last successful save goes with the replica. Nobody is told except a
+	// callback, and by then there is nothing left to tell them about.
+	//
+	// The cost of keeping it is memory, and it is bounded by what an operator
+	// can see and act on: the document stays idle, every housekeeping pass tries
+	// the save again, and every failure calls OnEvictError again. A store down
+	// for an hour costs an hour of idle documents; a store down for ever is an
+	// operator's problem long before it is this package's.
+	var down []*document
 	for _, d := range going {
-		// Nothing is left to return an error to, and the document cannot be
-		// kept: a session is already waiting for it to go so that it can be
-		// loaded again. So the failure is reported where an operator can see it.
-		if err := d.persist(ctx); err != nil && s.onEvictError != nil {
-			s.onEvictError(d.name, err)
+		if err := d.persist(ctx); err != nil {
+			if s.onEvictError != nil {
+				s.onEvictError(d.name, err)
+			}
+			continue
 		}
+		down = append(down, d)
 	}
 
 	s.mu.Lock()
-	for _, d := range going {
+	for _, d := range down {
 		if s.docs[d.name] == d {
 			delete(s.docs, d.name)
 		}
 	}
 	s.mu.Unlock()
-	// Only now may anybody load it again.
+	// Only now may anybody load a saved one again. A kept one is unmarked
+	// first, so a session that woke on the channel goes round, finds it still
+	// in the map, and takes the live replica -- the one holding the edits the
+	// store refused.
 	for _, d := range going {
-		close(d.gone)
+		d.mu.Lock()
+		gone := d.gone
+		if !wentDown(down, d) {
+			d.evicted = false
+			d.gone = nil
+		}
+		d.mu.Unlock()
+		close(gone)
 	}
+}
+
+// wentDown reports whether a document is in the list that was saved. The list
+// is one housekeeping pass long, so this is a walk rather than a set.
+func wentDown(docs []*document, d *document) bool {
+	for _, other := range docs {
+		if other == d {
+			return true
+		}
+	}
+	return false
 }
 
 // openAndJoin gets the document the server hands out and joins it, asking again
