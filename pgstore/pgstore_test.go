@@ -53,6 +53,25 @@ func fresh(t *testing.T, db *sql.DB) *pgstore.Store {
 	return store
 }
 
+// freshTableNamed is [freshNamed] on a table the caller names, for a suite that
+// runs many cases and needs each to start empty.
+func freshTableNamed(t *testing.T, db *sql.DB, table string) (*pgstore.Store, string) {
+	t.Helper()
+	store, err := pgstore.New(db, pgstore.WithTable(table))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := store.Migrate(t.Context()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.Exec("DROP TABLE IF EXISTS " + table); err != nil {
+			t.Errorf("dropping %s: %v", table, err)
+		}
+	})
+	return store, table
+}
+
 // freshNamed is [fresh], and also says which table it made, for a test that has
 // to reach past the store and change the bytes underneath it.
 func freshNamed(t *testing.T, db *sql.DB) (*pgstore.Store, string) {
