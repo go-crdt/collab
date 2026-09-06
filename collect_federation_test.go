@@ -208,15 +208,31 @@ func TestAParticipantBehindALinkIsNotCollectedPast(t *testing.T) {
 	// was made -- but it does not cover the deletion, and the link has not
 	// promised anything since, because Lyon would not collect against it
 	// either.
+	//
+	// It has to be waited for. Every until above waits on something travelling
+	// Paris -> Lyon; a promise travels the other way, on the follow loop's own
+	// schedule, and nothing already waited for implies it has arrived. Sampling
+	// it once reddened main on exactly the two slowest lanes -- macOS and
+	// riscv64 under qemu -- and passed everywhere else, which is what a sample
+	// of an asynchronous value looks like.
+	//
+	// Waiting cannot hide the failure this guards against: it waits for a
+	// promise to exist, and the assertion under it is that the promise does not
+	// cover the deletion. A promise that arrives covering it fails here, which
+	// is the bug this test is about.
 	d := document(paris)
+	promisedAnything := func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return d.seen[crdt.SiteID(9001)] != nil
+	}
+	until(t, "the link to have promised Paris where it is", promisedAnything)
+
 	d.mu.Lock()
 	promised := d.seen[crdt.SiteID(9001)]
 	held := d.doc.Version()
 	d.mu.Unlock()
 	cellsPart := crdt.Part{Kind: crdt.PartMap, Name: "cells"}
-	if promised == nil {
-		t.Fatal("the link never promised anything at all, so this proves nothing about the promise")
-	}
 	if promised[cellsPart][1] >= held[cellsPart][1] {
 		t.Fatalf("the link promised %v, which covers the deletion Paris holds at %v", promised, held)
 	}
