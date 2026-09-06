@@ -40,7 +40,7 @@ import (
 //
 // # What it is not, and what is left
 //
-// The checksum is over the encoded body, where pack() checksums what it
+// The checksum is over the encoded body, where PackSnapshot checksums what it
 // decompresses to. There is no compressor in between here, so the stored bytes
 // are the encoding and the corruption that "survives the decompressor" has no
 // equivalent.

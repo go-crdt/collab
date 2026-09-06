@@ -158,7 +158,7 @@ func (s *DirStore) Load(_ context.Context, document string) ([]byte, error) {
 	// Documents written before this store compressed them are passed through,
 	// so a store that has been running keeps working and migrates itself one
 	// save at a time.
-	snapshot, err := unpack(raw)
+	snapshot, err := UnpackSnapshot(raw)
 	if err != nil {
 		return nil, fmt.Errorf("collab: reading document %q: %w", document, err)
 	}
@@ -178,7 +178,7 @@ func (s *DirStore) Save(_ context.Context, document string, snapshot []byte) err
 	if err != nil {
 		return err
 	}
-	packed := pack(snapshot)
+	packed := PackSnapshot(snapshot)
 	tmp, err := createTemp(s.dir, tempPrefix+"*")
 	if err != nil {
 		return fmt.Errorf("collab: writing document %q: %w", document, err)
@@ -318,7 +318,7 @@ func (s *DirStore) Release(ctx context.Context, document string, want []byte) er
 	if err := s.answersFor(path); err != nil {
 		return fmt.Errorf("collab: releasing document %q: %w", document, err)
 	}
-	unpacked, err := unpack(stored)
+	unpacked, err := UnpackSnapshot(stored)
 	if err != nil {
 		// Unreadable is not "holds what you expected", and it is certainly not
 		// a reason to remove it.
