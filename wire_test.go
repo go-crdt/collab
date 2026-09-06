@@ -213,19 +213,60 @@ func FuzzDecodeClient(f *testing.F) {
 	f.Add(seed)
 	seed, _ = encodeClient(kindPresence, presenceMsg{Update: []byte("u")})
 	f.Add(seed)
+	// A whole acknowledgement, and one whose clocks are absent.
+	//
+	// The second is the form this format accepts and does not write, found by
+	// fuzzing and kept as a seed rather than as an opaque file under testdata:
+	// what makes it interesting is a sentence rather than a hash.
+	//
+	// The first is here because without it the exception below is never put to
+	// the test. Adding the exception and then breaking the decoder -- making it
+	// drop the clocks it read -- did NOT fail this target, because not one seed
+	// carried any. A relaxed assertion that nothing exercises is not an
+	// assertion.
+	seed, _ = encodeClient(kindAcknowledge, ackMsg{Version: []byte("v"), Clocks: []byte("c")})
+	f.Add(seed)
+	f.Add([]byte{kindAcknowledge, 3, '0', '0', '0'})
+
 	f.Fuzz(func(t *testing.T, data []byte) {
 		kind, msg, err := decodeClient(data)
 		if err != nil {
 			return
 		}
-		// Every freedom the format has is spent, so what was accepted encodes
-		// back to itself — the bytes, not merely an equivalent message.
 		again, err := encodeClient(kind, msg)
 		if err != nil {
 			t.Fatalf("a decoded message would not encode: %v", err)
 		}
+		// What was accepted encodes back to itself — the bytes, not merely an
+		// equivalent message — with ONE exception, which this comment used to
+		// deny and fuzzing found in eleven million executions.
+		//
+		// An acknowledgement may arrive without its clocks. That is not slack:
+		// a participant built before the clocks existed sends its version and
+		// stops, and the server must keep understanding it. Encoding writes the
+		// field, so re-encoding such a message is one byte longer than what
+		// came in -- an empty length, and nothing else.
 		if !bytes.Equal(again, data) {
-			t.Fatalf("re-encoding %x gave %x", data, again)
+			legacyAck := kind == kindAcknowledge && bytes.Equal(again, append(append([]byte(nil), data...), 0))
+			if !legacyAck {
+				t.Fatalf("re-encoding %x gave %x", data, again)
+			}
+		}
+		// And whatever encoding produced is canonical: decoding it and encoding
+		// it again changes nothing. This is what the byte equality above was
+		// reaching for, and it holds for the legacy form too -- so the
+		// exception is one shape the decoder accepts, not a hole in the
+		// property.
+		kindAgain, msgAgain, err := decodeClient(again)
+		if err != nil {
+			t.Fatalf("what encoding produced does not decode: %v", err)
+		}
+		third, err := encodeClient(kindAgain, msgAgain)
+		if err != nil {
+			t.Fatalf("a decoded message would not encode: %v", err)
+		}
+		if !bytes.Equal(third, again) {
+			t.Fatalf("encoding is not a fixed point: %x became %x", again, third)
 		}
 	})
 }
