@@ -106,13 +106,25 @@ type Config struct {
 	// course, and a peer catches up either way. There is no participant to
 	// refuse and none to re-seed.
 	//
-	// In a federation it does nothing at all. A follow link is a participant —
-	// it joins the server it follows, and [Server.Follow] joins its own server
-	// too — and only a [Client] sends an acknowledgement, so both ends have a
-	// participant that will never say what it holds and neither can collect.
-	// That is the safe direction rather than a broken one, and it is pinned
-	// down by a test rather than left to be discovered; see
-	// TestAFederatedServerDoesNotCollect and the issue it names.
+	// In a federation it works, and what a link promises is the whole of why.
+	// A link is a participant of both documents — it joins the server it
+	// follows, and [Server.Follow] joins its own — so for a while it was a
+	// participant that never said anything, and neither end could collect at
+	// all. It says something now, and what it says is not what its replica
+	// holds but the meet its own server could collect against: a peer may give
+	// back only what everybody behind that link has certainly seen.
+	//
+	// The difference is somebody's work. Promising the replica's version let a
+	// peer collect past a participant that was away on the follower — and
+	// federation exists so that such a participant can come back on the peer,
+	// where it was then answered with a superseded run, went on showing a value
+	// everybody else had removed, and had a version equal to the peer's, so no
+	// rejoin would ever repair it.
+	//
+	// So a quiet participant anywhere holds the whole federation's collection
+	// back, which is this same paragraph's rule one hop further out. See
+	// TestAFederatedServerCollectsOnceTheLinkSaysWhatItHolds and
+	// TestAParticipantBehindALinkIsNotCollectedPast, which are the two halves.
 	//
 	// All of which holds only for the version it is asked with. "Gone quiet"
 	// above means gone quiet, not gone off the air: a participant whose carrier

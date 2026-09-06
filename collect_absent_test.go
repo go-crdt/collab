@@ -4,6 +4,7 @@ package collab
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -306,4 +307,58 @@ func TestTheClockFloorIsTheLeastEverybodyPromised(t *testing.T) {
 	}
 	d.reached = nil
 	d.collect()
+}
+
+// Closing a supervised client that is between attempts says so, and says it at
+// once.
+//
+// Close records the reason before tearing the stream down, and the reason it
+// records is ErrClosed — which is what [Client.Err] promises: "a session that
+// was closed deliberately reports ErrClosed rather than the transport's
+// cancellation". A supervised client whose server has gone already holds the
+// error that ended the attempt, so recording only-if-empty was a no-op and
+// Err went on reporting the transport's complaint after the caller had closed
+// it on purpose.
+//
+// And it waited the full grace with nothing to drain: there is no carrier the
+// server is reading from between attempts. That is two seconds on the path
+// somebody takes to close a tab.
+func TestClosingASupervisedClientBetweenAttemptsSaysSoAtOnce(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := NewServer(Config{Store: NewMemoryStore()})
+	link := &gatedLink{srv: srv, ctx: ctx}
+	c, err := JoinWithRetry(ctx, link.dial, ClientConfig{Document: "paper", Site: 1},
+		RetryPolicy{Wait: time.Second, Ceiling: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The server goes, and the supervisor is left backing off.
+	link.away()
+	if err := srv.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "the client to notice its server has gone", func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.down
+	})
+
+	start := time.Now()
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	took := time.Since(start)
+
+	if err := c.Err(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("after a deliberate Close, Err() = %v, want ErrClosed", err)
+	}
+	// The grace is two seconds and this close has nothing to drain, so it
+	// should spend none of it. Measured both ways on a loaded machine: 0.00s
+	// as it is, and 0.93s when the wait is put back — the wait ends early
+	// because the supervisor notices, which is why the threshold is well below
+	// the two seconds and well above the nothing.
+	if took > 500*time.Millisecond {
+		t.Fatalf("Close took %v with no session to drain", took)
+	}
 }
