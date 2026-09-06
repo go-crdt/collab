@@ -53,11 +53,19 @@ var compressedMagic = [...]byte{'c', 'r', 'd', 't', 'z'}
 //
 // # Why a checksum at all
 //
-// A snapshot has none of its own, and it is the one thing here that has nothing
-// underneath it. git is content-addressed, so gitstore cannot serve bytes that
-// are not the bytes it stored; Postgres checksums its pages; a MemoryStore
-// cannot rot. A DirStore is a file on whatever filesystem it landed on, and
-// plenty of those do not checksum anything.
+// A snapshot has none of its own, and what is underneath it depends on the
+// store. git is content-addressed, so gitstore cannot serve bytes that are not
+// the bytes it stored, and a MemoryStore cannot rot. A DirStore is a file on
+// whatever filesystem it landed on, and plenty of those do not checksum
+// anything.
+//
+// Postgres used to be named here as a store that checksums its own pages. It
+// does — when it was told to, and the default is younger than most clusters.
+// An initdb with no flags was run on both: PostgreSQL 17 leaves "Data page
+// checksum version: 0" and 18 leaves 1. So a cluster created before 18, or
+// upgraded in place from one, has no page checksums at all unless somebody ran
+// pg_checksums --enable. A store cannot inherit the guarantee from the medium;
+// it carries its own or it has none, which is why this is exported.
 //
 // What that costs was measured rather than assumed. Of 544 single-bit flips in
 // one document's file, 479 were refused by brotli or by the decoder and 7 read
@@ -77,14 +85,30 @@ var checkedMagic = [...]byte{'c', 'r', 'd', 't', 'h'}
 // checksumTable is Castagnoli, built once.
 var checksumTable = crc32.MakeTable(crc32.Castagnoli)
 
-// pack compresses a snapshot for storage.
+// PackSnapshot compresses a snapshot and gives it a checksum, for a [Store]
+// that keeps bytes on a medium which can change them. [UnpackSnapshot] reverses
+// it. [DirStore] calls it on every save.
+//
+// It is exported for the stores that are not in this package — pgstore is one,
+// and so is whatever a consumer writes against S3, a key-value store or a
+// blobstore. A [Store] is a public interface, so the answer to "who checksums
+// this?" has to be available to whoever implements one.
+//
+// Rot, not forgery. Anything that can write the bytes can recompute the
+// checksum in them, so this authenticates nothing and does not pretend to; it
+// catches a medium that changed a byte nobody asked it to change. Of 1856
+// single-bit flips in one composite snapshot, 1048 loaded with no error at all
+// as a DIFFERENT document, which a server would then serve and, at its next
+// save, make permanent. Framed, none of them do. Both halves are counted by
+// TestEverySingleBitFlipIsRefusedOnceItIsFramed rather than quoted from a probe
+// that no longer exists.
 //
 // It returns no error, and the reason is that it cannot have one: the
 // destination is a bytes.Buffer made here, and writing to one never fails.
 // Checking anyway would put two branches in the package that no test can reach
 // and a reader has to wonder about — and would put a third in Save, which would
 // have to decide what to do about a failure that does not happen.
-func pack(snapshot []byte) []byte {
+func PackSnapshot(snapshot []byte) []byte {
 	out := bytes.NewBuffer(make([]byte, 0, len(snapshot)/8))
 	out.Write(checkedMagic[:])
 	// The checksum is of the snapshot rather than of the compressed bytes,
@@ -97,9 +121,14 @@ func pack(snapshot []byte) []byte {
 	return out.Bytes()
 }
 
-// unpack reverses pack, and passes through anything that was not packed — which
-// is every document written before this existed.
-func unpack(stored []byte) ([]byte, error) {
+// UnpackSnapshot reverses [PackSnapshot], and passes through anything that was
+// not packed — which is every document written before this existed. A store
+// that starts calling this pair reads what it already holds, and its documents
+// gain the checksum one save at a time, with nothing to migrate.
+//
+// It refuses bytes whose checksum does not match them. Refusing is the point:
+// served instead, they would be a document nobody wrote.
+func UnpackSnapshot(stored []byte) ([]byte, error) {
 	switch {
 	case hasMagic(stored, checkedMagic):
 		body := stored[len(checkedMagic):]

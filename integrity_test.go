@@ -36,10 +36,12 @@ func written(t *testing.T, text string) []byte {
 
 // A document on disk that has rotted is refused, not served.
 //
-// A snapshot carries no integrity check of its own, and a DirStore is the one
-// store here with nothing underneath it: git is content-addressed, Postgres
-// checksums its pages, a MemoryStore cannot rot, and a file is on whatever
-// filesystem it landed on.
+// A snapshot carries no integrity check of its own, and what is underneath it
+// depends on the store: git is content-addressed, a MemoryStore cannot rot, and
+// a file is on whatever filesystem it landed on. Postgres was listed here as
+// checksumming its pages, which it does only when it was told to -- an initdb
+// with no flags leaves them off on 17 and on from 18 -- so pgstore carries the
+// frame too rather than inherit a guarantee the cluster may not have.
 //
 // Measured before the checksum existed: of 544 single-bit flips in one
 // document's file, 479 were refused, 7 read back unchanged, and 58
@@ -126,7 +128,7 @@ func TestADocumentWrittenBeforeThereWasAChecksumStillReads(t *testing.T) {
 		{"raw, before there was compression", snapshot},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := unpack(c.stored)
+			got, err := UnpackSnapshot(c.stored)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -142,14 +144,14 @@ func TestADocumentWrittenBeforeThereWasAChecksumStillReads(t *testing.T) {
 	damaged := append([]byte(nil), old.Bytes()...)
 	damaged[len(damaged)-1] ^= 0xff
 	damaged[len(damaged)/2] ^= 0xff
-	if _, err := unpack(damaged); err == nil {
+	if _, err := UnpackSnapshot(damaged); err == nil {
 		t.Log("a damaged pre-checksum document decompressed anyway, which is why the checksum exists")
 	} else if !strings.Contains(err.Error(), "compressed document") {
 		t.Fatalf("the refusal does not say where it happened: %v", err)
 	}
 
 	// And what is written now carries one.
-	if !bytes.HasPrefix(pack(snapshot), checkedMagic[:]) {
+	if !bytes.HasPrefix(PackSnapshot(snapshot), checkedMagic[:]) {
 		t.Fatal("a document saved now does not carry a checksum")
 	}
 }
@@ -157,16 +159,16 @@ func TestADocumentWrittenBeforeThereWasAChecksumStillReads(t *testing.T) {
 // A checksummed document that is too short to hold its own checksum is refused
 // rather than read past the end of.
 func TestATruncatedChecksummedDocumentIsRefused(t *testing.T) {
-	packed := pack(written(t, "a sentence"))
+	packed := PackSnapshot(written(t, "a sentence"))
 	for _, n := range []int{len(checkedMagic), len(checkedMagic) + 1, len(checkedMagic) + 3} {
-		if _, err := unpack(packed[:n]); err == nil {
+		if _, err := UnpackSnapshot(packed[:n]); err == nil {
 			t.Fatalf("a document of %d bytes was accepted", n)
 		} else if !strings.Contains(err.Error(), "not enough") {
 			t.Fatalf("the refusal does not say why: %v", err)
 		}
 	}
 	// And one truncated in its compressed body is refused by brotli.
-	if _, err := unpack(packed[:len(packed)-1]); err == nil {
+	if _, err := UnpackSnapshot(packed[:len(packed)-1]); err == nil {
 		t.Fatal("a document missing its last byte was accepted")
 	}
 }
