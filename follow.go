@@ -179,6 +179,16 @@ func (s *Server) follow(ctx context.Context, peer Transport, document string, as
 		return err
 	}
 
+	// This link holds everything its own replica holds -- it is the thing that
+	// put it there -- so it says so to its OWN document, here and again after
+	// every batch it adopts. Without it the link's site sits in that document's
+	// seen set having acknowledged nothing, and a server that follows anybody
+	// never collects anything, for ever. Saying it HERE and not only in the
+	// loop below is what lets a link promise its peer before that peer has said
+	// anything: a peer with nothing to send would otherwise never learn what
+	// this server can collect against.
+	local.acknowledgeSelf(sub)
+
 	// The session is up and the local replica holds what it was missing. This
 	// is the only place that can be said, and it is said before either loop
 	// starts so that a link which is about to be dropped has still, truthfully,
@@ -234,6 +244,27 @@ func (s *Server) follow(ctx context.Context, peer Transport, document string, as
 				sent <- err
 				return
 			}
+			// A participant of THIS server just spoke, so the meet this link
+			// promises may have moved. Saying so here as well as on the way in
+			// is what keeps the peer's floor alive: the inbound loop only runs
+			// when the peer sends, and a peer with nothing to say would never
+			// hear that somebody behind this link had come back.
+			if out.kind != kindOperation {
+				continue
+			}
+			// It has just relayed this, so it holds it: said before the promise
+			// is computed, because the link is one of the participants the meet
+			// is taken over and a stale entry for itself would hold its own
+			// promise back.
+			local.acknowledgeSelf(sub)
+			raw, clocks, ok := local.promise()
+			if !ok {
+				continue
+			}
+			if err := conn.Send(kindAcknowledge, ackMsg{Version: raw, Clocks: clocks}); err != nil {
+				sent <- err
+				return
+			}
 		}
 	}()
 
@@ -268,27 +299,92 @@ func (s *Server) follow(ctx context.Context, peer Transport, document string, as
 			return err
 		}
 
-		// And say what this replica now holds, which is what lets the peer
-		// collect. A link is a participant of the document it follows, and a
-		// participant that never says anything holds that document's floor at
-		// nothing for ever — so before this, Config.CollectEvery did nothing at
-		// all in a federation, silently.
+		// Still not behind, now that this batch is in. See where this is first
+		// said, above the loops.
+		local.acknowledgeSelf(sub)
+
+		// And say to the PEER what this server can promise, which is what lets
+		// the peer collect. A link is a participant of the document it follows,
+		// and a participant that never says anything holds that document's
+		// floor at nothing for ever -- so before there was an acknowledgement
+		// here, Config.CollectEvery did nothing at all in a federation,
+		// silently.
 		//
-		// Saying it is safe, and the argument is short. What is promised is
-		// what this server has applied, not what everybody behind it has: those
-		// are participants of this document, and this document's own floor is
-		// what protects them. The peer collecting up to what this server holds
-		// can take away nothing anybody here will later ask this server for,
-		// because this server still holds it.
-		local.mu.Lock()
-		raw, _ := local.doc.Version().MarshalBinary()
-		clocks, _ := local.doc.Clocks().MarshalBinary()
-		local.mu.Unlock()
+		// What is promised is what this server could collect against, NOT what
+		// its replica holds. The two differ, and the difference is somebody's
+		// work. The old argument was that the peer "can take away nothing
+		// anybody here will later ask this server for, because this server
+		// still holds it" -- and its unstated precondition is "will later ask
+		// THIS server". Federation exists so that a participant whose server is
+		// down can come back on the other one: measured, a reader that was away
+		// during a deletion returned to the peer, was answered with a superseded
+		// run over a stretch the peer had collected on this link's word, and
+		// went on showing a value everybody else had removed, with a version
+		// equal to the peer's, for ever.
+		//
+		// So the link says the meet its own server would collect against. When
+		// this server cannot collect -- somebody behind it has gone quiet -- it
+		// says nothing, and the peer's floor stays where it is. That is the
+		// same rule a quiet participant already imposes on the server it is
+		// quiet at, applied one hop further out, and it fails in the direction
+		// that keeps work.
+		raw, clocks, ok := local.promise()
+		if !ok {
+			continue
+		}
 		select {
 		case acks <- wireMsg{kind: kindAcknowledge, msg: ackMsg{Version: raw, Clocks: clocks}}:
 		default:
 		}
 	}
+}
+
+// acknowledgeSelf records that a link holds everything this replica holds. It
+// is not a claim about anybody else: it is one subscriber, speaking for itself,
+// saying it is not behind — which for the link that put the operations there is
+// true by construction.
+//
+// It reads the versions rather than encoding and decoding them the way
+// [document.acknowledge] must for bytes off a wire. There is no wire here and
+// nothing to validate, so a round trip would only add three error branches
+// nothing could ever reach — which this package says elsewhere is worse than no
+// branch at all, because it looks like a safeguard and is not.
+func (d *document) acknowledgeSelf(sub *subscriber) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	have, clocks := d.doc.Version(), d.doc.Clocks()
+	sub.have = have
+	// Made here as well as in [Server.open], for the reason
+	// [document.acknowledge] gives: a document can be built without going
+	// through it. Measured rather than assumed -- dropping these guards on the
+	// grounds that a link always joins through Server.openAndJoin panicked on
+	// a nil map within twenty seconds of the suite.
+	if d.seen == nil {
+		d.seen = map[crdt.SiteID]crdt.CompositeVersion{}
+	}
+	d.seen[sub.site] = have
+	if d.reached == nil {
+		d.reached = map[crdt.SiteID]crdt.CompositeClocks{}
+	}
+	d.reached[sub.site] = clocks
+}
+
+// promise is what this server could collect against, encoded for an
+// acknowledgement, or ok=false while it could not collect at all.
+//
+// It is deliberately not what the replica holds. See where it is sent.
+func (d *document) promise() (version, clocks []byte, ok bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	stable, haveStable := d.collectable()
+	below, haveFloor := d.clockFloor()
+	if !haveStable || !haveFloor {
+		return nil, nil, false
+	}
+	// Both came from this document, so neither can fail to encode.
+	version, _ = stable.MarshalBinary()
+	clocks, _ = below.MarshalBinary()
+	return version, clocks, true
 }
 
 // version reports what the document holds, for a link deciding what to ask for.
