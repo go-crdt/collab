@@ -782,3 +782,32 @@ func TestAServerDoesNotEchoOperationsItAlreadyHas(t *testing.T) {
 	case <-time.After(2 * time.Second):
 	}
 }
+
+// A document name must be text on every carrier.
+//
+// The rule lived in one carrier's decoder — wire.go refused an invalid name,
+// and gRPC's protobuf refused it for its own reasons — so a name that is not
+// text was accepted over Pipe and refused over the two carriers a deployment
+// actually uses. A rule that holds on some carriers is not a rule: the name
+// reaches a store, a log and JavaScript whichever way it arrived.
+func TestADocumentNameMustBeTextOnEveryCarrier(t *testing.T) {
+	bad := string([]byte{0xff, 0xfe, 'x'})
+	ctx := context.Background()
+	srv := collab.NewServer(collab.Config{Store: collab.NewMemoryStore()})
+	t.Cleanup(func() { _ = srv.Close(context.Background()) })
+	transport, conn := collab.Pipe()
+	go func() { _ = srv.ServePipe(ctx, conn) }()
+	_, err := collab.Join(ctx, transport, collab.ClientConfig{Document: bad, Site: 1})
+	if err == nil {
+		t.Fatal("a name that is not UTF-8 was accepted over the pipe")
+	}
+	// And an ordinary name still works over the same carrier, so this is not a
+	// server that refuses everything.
+	t2, c2 := collab.Pipe()
+	go func() { _ = srv.ServePipe(ctx, c2) }()
+	c, err := collab.Join(ctx, t2, collab.ClientConfig{Document: "ordinaire", Site: 2})
+	if err != nil {
+		t.Fatalf("an ordinary name was refused: %v", err)
+	}
+	_ = c.Close()
+}
