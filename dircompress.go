@@ -82,6 +82,44 @@ var compressedMagic = [...]byte{'c', 'r', 'd', 't', 'z'}
 // a size anybody will notice.
 var checkedMagic = [...]byte{'c', 'r', 'd', 't', 'h'}
 
+// maxExpansion bounds how much larger a document may be than the bytes it was
+// stored as, and leastExpansion is the smallest ceiling that bound may give, so
+// that a very small document is not refused by a ratio.
+//
+// # A decompressor in front of a bound is a bound that is not there
+//
+// crdt's snapshot reader refuses a document longer than it can hold, which is
+// the bound that stops a malformed snapshot from reserving memory nobody has.
+// Compression was then put in FRONT of it, here, so the bytes that reader is
+// handed are already decompressed and the bound applies to what came out rather
+// than to what was read.
+//
+// Measured: a stored blob of 1626 bytes decompressed to a gigabyte and cost
+// 2094 MiB before its checksum refused it. The checksum is over what it
+// decompresses TO, so it cannot fire until the memory has been spent -- the
+// same shape as a bomb that was moved rather than removed.
+//
+// The ratio is measured rather than chosen. Real documents, stored:
+//
+//	one short line             1.1x
+//	a thousand map keys        4.2x
+//	a running loom server     13.9x
+//	a page of prose           20.6x
+//	edited by many hands      21.2x
+//	repeated prose            85.6x
+//
+// The last of those is the widest, and it was not in the first list: it came
+// out of the test written for this, which is the argument for keeping the
+// margin large. 1000 leaves nearly twelve times it, while the blob above --
+// six hundred and sixty thousand times -- is refused after a megabyte and a
+// half instead of two gigabytes.
+const maxExpansion = 1000
+const leastExpansion = 1 << 20
+
+// expansionCeiling caps the ratio's product so it cannot overflow an int on a
+// build where int is 32 bits. This package has lanes on 386, arm and mips.
+const expansionCeiling = 1 << 30
+
 // checkedRawMagic marks a snapshot that carries a checksum and is NOT
 // compressed, which is what a store wants when its medium does better with
 // bytes it can compare than with bytes it cannot.
@@ -177,9 +215,9 @@ func UnpackSnapshot(stored []byte) ([]byte, error) {
 			return nil, fmt.Errorf("collab: a checksummed document is %d bytes, which is not enough for one", len(stored))
 		}
 		want := binary.BigEndian.Uint32(body[:4])
-		out, err := io.ReadAll(brotli.NewReader(bytes.NewReader(body[4:])))
+		out, err := expand(body[4:])
 		if err != nil {
-			return nil, fmt.Errorf("collab: reading a compressed document: %w", err)
+			return nil, err
 		}
 		if got := crc32.Checksum(out, checksumTable); got != want {
 			// Refusing is the whole point: served instead, this would be a
@@ -191,9 +229,9 @@ func UnpackSnapshot(stored []byte) ([]byte, error) {
 	case hasMagic(stored, compressedMagic):
 		// Written before there was a checksum. Read as it is, and it gains one
 		// the next time it is saved.
-		out, err := io.ReadAll(brotli.NewReader(bytes.NewReader(stored[len(compressedMagic):])))
+		out, err := expand(stored[len(compressedMagic):])
 		if err != nil {
-			return nil, fmt.Errorf("collab: reading a compressed document: %w", err)
+			return nil, err
 		}
 		return out, nil
 	default:
@@ -204,4 +242,31 @@ func UnpackSnapshot(stored []byte) ([]byte, error) {
 
 func hasMagic(stored []byte, magic [5]byte) bool {
 	return len(stored) >= len(magic) && string(stored[:len(magic)]) == string(magic[:])
+}
+
+// expand decompresses stored bytes, refusing an expansion no document has.
+//
+// The limit is a ratio rather than a size because the size a document may reach
+// is the size a document may reach: a hundred megabytes of text is a hundred
+// megabytes whether it was stored well or badly. What no document does is come
+// from a thousandth of itself. See [maxExpansion] for the measurements.
+func expand(compressed []byte) ([]byte, error) {
+	limit := int64(len(compressed)) * maxExpansion
+	if limit < leastExpansion {
+		limit = leastExpansion
+	}
+	if limit > expansionCeiling {
+		limit = expansionCeiling
+	}
+	out, err := io.ReadAll(io.LimitReader(brotli.NewReader(bytes.NewReader(compressed)), limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("collab: reading a compressed document: %w", err)
+	}
+	if int64(len(out)) > limit {
+		// Refused before it is read, and before the checksum could refuse it:
+		// the checksum is over what this produces, so it cannot fire until the
+		// memory has already been spent.
+		return nil, fmt.Errorf("collab: a stored document of %d bytes expands past %d, which no document does; refused", len(compressed), limit)
+	}
+	return out, nil
 }
