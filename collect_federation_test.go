@@ -101,12 +101,23 @@ func TestAFederatedServerCollectsOnceTheLinkSaysWhatItHolds(t *testing.T) {
 	})
 }
 
-// And a participant behind the link is not collected past, which is what makes
-// the promise above enough.
+// And a participant behind the link is not collected past — by EITHER server,
+// which is what the name says and what this test used to get wrong.
 //
-// A link says what its own server has applied. The people behind it are
-// participants of that server's document, and that document's own floor is what
-// protects them: the server they ask still holds what it told the peer it had.
+// It asserted that Paris gives the tombstone back while a reader on Lyon is
+// away holding the value, on the argument that "the server they ask still holds
+// what it told the peer it had". That argument has an unstated precondition:
+// the server they ask. Federation exists so that a participant whose server is
+// down can come back on the OTHER one, and a reader that did was answered with
+// a superseded run over the stretch Paris had collected, went on showing a
+// value everybody else had removed, and its version matched Paris's, so no
+// rejoin would ever repair it.
+//
+// A link therefore promises what its own server could COLLECT against, not what
+// its replica holds, and while somebody behind it is quiet it promises nothing.
+// So neither server collects until the reader is back and has said where it is
+// — and then both do, which is the half that keeps this from passing on a
+// federation that collects nothing ever.
 func TestAParticipantBehindALinkIsNotCollectedPast(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -177,24 +188,78 @@ func TestAParticipantBehindALinkIsNotCollectedPast(t *testing.T) {
 	}
 	until(t, "Paris to hold the deletion", func() bool { return tombstones(paris) == 1 })
 	until(t, "Lyon to hold it too", func() bool { return tombstones(lyon) == 1 })
-	until(t, "Paris to give the tombstone back", func() bool {
-		document(paris).collect()
-		return tombstones(paris) == 0
-	})
-	// Lyon must not, however often it is asked: the reader is one of its
-	// participants and has said nothing since it went away.
+
+	// Neither may give it back while the reader is away, however often it is
+	// asked. collect() is synchronous, so this is a decision being made ten
+	// times over rather than a race being waited on.
 	for range 10 {
+		document(paris).collect()
 		document(lyon).collect()
 	}
 	if got := tombstones(lyon); got != 1 {
 		t.Fatalf("Lyon gave back the tombstone its own reader has not delivered: %d left", got)
 	}
+	if got := tombstones(paris); got != 1 {
+		t.Fatalf("Paris gave back a tombstone a reader on Lyon is still holding the value against: %d left", got)
+	}
+	// And the mechanism, so that this is not merely an absence: what the link
+	// promised Paris is behind what Paris holds. The promise it made before the
+	// reader went away still stands and is not withdrawn -- it was true when it
+	// was made -- but it does not cover the deletion, and the link has not
+	// promised anything since, because Lyon would not collect against it
+	// either.
+	d := document(paris)
+	d.mu.Lock()
+	promised := d.seen[crdt.SiteID(9001)]
+	held := d.doc.Version()
+	d.mu.Unlock()
+	cellsPart := crdt.Part{Kind: crdt.PartMap, Name: "cells"}
+	if promised == nil {
+		t.Fatal("the link never promised anything at all, so this proves nothing about the promise")
+	}
+	if promised[cellsPart][1] >= held[cellsPart][1] {
+		t.Fatalf("the link promised %v, which covers the deletion Paris holds at %v", promised, held)
+	}
 
-	// And the reader comes back to a key that is gone, which is the whole point.
+	// The reader comes back to a key that is gone, which is the whole point...
 	away.back()
 	until(t, "the reader to agree that the key is gone", func() bool {
 		_, held := theirs.Get("k")
 		return !held
+	})
+	// ...and now that it has said where it is, both servers may collect. This
+	// is the control: without it the test would pass on a federation that had
+	// simply stopped collecting.
+	// The reader says where it is by writing, which is what a participant that
+	// has come back does. An acknowledgement rides with it.
+	if err := theirs.Set("mine", []byte("back")); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "the author to see the reader's write", func() bool {
+		v, held := cells.Get("mine")
+		return held && string(v) == "back"
+	})
+	until(t, "Lyon to give the tombstone back once its reader is back", func() bool {
+		document(lyon).collect()
+		return tombstones(lyon) == 0
+	})
+	// One more thing said across the link, because the promise rides on
+	// traffic: a link re-promises when it relays or receives, so a federation
+	// that fell silent in the moment the reader's acknowledgement landed tells
+	// its peer on the next thing anybody says. Collection is an economy, not a
+	// correctness requirement, so being a round late costs a tombstone and
+	// nothing else -- and a timer to shave that round would be machinery in
+	// the wrong place.
+	if err := cells.Set("later", []byte("something else")); err != nil {
+		t.Fatal(err)
+	}
+	until(t, "the reader to see it", func() bool {
+		v, held := theirs.Get("later")
+		return held && string(v) == "something else"
+	})
+	until(t, "Paris to give the tombstone back once the link can promise", func() bool {
+		document(paris).collect()
+		return tombstones(paris) == 0
 	})
 }
 

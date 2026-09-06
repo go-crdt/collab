@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -354,5 +355,127 @@ func TestFollowEndsWhenTheDocumentDropsIt(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the link did not end when the document dropped it")
+	}
+}
+
+// A link that cannot send its promise ends, like any other failed send.
+//
+// After relaying a local operation the link tells the peer what its server can
+// now collect against — which is a second send, and the only one whose failure
+// is not the operation's. It ends the link rather than being swallowed: a link
+// that went on relaying while its promises were being dropped would leave the
+// peer's floor stuck with no sign of why.
+func TestFollowEndsWhenItCannotSendItsPromise(t *testing.T) {
+	boom := errors.New("boom")
+	var mu sync.Mutex
+	kinds := []byte{}
+	peer := &brokenPeer{
+		firstMsg: welcomeWith(welcomeMsg{}),
+		sends: func(kind byte, _ any) error {
+			mu.Lock()
+			defer mu.Unlock()
+			kinds = append(kinds, kind)
+			if kind == kindAcknowledge {
+				return boom
+			}
+			return nil
+		},
+	}
+
+	s := NewServer(Config{Store: NewMemoryStore()})
+	t.Cleanup(func() { _ = s.Close(context.Background()) })
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.Follow(ctx, peer, "doc", 42) }()
+
+	// Somebody other than the link writes, so the broadcast reaches it: an
+	// operation the link delivered itself would never come back to it.
+	var doc *document
+	for doc == nil {
+		s.mu.Lock()
+		doc = s.docs["doc"]
+		s.mu.Unlock()
+	}
+	other, err := doc.enrol(joinMsg{Document: "doc", Site: 7}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { doc.leave(context.WithoutCancel(ctx), other) })
+	// Written on a replica of its own, so the document learns something and
+	// broadcasts it: operations it already holds would be absorbed as nothing
+	// and the link would never be given anything to relay.
+	// A map, because a clock floor is a map's: a text-only replica reports no
+	// clocks at all and there would be no floor to promise.
+	mine := crdt.NewComposite(7)
+	cells, err := mine.Map("cells")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cells.Set("k", []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := crdt.AppendPartOps(nil, mine.OpsSince(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := doc.applyOperations(ctx, other, raw); err != nil {
+		t.Fatal(err)
+	}
+	version, err := mine.Version().MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clocks, err := mine.Clocks().MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := doc.acknowledge(other, version, clocks); err != nil {
+		t.Fatal(err)
+	}
+	// A second batch, now that the meet exists: relaying it is what makes the
+	// link promise, and the promise is the send that fails.
+	if _, err := cells.Set("j", []byte("w")); err != nil {
+		t.Fatal(err)
+	}
+	more, err := crdt.AppendPartOps(nil, mine.OpsSince(doc.doc.Version()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := doc.applyOperations(ctx, other, more); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, boom) {
+			t.Fatalf("the link ended with %v, want the failed promise", err)
+		}
+	case <-time.After(10 * time.Second):
+		mu.Lock()
+		what := append([]byte(nil), kinds...)
+		mu.Unlock()
+		t.Fatalf("the link did not end when its promise could not be sent; it sent kinds %v", what)
+	}
+}
+
+// A link may acknowledge itself on a document that was not built by
+// Server.open, which is a shape this package really has: dropping the nil-map
+// guards on the grounds that a link always joins through Server.openAndJoin
+// panicked inside twenty seconds of the suite.
+func TestALinkAcknowledgesItselfOnADocumentBuiltByHand(t *testing.T) {
+	d := &document{name: "by hand", doc: crdt.NewComposite(serverSite)}
+	sub := &subscriber{site: 42, out: make(chan wireMsg, 1)}
+	d.acknowledgeSelf(sub)
+	if _, ok := d.seen[42]; !ok {
+		t.Fatalf("seen = %v, want the link's site recorded", d.seen)
+	}
+	if _, ok := d.reached[42]; !ok {
+		t.Fatalf("reached = %v, want the link's clocks recorded", d.reached)
+	}
+	// And again, now that the maps exist, which is every other call.
+	d.acknowledgeSelf(sub)
+	if len(d.seen) != 1 || len(d.reached) != 1 {
+		t.Fatalf("a second acknowledgement changed the shape: seen=%v reached=%v", d.seen, d.reached)
 	}
 }
