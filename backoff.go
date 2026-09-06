@@ -51,6 +51,11 @@ type backoff struct {
 	// knows there is not one: something that has never been up is down from its
 	// first failure, not from the moment it started.
 	downSince time.Time
+	// upSince is when the session now running came up, and being zero is how it
+	// knows none is. It is what turns "a session was established" into "a
+	// session lasted", which is the difference between a peer that is working
+	// and a peer that is failing fast.
+	upSince time.Time
 }
 
 func newBackoff(policy RetryPolicy) *backoff {
@@ -63,20 +68,39 @@ func newBackoff(policy RetryPolicy) *backoff {
 	}
 }
 
-// up records that a session was really established, which is the only thing
-// that resets the waiting.
+// up records that a session was established, and when.
 //
-// Not "the attempt returned": a peer that accepts a session and drops it in the
-// same breath would reset it every time, which is a hot loop written by
-// somebody who thought they had written a backoff.
+// It does not reset the waiting on its own, and that is the whole point. A peer
+// that accepts a session and drops it in the same breath is establishing one
+// every time, so resetting here is a hot loop written by somebody who thought
+// they had written a backoff — which is what this comment warned about while
+// the code did it. What resets the waiting is a session that LASTED; see
+// [backoff.down].
 func (b *backoff) up() {
-	b.wait, b.attempt, b.downSince = b.policy.Wait, 0, time.Time{}
+	b.upSince = b.now()
 	b.tell(LinkStatus{Up: true})
 }
 
 // down records a failed attempt, says so, and waits. What it returns is what
 // stopped the wait, which is nil unless the context ended.
 func (b *backoff) down(ctx context.Context, err error) error {
+	// A session that lasted at least as long as the wait it would otherwise
+	// have cost is evidence the peer is not failing fast, and it is the only
+	// evidence there is: nothing else distinguishes a link that ran for six
+	// hours from one the peer accepted and dropped, since both come back here
+	// as an error and nothing else.
+	//
+	// The bar is the current interval rather than a constant, so it rises with
+	// the backoff: early on a second of working is enough to believe in, and
+	// after an hour of failing it takes a minute. Nothing to configure, and
+	// nothing that stops being right at a scale nobody tried.
+	if !b.upSince.IsZero() {
+		lasted := b.now().Sub(b.upSince)
+		b.upSince = time.Time{}
+		if lasted >= b.wait {
+			b.wait, b.attempt, b.downSince = b.policy.Wait, 0, time.Time{}
+		}
+	}
 	if b.downSince.IsZero() {
 		b.downSince = b.now()
 	}

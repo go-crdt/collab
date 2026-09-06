@@ -303,6 +303,12 @@ func TestALinkComesBackAndTheDocumentsConvergeAgain(t *testing.T) {
 	slept := make(chan time.Duration)
 	resume := make(chan struct{})
 	link.back.random = func() float64 { return 1 }
+	// A clock the test moves, because the backoff resets on a session that
+	// LASTED and this test compresses an afternoon into milliseconds. Real time
+	// here would make the working session below shorter than the interval it is
+	// supposed to have outlived, which says the opposite of what the test means.
+	clock := &movedClock{now: time.Now()}
+	link.back.now = clock.Now
 	link.back.sleep = func(ctx context.Context, d time.Duration) error {
 		select {
 		case slept <- d:
@@ -347,8 +353,11 @@ func TestALinkComesBackAndTheDocumentsConvergeAgain(t *testing.T) {
 	}
 	awaitText(t, grace, "avant")
 
-	// Now pull the session out from under it, the way a peer that goes away
-	// does.
+	// It worked for a while — longer than the interval it would otherwise have
+	// waited, which is what makes it a recovery rather than a peer failing
+	// fast. Then pull the session out from under it, the way a peer that goes
+	// away does.
+	clock.advance(time.Minute)
 	peer.drop()
 	st := awaited(t, down, "the link to report the dropped session")
 	if st.Attempt != 1 {
@@ -553,5 +562,81 @@ func TestFollowWithRetryRunsTheLoopWithWorkingDefaults(t *testing.T) {
 	}
 	if link.policy.Ceiling != DefaultRetryCeiling {
 		t.Fatalf("a policy that said nothing is capped at %v", link.policy.Ceiling)
+	}
+}
+
+// movedClock is a clock this package's own tests move, so that a session's
+// length is what a test says it is rather than how fast the machine ran. The
+// external tests have one of their own; this file is in the package.
+type movedClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *movedClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *movedClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// A peer that accepts a session and drops it in the same breath does not reset
+// the waiting.
+//
+// This is the hot loop [backoff.up]'s own comment warned about while the code
+// walked into it: up() ran the moment the local replica was caught up, which a
+// peer failing fast does every time, so the interval went back to the policy's
+// first wait on every attempt and the loop hammered a peer that was least able
+// to take it. What resets the waiting is a session that LASTED at least as long
+// as the interval it would otherwise have cost.
+func TestAPeerThatAcceptsAndDropsDoesNotResetTheWaiting(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lasts time.Duration
+		want  []time.Duration
+	}{
+		// Four attempts, each accepted and dropped at once: the interval has to
+		// go on doubling as though the peer had never answered.
+		{"dropped in the same breath", 0, []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}},
+		// The same four, each session outlasting the interval: every one of
+		// them is a recovery, so the waiting starts over each time.
+		{"a session that lasted", time.Minute, []time.Duration{time.Second, time.Second, time.Second, time.Second}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBackoff(RetryPolicy{Wait: time.Second, Ceiling: time.Minute})
+			clock := &movedClock{now: time.Now()}
+			b.now = clock.Now
+			b.random = func() float64 { return 1 } // no jitter: the interval itself
+			// Recorded from the sleep itself, not from b.wait before the call:
+			// down() is where the reset happens, so reading the field first
+			// measures the interval that was about to be discarded. Measured
+			// the wrong way this reported [1s 2s 2s 2s] for a sequence that
+			// really slept a second every time.
+			var slept []time.Duration
+			b.sleep = func(_ context.Context, d time.Duration) error {
+				slept = append(slept, d)
+				return nil
+			}
+			for range tc.want {
+				b.up()
+				clock.advance(tc.lasts)
+				if err := b.down(t.Context(), errors.New("dropped")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(slept) != len(tc.want) {
+				t.Fatalf("slept %v, want %v", slept, tc.want)
+			}
+			for i, want := range tc.want {
+				if slept[i] != want {
+					t.Fatalf("attempt %d waited %v, want %v (the whole sequence was %v)", i+1, slept[i], want, slept)
+				}
+			}
+		})
 	}
 }
