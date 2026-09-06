@@ -370,7 +370,11 @@ func (s *Store) Load(_ context.Context, document string) ([]byte, error) {
 		// is not a new document. See the same refusal in [collab.DirStore].
 		return nil, fmt.Errorf("gitstore: %q is empty in the worktree, which is a torn write and not a new document", document)
 	}
-	return raw, nil
+	snapshot, err := collab.UnpackSnapshot(raw)
+	if err != nil {
+		return nil, fmt.Errorf("gitstore: reading %q: %w", document, err)
+	}
+	return snapshot, nil
 }
 
 // answersFor checks that a document directory which exists is the one this
@@ -519,7 +523,7 @@ func (s *Store) place(document, dir string, snapshot []byte) ([]string, error) {
 	}
 
 	written := []string{path.Join(dir, stateFile)}
-	if err := s.write(written[0], snapshot); err != nil {
+	if err := s.write(written[0], collab.CheckSnapshot(snapshot)); err != nil {
 		return nil, err
 	}
 	texts := make([]string, 0, len(files))
@@ -684,7 +688,11 @@ func (s *Store) At(document, revision string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gitstore: %q: %w", document, err)
 	}
-	return raw, nil
+	snapshot, err := collab.UnpackSnapshot(raw)
+	if err != nil {
+		return nil, fmt.Errorf("gitstore: %q: %w", document, err)
+	}
+	return snapshot, nil
 }
 
 // Documents returns every document the repository holds.
@@ -956,14 +964,22 @@ func (s *Store) Pull(ctx context.Context) error {
 // only they have are the same bytes — and merging a snapshot with itself is the
 // identity, which is the same thing said twice rather than a case to carry.
 func (s *Store) pull(document, dir string, from plumbing.Hash) error {
-	theirs, err := s.repo.fileAt(from, path.Join(dir, stateFile))
+	theirRaw, err := s.repo.fileAt(from, path.Join(dir, stateFile))
+	if err != nil {
+		return fmt.Errorf("gitstore: %q: %w", document, err)
+	}
+	theirs, err := collab.UnpackSnapshot(theirRaw)
 	if err != nil {
 		return fmt.Errorf("gitstore: %q: %w", document, err)
 	}
 	// A state that will not open is not a state this instance does not have —
 	// see [Store.Load]. Merging against nothing would write their side over a
 	// document this instance holds and cannot currently read.
-	ours, err := s.read(path.Join(dir, stateFile))
+	ourRaw, err := s.read(path.Join(dir, stateFile))
+	if err != nil {
+		return fmt.Errorf("gitstore: reading %q: %w", document, err)
+	}
+	ours, err := collab.UnpackSnapshot(ourRaw)
 	if err != nil {
 		return fmt.Errorf("gitstore: reading %q: %w", document, err)
 	}
