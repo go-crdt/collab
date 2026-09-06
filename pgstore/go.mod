@@ -3,13 +3,13 @@ module github.com/go-crdt/collab/pgstore
 go 1.26.4
 
 require (
-	github.com/go-crdt/collab v0.52.0
+	github.com/andybalholm/brotli v1.2.3
+	github.com/go-crdt/collab v0.53.0
 	github.com/go-crdt/crdt v0.46.0
 	github.com/jackc/pgx/v5 v5.10.0
 )
 
 require (
-	github.com/andybalholm/brotli v1.2.3 // indirect
 	github.com/coder/websocket v1.8.15 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
