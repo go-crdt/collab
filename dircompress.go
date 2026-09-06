@@ -82,6 +82,19 @@ var compressedMagic = [...]byte{'c', 'r', 'd', 't', 'z'}
 // a size anybody will notice.
 var checkedMagic = [...]byte{'c', 'r', 'd', 't', 'h'}
 
+// checkedRawMagic marks a snapshot that carries a checksum and is NOT
+// compressed, which is what a store wants when its medium does better with
+// bytes it can compare than with bytes it cannot.
+//
+// A git repository is that medium. It deltas one version of a file against the
+// one before, and two consecutive snapshots of a document differ in their
+// columns rather than throughout, so the delta is small — while brotli output
+// deltas against nothing at all. Measured over 400 saves of a growing document,
+// the repository settled at 215 KB holding raw snapshots, 212 KB holding
+// checked ones, and 394 KB holding packed ones. Compression made the store
+// whose whole point is a git repository 83% larger.
+var checkedRawMagic = [...]byte{'c', 'r', 'd', 't', 'k'}
+
 // checksumTable is Castagnoli, built once.
 var checksumTable = crc32.MakeTable(crc32.Castagnoli)
 
@@ -121,8 +134,25 @@ func PackSnapshot(snapshot []byte) []byte {
 	return out.Bytes()
 }
 
-// UnpackSnapshot reverses [PackSnapshot], and passes through anything that was
-// not packed — which is every document written before this existed. A store
+// CheckSnapshot gives a snapshot a checksum and leaves it uncompressed, for a
+// [Store] on a medium that stores differences between versions. [UnpackSnapshot]
+// reverses this as well as [PackSnapshot]; the two are told apart by what they
+// write at the front, so a store may change from one to the other and still
+// read what it already holds.
+//
+// Prefer [PackSnapshot] unless the medium is one of these. A snapshot is mostly
+// columns of identities and offsets, and it compresses about 13.9× — but a
+// medium that deltas versions loses more to compression than compression saves,
+// and the numbers for git are on [checkedRawMagic].
+func CheckSnapshot(snapshot []byte) []byte {
+	out := make([]byte, 0, len(checkedRawMagic)+4+len(snapshot))
+	out = append(out, checkedRawMagic[:]...)
+	out = binary.BigEndian.AppendUint32(out, crc32.Checksum(snapshot, checksumTable))
+	return append(out, snapshot...)
+}
+
+// UnpackSnapshot reverses [PackSnapshot] and [CheckSnapshot], and passes through
+// anything that was written by neither — which is every document written before this existed. A store
 // that starts calling this pair reads what it already holds, and its documents
 // gain the checksum one save at a time, with nothing to migrate.
 //
@@ -130,6 +160,17 @@ func PackSnapshot(snapshot []byte) []byte {
 // served instead, they would be a document nobody wrote.
 func UnpackSnapshot(stored []byte) ([]byte, error) {
 	switch {
+	case hasMagic(stored, checkedRawMagic):
+		body := stored[len(checkedRawMagic):]
+		if len(body) < 4 {
+			return nil, fmt.Errorf("collab: a checksummed document is %d bytes, which is not enough for one", len(stored))
+		}
+		want := binary.BigEndian.Uint32(body[:4])
+		out := body[4:]
+		if got := crc32.Checksum(out, checksumTable); got != want {
+			return nil, fmt.Errorf("collab: a stored document does not match its checksum (%08x, want %08x); it has been corrupted", got, want)
+		}
+		return out, nil
 	case hasMagic(stored, checkedMagic):
 		body := stored[len(checkedMagic):]
 		if len(body) < 4 {
