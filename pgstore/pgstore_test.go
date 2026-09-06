@@ -49,6 +49,14 @@ func connect(t *testing.T) *sql.DB {
 // tests neither see nor disturb each other.
 func fresh(t *testing.T, db *sql.DB) *pgstore.Store {
 	t.Helper()
+	store, _ := freshNamed(t, db)
+	return store
+}
+
+// freshNamed is [fresh], and also says which table it made, for a test that has
+// to reach past the store and change the bytes underneath it.
+func freshNamed(t *testing.T, db *sql.DB) (*pgstore.Store, string) {
+	t.Helper()
 	table := "collab_test_" + t.Name()
 	for i, r := range table {
 		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '_' || i > 0 && r >= '0' && r <= '9') {
@@ -67,7 +75,7 @@ func fresh(t *testing.T, db *sql.DB) *pgstore.Store {
 			t.Errorf("dropping %s: %v", table, err)
 		}
 	})
-	return store
+	return store, table
 }
 
 func TestRoundTrip(t *testing.T) {

@@ -2,8 +2,7 @@
 //
 // It implements [github.com/go-crdt/collab.Store] over a plain *sql.DB and
 // brings no driver of its own, so the caller chooses one — pgx, lib/pq, or a
-// pool wrapped to look like either. That also keeps this package's dependencies
-// to the standard library.
+// pool wrapped to look like either.
 //
 //	db, err := sql.Open("pgx", os.Getenv("DATABASE_URL"))
 //	store, err := pgstore.New(db)
@@ -15,6 +14,22 @@
 // restored from one can still serve a participant that has been away. The cost
 // is that saving writes the whole document, so a server holding very large ones
 // should call [collab.Server.Flush] on a timer rather than after every change.
+//
+// # What is in the row
+//
+// The row holds [collab.PackSnapshot] of the snapshot: compressed, with a
+// checksum of what it decompresses to. Documents from a running loom server
+// compressed 13.9× that way, and the checksum is there because the cluster may
+// not have one of its own. Page checksums are what a database is expected to
+// bring, and PostgreSQL brings them only when it was told to: an initdb with no
+// flags leaves "Data page checksum version: 0" on 17 and 1 on 18, measured on
+// both. Every cluster created before 18, and every one upgraded in place from
+// such a cluster, has none unless somebody ran pg_checksums --enable.
+//
+// Rows written before this are read as they are and gain the frame the next
+// time they are saved, so there is nothing to migrate. Reading is the half that
+// matters: a row that does not match its checksum is refused rather than served
+// as a document nobody wrote.
 package pgstore
 
 import (
@@ -22,6 +37,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"github.com/go-crdt/collab"
 )
 
 // DefaultTable is the table documents are kept in.
@@ -139,7 +156,19 @@ func (s *Store) Load(ctx context.Context, document string) ([]byte, error) {
 	case err != nil:
 		return nil, fmt.Errorf("pgstore: reading %q: %w", document, err)
 	}
-	return snapshot, nil
+	if len(snapshot) == 0 {
+		// There is a row, and it holds nothing. That is not a new document --
+		// nil is how a store says that, and there is no row for it -- it is a
+		// row somebody or something emptied. Answering nil would open an empty
+		// replica and the next save would make the loss permanent. See
+		// [collab.Store] for the contract.
+		return nil, fmt.Errorf("pgstore: document %q has an empty row, which is not a new document", document)
+	}
+	out, err := collab.UnpackSnapshot(snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("pgstore: reading %q: %w", document, err)
+	}
+	return out, nil
 }
 
 // Save records the current snapshot, replacing any previous one.
@@ -148,7 +177,7 @@ func (s *Store) Save(ctx context.Context, document string, snapshot []byte) erro
 		INSERT INTO %s (document, snapshot) VALUES ($1, $2)
 		ON CONFLICT (document) DO UPDATE
 			SET snapshot = EXCLUDED.snapshot, updated_at = now()`, s.table),
-		document, snapshot)
+		document, collab.PackSnapshot(snapshot))
 	if err != nil {
 		return fmt.Errorf("pgstore: writing %q: %w", document, err)
 	}
