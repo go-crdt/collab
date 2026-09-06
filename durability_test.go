@@ -43,6 +43,14 @@ func newCountingStore() *countingStore {
 	}
 }
 
+// fails makes Save refuse this document from now on, under the lock the
+// housekeeping goroutine reads it with.
+func (s *countingStore) fails(document string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failOn = document
+}
+
 func (s *countingStore) Load(ctx context.Context, document string) ([]byte, error) {
 	return s.inner.Load(ctx, document)
 }
@@ -290,8 +298,9 @@ func TestASessionIsNeverLeftEditingADroppedReplica(t *testing.T) {
 }
 
 // A document that cannot be saved as it is evicted has nobody to return an
-// error to, and cannot be kept — a session may already have opened a fresh
-// replica of it. So it is reported where an operator can see it.
+// error to, so it is reported where an operator can see it. It is also KEPT:
+// see TestAnEvictionThatCannotSaveKeepsTheWork below, which is the half this
+// one does not cover.
 func TestAnEvictionThatCannotSaveIsReported(t *testing.T) {
 	store := newCountingStore()
 	store.failOn = "doomed"
@@ -450,4 +459,131 @@ func TestAnEditMadeJustBeforeClosingIsNotLost(t *testing.T) {
 		t.Fatal("no session got far enough to write, so nothing was tested")
 	}
 	t.Logf("all %d comments survived being written just before a close", opened)
+}
+
+// A store that is briefly unwell must not cost anybody their work.
+//
+// The last participant leaves, the document goes idle, and the save at eviction
+// is refused. Dropping the replica then — which is what this used to do — turns
+// a store hiccup into edits that no longer exist: everything since the last
+// successful save goes, and the only trace is a callback fired after the fact.
+//
+// So the replica stays, and the next housekeeping pass tries again. The control
+// is the same walk against a healthy store, which must still evict — otherwise
+// this test would pass on a server that never evicted anything.
+func TestAnEvictionThatCannotSaveKeepsTheWork(t *testing.T) {
+	for _, outage := range []bool{false, true} {
+		name := "control: the store is healthy and the document goes"
+		if outage {
+			name = "the store refuses and the document stays"
+		}
+		t.Run(name, func(t *testing.T) {
+			store := newCountingStore()
+			clock := &testClock{now: time.Now()}
+			told := make(chan string, 4)
+			srv, conn := serveClocked(t, clock, collab.Config{
+				Store:      store,
+				EvictAfter: time.Minute,
+				OnEvictError: func(document string, err error) {
+					select {
+					case told <- document + ": " + err.Error():
+					default:
+					}
+				},
+			})
+			t.Cleanup(func() { _ = srv.Close(context.Background()) })
+
+			c := join(t, conn, collab.ClientConfig{Document: "d", Site: 1})
+			body, err := c.Text("body")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := body.Insert(0, "first"); err != nil {
+				t.Fatal(err)
+			}
+			if err := srv.Flush(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			// "first" is durable. This is the edit an outage would cost.
+			if err := body.Insert(5, " second"); err != nil {
+				t.Fatal(err)
+			}
+			if outage {
+				store.fails("d")
+			}
+			if err := c.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store.awaitAttempt(t, "the server to notice the departure")
+			clock.advance(2 * time.Minute)
+			srv.Housekeep(t.Context(), time.Minute)
+
+			if !outage {
+				// The control: a healthy store evicts, and holds everything.
+				if got := textIn(t, store, "d"); got != "first second" {
+					t.Fatalf("after a healthy eviction the store holds %q", got)
+				}
+				return
+			}
+			select {
+			case got := <-told:
+				if !strings.Contains(got, "d") {
+					t.Fatalf("the report was %q", got)
+				}
+			case <-time.After(settle):
+				t.Fatal("the refused save was not reported")
+			}
+			// The kept replica is still reachable, which is the other half: a
+			// participant joining now must find the edit the store refused,
+			// not a document reloaded from what the store last took. Without
+			// unmarking the document this join never returns.
+			done := make(chan string, 1)
+			go func() {
+				back := join(t, conn, collab.ClientConfig{Document: "d", Site: 2})
+				body, err := back.Text("body")
+				if err != nil {
+					done <- "Text: " + err.Error()
+					return
+				}
+				done <- body.String()
+			}()
+			select {
+			case got := <-done:
+				if got != "first second" {
+					t.Fatalf("a participant joining the kept document reads %q", got)
+				}
+			case <-time.After(settle):
+				t.Fatal("joining the kept document never returned")
+			}
+
+			// The work is still here: the store comes back, the next pass saves
+			// it, and what lands is the edit the outage would have taken.
+			store.fails("")
+			srv.Housekeep(t.Context(), time.Minute)
+			if got := textIn(t, store, "d"); got != "first second" {
+				t.Fatalf("after the store came back it holds %q, want the edit made during the outage", got)
+			}
+		})
+	}
+}
+
+// textIn reads the body of what a store holds for a document.
+func textIn(t *testing.T, store collab.Store, document string) string {
+	t.Helper()
+	raw, err := store.Load(t.Context(), document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) == 0 {
+		return ""
+	}
+	doc, err := crdt.LoadComposite(99, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := doc.Text("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return text.String()
 }
