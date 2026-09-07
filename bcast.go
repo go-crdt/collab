@@ -112,11 +112,26 @@ const hostBeacon = 40 * time.Millisecond
 // ErrHostSuperseded is why a host's serve loop returned: another tab with a lower
 // identifier — the one the tie-break gives priority — announced itself as host,
 // so this tab steps down to let that one hold the room. It is the self-healing
-// half of the election: even if two tabs ever both reach [RoleHost], exactly one
-// keeps the document and the other yields, rather than the two drifting apart as
-// separate documents. A caller that hosts should, on this error, re-join the room
-// (it will now find the surviving host answering) rather than treat it as a
-// failure.
+// half of the election: when two tabs both reach [RoleHost], exactly one keeps
+// the document and the other yields, rather than the two drifting apart as
+// separate documents.
+//
+// # A caller MUST re-join on it
+//
+// Not "may", and not eventually: on this error the room has one host and this
+// tab is not it, so a tab that only tears down is a tab holding nobody. A
+// consumer that did exactly that showed "Connected" to a user who was alone in
+// a room of two, until they clicked again -- the same-browser split-brain the
+// election exists to prevent, arrived at from the other side. Re-joining finds
+// the surviving host answering, because it was answering before this error was
+// sent.
+//
+// # It is not rare
+//
+// [electRole] holds only while frames posted are also read inside its window,
+// and a loaded machine does not read them. A consumer's CI met this on EVERY run
+// for a week while its comment called the race vanishingly unlikely. Treat it as
+// a path, not a corner.
 var ErrHostSuperseded = errors.New("collab: another tab is hosting this room")
 
 // A Role is which side of the protocol a tab took, decided by [electRole].
@@ -299,8 +314,20 @@ func (bc *busConn) post(ctl byte, to uint64, payload []byte) {
 //
 // Because the tie is broken by the lowest identifier and every tab re-announces
 // itself through the window, exactly one tab among any set that overlaps hosts,
-// and every other joins it. A tab opening outside the window finds the host's
-// beacon or a welcome at once. ctx ending before the window returns its error.
+// and every other joins it -- SO LONG AS what is posted is also READ within the
+// window. Re-announcing makes a hello reach every tab; it does not make a tab
+// read it. A machine loaded enough to leave the frames in a queue closes both
+// windows having heard nothing, and both tabs elect themselves.
+//
+// That is not a corner. It is what a browser running wasm on a CI runner does,
+// and it reddened a consumer's browser proofs for a week --
+// TestTwoTabsThatReadNothingInTimeBothHostAndTheRoomHeals reproduces it here by
+// holding the bus. What keeps the room to one document then is not this
+// function but [ErrHostSuperseded], which is why that is load-bearing rather
+// than a backstop.
+//
+// A tab opening outside the window finds the host's beacon or a welcome at
+// once. ctx ending before the window returns its error.
 func electRole(ctx context.Context, bc *busConn, window time.Duration) (Role, error) {
 	ectx, cancel := context.WithTimeout(ctx, window)
 	defer cancel()
