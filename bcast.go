@@ -116,7 +116,7 @@ const hostBeacon = 40 * time.Millisecond
 // the document and the other yields, rather than the two drifting apart as
 // separate documents.
 //
-// # A caller MUST re-join on it
+// # A caller MUST re-join on it, CARRYING WHAT IT HELD
 //
 // Not "may", and not eventually: on this error the room has one host and this
 // tab is not it, so a tab that only tears down is a tab holding nobody. A
@@ -125,6 +125,17 @@ const hostBeacon = 40 * time.Millisecond
 // election exists to prevent, arrived at from the other side. Re-joining finds
 // the surviving host answering, because it was answering before this error was
 // sent.
+//
+// And re-join with [Client.Snapshot] in [ClientConfig.Resume], not empty-handed.
+// This tab was the room: its buffer was the seed and somebody may have typed
+// into it. Arriving with nothing means adopting the survivor's document and
+// losing that -- silently, and decided by which identifier happened to be
+// lower, which is a tie-break that exists for something else.
+//
+// Nothing new travels to make that work. Resume is documented as keeping the
+// work done while disconnected, and a tab just superseded is a tab that was
+// disconnected; the union does the rest. See
+// TestASupersededHostKeepsItsWorkByBringingIt.
 //
 // # It is not rare
 //
