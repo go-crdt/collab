@@ -42,6 +42,19 @@ import (
 //
 // A deployment that federates wants a policy about the relationship instead:
 // which sites a given link may speak for. See [Config.AuthorizeOperations].
+//
+// # It refuses a participant that resumes under a fresh site
+//
+// [ClientConfig.Resume] carries what a participant did while it was away, and
+// those operations were written by the site it had THEN. Coming back under a
+// new one makes them somebody else's as far as this policy can tell, so they
+// are refused -- and the tab keeps showing them, because they are in its own
+// replica and nowhere else. It looks like it worked.
+//
+// So resume as the site that wrote the work. Measured, in
+// TestResumingUnderAFreshSiteLosesTheWorkToOwnSiteOnly: with no policy a fresh
+// site's resume arrives, with this policy it does not, and with the authoring
+// site it does.
 func OwnSiteOnly(_ context.Context, _ string, from crdt.SiteID, batches []crdt.PartOps) error {
 	for _, batch := range batches {
 		for _, op := range batch.Text {
