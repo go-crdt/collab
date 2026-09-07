@@ -34,6 +34,12 @@ type ClientConfig struct {
 	// disconnected and is sent only what it missed, rather than the whole
 	// document.
 	//
+	// Come back as the site that wrote it. These operations carry the Site the
+	// participant had when it made them, so a server running [OwnSiteOnly] --
+	// or any policy about who may speak for whom -- refuses them under a fresh
+	// identity, and refuses them quietly enough that the tab goes on showing
+	// work nowhere else has.
+	//
 	// A server that can no longer say what this snapshot missed refuses the
 	// join rather than answering with a history that has a hole in it: that is
 	// a document purged past this version, and the error carries
