@@ -33,14 +33,30 @@ import (
 //
 // What it found, on an Apple M4 Max over an in-memory connection:
 //
-//	participants   ns/participant/edit   bytes/participant
-//	          10                 5 636             237 906
-//	         100                 2 313              28 305
-//	        1000                 2 444               3 076
+//	participants   ns/participant/edit   B/participant/join
+//	          10                 3 575              260 875
+//	         100                 2 652               47 418
+//	        1000                 2 501               26 660
 //
-// The marginal cost settles at about 3 KB and 2.4 µs a participant. Both are
-// flat from a hundred upwards, which says the fan-out is linear and nothing
-// about it degrades with the number watching.
+// Time settles at about 2.5 µs a participant and is flat from a hundred
+// upwards, which says the fan-out is linear and nothing about it degrades with
+// the number watching.
+//
+// The bytes are not flat and are not meant to be: they are what it costs to
+// BRING a participant in, so the fixed cost of the document amortises as more
+// arrive, settling near 27 KB.
+//
+// # The bytes column used to be unsound
+//
+// It reported a HeapAlloc delta -- live heap after a GC, minus live heap after
+// an earlier GC -- which unrelated frees can push BELOW ZERO, and did: on the
+// machine this table was re-measured on it gave -2 983 870 at ten participants
+// and -13 167 at a thousand. The old table read 237 906 / 28 305 / 3 076 from
+// one run of that, and the sentence under it concluded "about 3 KB a
+// participant", which is nine times under what a sound counter says.
+//
+// A quantity that can come out negative is not a measurement. It is TotalAlloc
+// now, which only rises.
 //
 // In load: one core sustains roughly 400 000 participant-edits a second. A
 // document with a thousand people watching and five of them typing at ten
@@ -111,8 +127,25 @@ func BenchmarkFanOut(b *testing.B) {
 
 			runtime.GC()
 			runtime.ReadMemStats(&after)
-			held := int64(after.HeapAlloc) - int64(before.HeapAlloc)
-			perParticipant := float64(held) / float64(n)
+			// TotalAlloc, not HeapAlloc.
+			//
+			// HeapAlloc after a GC is what is still live, so the difference
+			// between two readings is a delta that unrelated frees can push
+			// BELOW ZERO -- and did: this reported -2 983 870 B/participant at
+			// ten and -13 167 at a thousand. A quantity that comes out negative
+			// is not a measurement, and the table in the comment above was read
+			// off one run of it.
+			//
+			// TotalAlloc only ever rises, so its difference cannot be
+			// negative. These readings bracket the SETUP -- the loop that joins
+			// n participants -- so what this reports is what it costs to bring
+			// one participant into a document, garbage included. That is the
+			// number a deployment sizes with. What a participant RETAINS once
+			// it is idle is a different question, and this is not it: measuring
+			// that means watching the heap fall when they leave, which a
+			// benchmark's setup is the wrong place for.
+			allocated := int64(after.TotalAlloc) - int64(before.TotalAlloc)
+			perParticipant := float64(allocated) / float64(n)
 
 			writer, err := clients[0].Text("body")
 			if err != nil {
@@ -141,7 +174,7 @@ func BenchmarkFanOut(b *testing.B) {
 				}
 			}
 			b.StopTimer()
-			b.ReportMetric(perParticipant, "B/participant")
+			b.ReportMetric(perParticipant, "B/participant/join")
 			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(n), "ns/participant/edit")
 		})
 	}

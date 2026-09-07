@@ -94,6 +94,28 @@
 //     somebody who writes them. [PackSnapshot] and [CheckSnapshot] carry a
 //     CRC32C, and anything that can write a stored document can recompute one.
 //
+// # What a session costs, since nothing here bounds how many there are
+//
+// [Config] has no capacity limit, on purpose: this package decides who may be
+// in a document, not how many machines are worth buying. A deployment bounds
+// that outside — a reverse proxy, a connection limit, a quota — and to do that
+// it needs the numbers, which are these.
+//
+// A participant is cheap in time and not free in memory. Measured over an
+// in-memory connection on one document: about 2.5 µs a participant an edit,
+// flat from a hundred upwards, so a thousand watching and five typing at ten
+// keystrokes a second is roughly 12% of a core. Bringing one in costs about
+// 27 KB at a thousand, more below that while the document's own cost
+// amortises. See BenchmarkFanOut for the table and for what its bytes column
+// does and does not answer.
+//
+// One message is not cheap. A session may send up to a gigabyte in a single
+// message, because a document's whole snapshot travels in one and that bound is
+// the largest document a session may open — not the size of an edit. Nothing
+// caps the sum of those across sessions, so the arithmetic a deployment has to
+// do is per-session peak times sessions allowed, and the lever is the second
+// factor.
+//
 // And what a participant can do once it is in: everything a replica can do to a
 // document it holds. It can write anywhere and delete anything — a CRDT
 // converges on what it is told, and does not adjudicate — and it can hand over
