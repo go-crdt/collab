@@ -40,6 +40,17 @@ import (
 // speaking, so the server cannot choose for a deployment -- which is why this
 // is a policy to install rather than a rule.
 //
+// The side that must not have it is the FOLLOWER. What arrives over its link
+// names sites it never authorised, so this refuses them and the link ends. The
+// server being FOLLOWED sees an ordinary session and is untroubled: it may run
+// this policy while federating. Measured all three ways in
+// TestALinkCarryingOtherSitesMeetsOwnSiteOnly.
+//
+// When it does refuse a link, it refuses loudly -- the link's session ends at
+// once and the error names both sites, "a session of site 9001 sent an
+// operation made by site 1", rather than leaving a link that retries forever
+// and a document that never fills.
+//
 // A deployment that federates wants a policy about the relationship instead:
 // which sites a given link may speak for. See [Config.AuthorizeOperations].
 //
