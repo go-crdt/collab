@@ -28,8 +28,8 @@ github.com/emirpasic/gods v1.18.1 h1:FXtiHYKDGKCW2KzwZKx0iC0PQmdlorYgdFG9jPXJ1Bc
 github.com/emirpasic/gods v1.18.1/go.mod h1:8tpGGwCnJ5H4r6BWwaV6OrWmMoPhUl5jm/FMNAnJvWQ=
 github.com/gliderlabs/ssh v0.3.8 h1:a4YXD1V7xMF9g5nTkdfnja3Sxy1PVDCj1Zg4Wb8vY6c=
 github.com/gliderlabs/ssh v0.3.8/go.mod h1:xYoytBv1sV0aL3CavoDuJIQNURXkkfPA/wxQ1pL1fAU=
-github.com/go-crdt/collab v0.58.0 h1:9A2YV66ltV0zuYl6Q0NlOpvzxUo5hmURhVZ/qFZzpVQ=
-github.com/go-crdt/collab v0.58.0/go.mod h1:dmtPYbUZDAfWf550XMRxBFrTYweOdhtG/pV8nVNtdVA=
+github.com/go-crdt/collab v0.59.0 h1:IlNy6H27EUKZHWVzlGsIR2HGG90NlS23yte2h1MPk64=
+github.com/go-crdt/collab v0.59.0/go.mod h1:dmtPYbUZDAfWf550XMRxBFrTYweOdhtG/pV8nVNtdVA=
 github.com/go-crdt/crdt v0.46.0 h1:Ppup+K/zLvM1trmBz83ENvEVcOTi3fFGnihvJMRL2yc=
 github.com/go-crdt/crdt v0.46.0/go.mod h1:vbfvns9B9FUaMi2sPKzMYttKmbxfgO7EK3Yu82SrlYw=
 github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 h1:+zs/tPmkDkHx3U66DAb0lQFJrpS6731Oaa12ikc+DiI=
