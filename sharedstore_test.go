@@ -62,7 +62,18 @@ func TestTwoServersOverOneStoreLoseTheEarlierSave(t *testing.T) {
 			_ = srvA.Close(context.Background())
 			_ = srvB.Close(context.Background())
 		})
-		awaitOperation(t, ctx, srvA, store, "AAAA")
+		// Both operations have to have REACHED their server before either saves,
+		// and the writer's own replica cannot say so -- it holds the edit whether
+		// it was sent or not. So a second participant on each server is asked,
+		// which can only see what that server holds.
+		//
+		// The first version of this waited only for A, and flushed B while B's
+		// server still had nothing: the flush was a no-op, the store kept AAAA,
+		// and the test failed on three CI lanes claiming Save had learned to
+		// merge. It had not. Waiting by saving was not an option either -- saving
+		// is the thing under test.
+		awaitOnServer(t, ctx, srvA, 11, "AAAA")
+		awaitOnServer(t, ctx, srvB, 22, "BBBB")
 
 		if err := srvA.Flush(ctx); err != nil {
 			t.Fatal(err)
@@ -162,4 +173,35 @@ func storedBody(t *testing.T, store Store) string {
 		t.Fatalf("the stored document has no body: %v", err)
 	}
 	return body.String()
+}
+
+// awaitOnServer waits until a server holds text, asked through a second
+// participant of its own.
+//
+// A writer's client is no witness: [crdt] applies an edit locally and sends it,
+// so the writer shows text before the server has it. Another participant on the
+// same server can only show what that server delivered. See
+// TestTwoServersOverOneStoreLoseTheEarlierSave for the failure that taught this
+// test the difference.
+func awaitOnServer(t *testing.T, ctx context.Context, srv *Server, site crdt.SiteID, text string) {
+	t.Helper()
+	tr, sc := Pipe()
+	go func() { _ = srv.ServePipe(ctx, sc) }()
+	witness, err := Join(ctx, tr, ClientConfig{Document: "paper", Site: site})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = witness.Close() })
+	body, err := witness.Text("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(body.String(), text) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%q never reached its server; a participant there sees %q", text, body.String())
 }
