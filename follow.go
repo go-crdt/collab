@@ -132,6 +132,13 @@ func (s *Server) follow(ctx context.Context, peer Transport, document string, as
 	}
 	defer local.leave(context.WithoutCancel(ctx), sub)
 
+	// Ask to be woken when somebody behind this link acknowledges, which is the
+	// third thing that moves what this link can promise and the only one that is
+	// not an operation. See [document.wakeLinks].
+	local.mu.Lock()
+	sub.promiseMoved = make(chan struct{}, 1)
+	local.mu.Unlock()
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -227,6 +234,16 @@ func (s *Server) follow(ctx context.Context, peer Transport, document string, as
 			var out wireMsg
 			select {
 			case out = <-acks:
+			case <-sub.promiseMoved:
+				// Somebody behind this link acknowledged. Nothing is being
+				// relayed, so there is no operation to send and no
+				// acknowledgeSelf to do -- only the promise, which may now cover
+				// more than it did.
+				raw, clocks, ok := local.promise()
+				if !ok {
+					continue
+				}
+				out = wireMsg{kind: kindAcknowledge, msg: ackMsg{Version: raw, Clocks: clocks}}
 			case msg, open := <-sub.out:
 				if !open {
 					sent <- nil

@@ -130,8 +130,37 @@ func (d *document) acknowledge(sub *subscriber, raw, raw2 []byte) error {
 		d.reached = map[crdt.SiteID]crdt.CompositeClocks{}
 	}
 	d.reached[sub.site] = clocks
+	d.wakeLinks(sub)
 	d.mu.Unlock()
 	return nil
+}
+
+// wakeLinks tells every link but the one that just spoke that the meet may have
+// moved. Called with d.mu held.
+//
+// An acknowledgement is the other thing that changes what a link can promise,
+// and before this nothing carried it. A link computes its promise when it
+// relays an operation and when it applies one, both of which are edges; a
+// participant saying "I have it now" is neither, so a promise that became
+// available after the last operation was never sent, and the peer's floor
+// stayed where that edge had left it -- for ever, in a document that had gone
+// quiet.
+//
+// Measured before this: one operation, the reader's acknowledgement, then
+// silence, and the peer did not know the link's promise three seconds later or
+// ever. It cost collection rather than correctness -- a floor that does not move
+// keeps work -- which is why it was invisible, and it is the same failure
+// Config.CollectEvery had in a federation before a link acknowledged at all.
+func (d *document) wakeLinks(speaker *subscriber) {
+	for sub := range d.subs {
+		if sub == speaker || sub.promiseMoved == nil {
+			continue
+		}
+		select {
+		case sub.promiseMoved <- struct{}{}:
+		default: // already awake; one wake is enough
+		}
+	}
 }
 
 // collectable is the version this document may be collected against: the meet
