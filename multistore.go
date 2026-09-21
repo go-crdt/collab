@@ -71,6 +71,21 @@ var ErrUnmergeable = errors.New("collab: neither snapshot can serve the other")
 // state: the encoding is canonical, both results hold the same operations, and
 // the argument order is not among the inputs.
 //
+// # One side empty is not a merge
+//
+// With either side empty the other is returned VERBATIM, unread. Nothing is
+// decoded, so nothing is validated: a store holding bytes no reader accepts
+// gets those bytes back with a nil error, and [Tiered] then writes them to the
+// tier that was empty.
+//
+// That is deliberate rather than an oversight. The common case for an empty
+// side is a tier that has not been filled yet, and decoding a whole document to
+// confirm what will be written back unchanged would put that cost on every read
+// of a cold tier -- to catch a corruption the framing's checksum already
+// refuses one layer down ([UnpackSnapshot]). What it means for a caller is that
+// a nil error here is not a statement about the bytes unless BOTH sides were
+// documents.
+//
 // # What it cannot carry, it names
 //
 // It returns [ErrUnmergeable] when neither side can serve the other, and passes
