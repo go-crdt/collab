@@ -25,6 +25,13 @@ type Store interface {
 	Load(ctx context.Context, document string) ([]byte, error)
 
 	// Save records the current snapshot, replacing any previous one.
+	//
+	// Replacing, and not merging: what a server hands over is its whole
+	// replica, and the store is not asked to combine it with what is there.
+	// That is why two servers holding one document over one store lose the
+	// earlier save — see the package documentation on why a shared store is not
+	// how to run two of them, and [MergeSnapshots] for the combining a caller
+	// does when it has two snapshots and means to keep both.
 	Save(ctx context.Context, document string, snapshot []byte) error
 }
 
