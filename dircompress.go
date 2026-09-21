@@ -244,6 +244,31 @@ func hasMagic(stored []byte, magic [5]byte) bool {
 	return len(stored) >= len(magic) && string(stored[:len(magic)]) == string(magic[:])
 }
 
+// expansionLimit is how far a stored document of this many bytes is allowed to
+// expand: the ratio, with a floor under it and a ceiling over it.
+//
+// It is its own function because the ceiling could not be reached from data. A
+// blob has to exceed a megabyte of COMPRESSED bytes before the ratio passes the
+// ceiling, and no test was going to build one, so that clamp went unexecuted --
+// hidden, because [go tool cover] prints a total rounded to one decimal and the
+// gate read that string: one uncovered statement in this package rounds to
+// "100.0%" and passes a gate named for 100%. The gate now counts uncovered
+// blocks in the profile instead, and this is the statement it was hiding.
+//
+// Stated in numbers rather than exercised through brotli, which is the honest
+// way round: what is being asserted is the arithmetic, and the decompressor is
+// not part of it.
+func expansionLimit(compressed int) int64 {
+	limit := int64(compressed) * maxExpansion
+	if limit < leastExpansion {
+		return leastExpansion
+	}
+	if limit > expansionCeiling {
+		return expansionCeiling
+	}
+	return limit
+}
+
 // expand decompresses stored bytes, refusing an expansion no document has.
 //
 // The limit is a ratio rather than a size because the size a document may reach
@@ -251,13 +276,7 @@ func hasMagic(stored []byte, magic [5]byte) bool {
 // megabytes whether it was stored well or badly. What no document does is come
 // from a thousandth of itself. See [maxExpansion] for the measurements.
 func expand(compressed []byte) ([]byte, error) {
-	limit := int64(len(compressed)) * maxExpansion
-	if limit < leastExpansion {
-		limit = leastExpansion
-	}
-	if limit > expansionCeiling {
-		limit = expansionCeiling
-	}
+	limit := expansionLimit(len(compressed))
 	out, err := io.ReadAll(io.LimitReader(brotli.NewReader(bytes.NewReader(compressed)), limit+1))
 	if err != nil {
 		return nil, fmt.Errorf("collab: reading a compressed document: %w", err)
