@@ -110,3 +110,41 @@ func TestATinyDocumentIsNotRefusedByTheRatio(t *testing.T) {
 		t.Fatal("it came back as something else")
 	}
 }
+
+// The three regimes of [expansionLimit], in numbers.
+//
+// The ceiling was the statement the coverage gate was hiding: reaching it from
+// data needs a compressed blob over a megabyte, which no test was going to
+// build, so it sat unexecuted while the gate read a rounded "100.0%". Asserting
+// the arithmetic directly is also the honest way round — what is being bounded
+// is an allocation, and brotli is not part of that question.
+func TestExpansionLimitHasAFloorARatioAndACeiling(t *testing.T) {
+	for _, c := range []struct {
+		what       string
+		compressed int
+		want       int64
+	}{
+		{"nothing at all still allows the floor", 0, leastExpansion},
+		{"a small document gets the floor, not a thousand bytes", 1, leastExpansion},
+		// The floor holds until the ratio passes it, which is at exactly
+		// leastExpansion/maxExpansion bytes.
+		{"just below where the ratio takes over", leastExpansion/maxExpansion - 1, leastExpansion},
+		{"where the ratio takes over", leastExpansion / maxExpansion, leastExpansion},
+		{"the ratio, once it is the larger", leastExpansion/maxExpansion + 1000, int64(leastExpansion/maxExpansion+1000) * maxExpansion},
+		// And the ceiling, which is what a megabyte of compressed bytes reaches.
+		{"just below the ceiling", expansionCeiling/maxExpansion - 1, int64(expansionCeiling/maxExpansion-1) * maxExpansion},
+		// Integer division truncates, so this one is still the ratio: the
+		// clamp begins at the next byte up. Asserted rather than assumed --
+		// the first draft of this table expected the ceiling here and was
+		// wrong.
+		{"the last size the ratio still governs", expansionCeiling / maxExpansion, int64(expansionCeiling/maxExpansion) * maxExpansion},
+		{"past the ceiling, clamped", expansionCeiling/maxExpansion + 1, expansionCeiling},
+		{"far past the ceiling, still clamped", 1 << 30, expansionCeiling},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			if got := expansionLimit(c.compressed); got != c.want {
+				t.Fatalf("%d compressed bytes may expand to %d, want %d", c.compressed, got, c.want)
+			}
+		})
+	}
+}
