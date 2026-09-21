@@ -553,6 +553,15 @@ type subscriber struct {
 	// read when the meet is taken, which is under the same lock as everything
 	// else that walks the subscribers.
 	have crdt.CompositeVersion
+	// promiseMoved wakes a link when somebody else's acknowledgement may have
+	// moved what this link can promise its peer. nil for an ordinary
+	// participant, which has no peer to tell.
+	//
+	// It is buffered by one and written without blocking, so a burst of
+	// acknowledgements is one wake: a promise says what can be collected
+	// against NOW, so a later one says everything an earlier one would have.
+	// Set by [Server.follow] under document.mu and never afterwards.
+	promiseMoved chan struct{}
 }
 
 // Session is the service method: one bidirectional stream, one participant, one
