@@ -124,6 +124,150 @@ var cases = []struct {
 	{"AZeroLengthSnapshotIsRefusedAndNotCalledANewDocument", tornWrite},
 	{"AStoredSnapshotThatChangedIsRefused", rotted},
 	{"ConcurrentUseIsSafe", concurrent},
+	// [collab.SiteStore] is optional, and a store that does not implement it
+	// skips these rather than failing them -- the same shape as a Harness field
+	// left nil. The signal is the interface itself, so a store gains these cases
+	// by implementing it and nothing has to be wired up twice.
+	{"LoadSitesOfADocumentNobodyHasSavedIsNilAndNotAnError", loadSitesOfNothing},
+	{"WhatSaveSitesWroteIsWhatLoadSitesReturns", sitesRoundTrip},
+	{"SavingSitesAgainReplaces", sitesReplace},
+	{"TwoDocumentsHaveTwoSiteRecords", sitesPerDocument},
+	{"SitesAndTheDocumentDoNotOverwriteEachOther", sitesHeldApart},
+}
+
+// keeper is the store under test as a [collab.SiteStore], or a skip.
+//
+// A store that keeps participants says so by implementing the interface, so that
+// is what this asks. There is no Harness field for it: a field would be a second
+// place to say the same thing, and the two would disagree.
+func keeper(t T, h Harness) collab.SiteStore {
+	t.Helper()
+	k, keeps := h.Store.(collab.SiteStore)
+	if !keeps {
+		t.Skip("this store does not keep participants")
+	}
+	return k
+}
+
+// siteBytes is what the server would hand a store: opaque to the store, and
+// distinct per seed so that a store confusing two documents is caught by what
+// comes back rather than by how much. The server owns this encoding -- see
+// [collab.SiteStore] -- so a store must keep these bytes and not read them.
+func siteBytes(seed string) []byte {
+	return []byte("participants of " + seed + ", opaque to the store")
+}
+
+// nil, and only nil, means "never been told about this one".
+func loadSitesOfNothing(t T, h Harness) {
+	got, err := keeper(t, h).LoadSites(context.Background(), "nobody has saved this")
+	if err != nil {
+		t.Fatalf("participants nobody has saved is not an error, got %v", err)
+	}
+	if got != nil {
+		t.Fatalf("participants nobody has saved answered %d bytes, want nil", len(got))
+	}
+}
+
+func sitesRoundTrip(t T, h Harness) {
+	ctx := context.Background()
+	k := keeper(t, h)
+	want := siteBytes("the only one")
+	if err := k.SaveSites(ctx, "doc", want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := k.LoadSites(ctx, "doc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("participants came back as %q, saved %q", got, want)
+	}
+}
+
+func sitesReplace(t T, h Harness) {
+	ctx := context.Background()
+	k := keeper(t, h)
+	if err := k.SaveSites(ctx, "doc", siteBytes("first")); err != nil {
+		t.Fatal(err)
+	}
+	second := siteBytes("second")
+	if err := k.SaveSites(ctx, "doc", second); err != nil {
+		t.Fatal(err)
+	}
+	got, err := k.LoadSites(ctx, "doc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(second) {
+		t.Fatalf("after saving twice the participants are %q, want %q", got, second)
+	}
+}
+
+func sitesPerDocument(t T, h Harness) {
+	ctx := context.Background()
+	k := keeper(t, h)
+	for _, name := range []string{"one", "two"} {
+		if err := k.SaveSites(ctx, name, siteBytes(name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"one", "two"} {
+		got, err := k.LoadSites(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != string(siteBytes(name)) {
+			t.Fatalf("the participants of %q are %q", name, got)
+		}
+	}
+}
+
+// The participants are kept BESIDE the document, not in it.
+//
+// This is the case worth having. [collab.Store] and [collab.SiteStore] are two
+// key spaces under one document name, and a store that folds them into one
+// answers the last write for both -- which a round trip of either alone cannot
+// see, because each is correct on its own. Saving both and reading both is what
+// catches it.
+func sitesHeldApart(t T, h Harness) {
+	ctx := context.Background()
+	k := keeper(t, h)
+	document := snapshot(t, "the document")
+	participants := siteBytes("the document")
+
+	if err := h.Store.Save(ctx, "doc", document); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SaveSites(ctx, "doc", participants); err != nil {
+		t.Fatal(err)
+	}
+	gotDoc, err := h.Store.Load(ctx, "doc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotDoc) != string(document) {
+		t.Fatalf("saving participants changed the document: %d bytes, want %d", len(gotDoc), len(document))
+	}
+	gotSites, err := k.LoadSites(ctx, "doc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotSites) != string(participants) {
+		t.Fatalf("the participants came back as %q, want %q", gotSites, participants)
+	}
+
+	// And the other order: saving the document after the participants must not
+	// take the participants with it.
+	if err := h.Store.Save(ctx, "doc", snapshot(t, "replaced")); err != nil {
+		t.Fatal(err)
+	}
+	gotSites, err = k.LoadSites(ctx, "doc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotSites) != string(participants) {
+		t.Fatalf("saving the document changed the participants to %q", gotSites)
+	}
 }
 
 // snapshot returns a composite snapshot with text in it, distinct per seed, so
