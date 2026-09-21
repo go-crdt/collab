@@ -123,4 +123,36 @@
 // refused by default. [OwnSiteOnly] is the one-line policy that refuses it, and
 // [Config.AuthorizeOperations] is where a federating deployment writes a
 // narrower one. Neither is a stricter merge: the merge is not the lever.
+//
+// # Two servers do not share a store
+//
+// A [Store] holds snapshots and [Store.Save] replaces. A server holds the
+// document in memory while it serves it, so two servers holding the same
+// document at the same time each save their own replica and the later save
+// replaces the earlier — losing every operation the other held and this one
+// never saw. Measured, in
+// TestTwoServersOverOneStoreLoseTheEarlierSave: one writes AAAA, the other
+// BBBB, and the store ends holding BBBB alone. There is no error anywhere,
+// because each save did exactly what Save is documented to do.
+//
+// It is the sequential case that works, and it is the one that makes this
+// tempting: a server that starts, loads, serves and stops hands the next server
+// everything, so a rolling restart is fine and a failover to a cold standby is
+// fine. What is not fine is two of them up at once.
+//
+// There are two supported ways to run more than one server, and both replace
+// the shared store rather than adding to it:
+//
+//   - Federation. [Server.Follow] and [Server.FollowWithRetry] make one server
+//     a participant in another's document, so the operations travel and each
+//     server's own store holds the union. The cost is that both servers are up
+//     and reachable.
+//   - A gitstore with a remote. Each server has its own repository and pulls the
+//     other's, merging snapshots rather than replacing them, with
+//     [ErrUnmergeable] when two replicas have each discarded what the other
+//     needs. The cost is a pull interval instead of a link, and the benefit is
+//     that neither server has to be reachable from the other.
+//
+// A shared PostgreSQL looks like a third way and is not one: the database is
+// shared, the document in memory is not.
 package collab
