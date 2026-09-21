@@ -101,3 +101,49 @@ func TestAnAcknowledgementBehindALinkReachesThePeer(t *testing.T) {
 		return seen(paris, crdt.SiteID(9001)) != nil
 	})
 }
+
+// wakeLinks skips the participant that spoke and everyone who is not a link, and
+// a second wake for a link that has not drained the first is dropped.
+//
+// Asserted directly because the arms are a select: two acknowledgements racing
+// one drain is not something to arrange through servers, and a coalescing channel
+// whose coalescing is never exercised is a comment.
+func TestWakeLinksSkipsWhoItShouldAndCoalesces(t *testing.T) {
+	speaker := &subscriber{site: 1}
+	ordinary := &subscriber{site: 2}
+	linkOne := &subscriber{site: 9001, promiseMoved: make(chan struct{}, 1)}
+	linkTwo := &subscriber{site: 9002, promiseMoved: make(chan struct{}, 1)}
+	// Already awake, and not drained.
+	linkTwo.promiseMoved <- struct{}{}
+
+	d := &document{subs: map[*subscriber]struct{}{
+		speaker: {}, ordinary: {}, linkOne: {}, linkTwo: {},
+	}}
+	d.mu.Lock()
+	d.wakeLinks(speaker)
+	d.mu.Unlock()
+
+	if len(linkOne.promiseMoved) != 1 {
+		t.Fatal("a link was not woken")
+	}
+	if len(linkTwo.promiseMoved) != 1 {
+		t.Fatalf("a link already awake holds %d wakes, want the one it had", len(linkTwo.promiseMoved))
+	}
+	// And nothing was written for the two that have no channel, which would have
+	// panicked on a nil channel send rather than being skipped.
+	if speaker.promiseMoved != nil || ordinary.promiseMoved != nil {
+		t.Fatal("this test no longer distinguishes a link from a participant")
+	}
+}
+
+// newParticipant joins srv over its own pipe.
+func newParticipant(t *testing.T, ctx context.Context, srv *Server, site crdt.SiteID) *Client {
+	t.Helper()
+	tr, sc := Pipe()
+	go func() { _ = srv.ServePipe(ctx, sc) }()
+	client, err := Join(ctx, tr, ClientConfig{Document: "paper", Site: site})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
