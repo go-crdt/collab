@@ -31,17 +31,36 @@ fi
 profile=${1:?usage: coverage-gate.sh [--report] <profile> [pattern]}
 pattern=${2:-}
 
+# Two passes over the profile, because it may carry the SAME block more than
+# once. `go test -coverpkg=X ./...` writes one section per test binary, each
+# listing every block of X with that binary's counts -- so a block the root
+# package's tests cover and another package's tests do not appears twice, once
+# with a count and once with a zero. `go tool cover` merges those by block; a
+# script that reads each line on its own does not, and reports thousands of
+# uncovered statements that are covered. Measured: 4646 of them, on a profile the
+# rounded gate called 100.0%.
+#
+# So the first pass sums the counts per block and the second prints the ones that
+# are still zero, in file order.
 awk -v pat="$pattern" -v report="$report" '
-  NR == 1 { next }                     # the "mode:" header
+  FNR == 1 { next }                    # the "mode:" header, in each pass
   pat != "" && $1 !~ pat { next }
-  {
-    total += $2
-    if ($3 + 0 == 0 && $2 + 0 > 0) {
-      uncovered += $2
-      if (!report) print "uncovered (" $2 " statements): " $1
-    }
+  NR == FNR {
+    if (!($1 in stmts)) { stmts[$1] = $2; order[++n] = $1 }
+    hits[$1] += $3
+    next
   }
+  # Second pass: nothing to do per line, the work is in END.
+  { }
   END {
+    for (i = 1; i <= n; i++) {
+      key = order[i]
+      total += stmts[key]
+      if (hits[key] + 0 == 0 && stmts[key] + 0 > 0) {
+        uncovered += stmts[key]
+        if (!report) print "uncovered (" stmts[key] " statements): " key
+      }
+    }
     if (total == 0) {
       print "::error::the coverage gate matched no statements" \
             (pat == "" ? "" : " for /" pat "/") ", which is not a pass"
@@ -54,4 +73,4 @@ awk -v pat="$pattern" -v report="$report" '
       exit 1
     }
   }
-' "$profile"
+' "$profile" "$profile"

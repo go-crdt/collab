@@ -135,7 +135,7 @@ jobs:
         run: |
           go test -coverpkg="$COVERPKG" -coverprofile=cover.out ./...
           go tool cover -func=cover.out | tail -n 30
-          ./.github/coverage-gate.sh cover.out
+          "$GITHUB_WORKSPACE/.github/coverage-gate.sh" cover.out
 
   # The PostgreSQL store is tested against PostgreSQL. A store that has never
   # spoken to a database has not been tested, so the happy paths here are the
@@ -174,7 +174,7 @@ jobs:
         run: |
           go test -coverpkg=github.com/go-crdt/collab/pgstore -coverprofile=cover.out ./...
           go tool cover -func=cover.out | tail -n 15
-          ./.github/coverage-gate.sh cover.out
+          "$GITHUB_WORKSPACE/.github/coverage-gate.sh" cover.out
 
 
   # The git store keeps documents in a git repository. Nothing here needs a
@@ -209,7 +209,7 @@ jobs:
         run: |
           go test -coverpkg=github.com/go-crdt/collab/migrate -coverprofile=cover.out ./...
           go tool cover -func=cover.out | tail -n 15
-          ./.github/coverage-gate.sh cover.out
+          "$GITHUB_WORKSPACE/.github/coverage-gate.sh" cover.out
 
   # The coverage gate is SPLIT, and deliberately so. gitstore.go is the logic —
   # what a document is, where it goes, how a release is a tag on a commit that
@@ -249,9 +249,9 @@ jobs:
           # Matching nothing is a failure rather than an empty pass, so a rename
           # cannot silently empty this gate — see the script.
           echo "adapter (gogit.go), reported and not gated:"
-          ./.github/coverage-gate.sh --report cover.out 'gitstore/gogit[.]go:'
+          "$GITHUB_WORKSPACE/.github/coverage-gate.sh" --report cover.out 'gitstore/gogit[.]go:'
           echo "logic (gitstore.go), gated:"
-          ./.github/coverage-gate.sh cover.out 'gitstore/gitstore[.]go:' 
+          "$GITHUB_WORKSPACE/.github/coverage-gate.sh" cover.out 'gitstore/gitstore[.]go:' 
   # The point of the whole design is that a browser runs the same merge logic as
   # the server. This job proves it: two participants compiled to WebAssembly and
   # run by Node, editing concurrently with a native one through a real WebSocket,
