@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/go-crdt/collab"
 	"github.com/go-crdt/collab/storetest"
 )
 
@@ -52,4 +53,17 @@ func TestGitStoreKeepsTheContract(t *testing.T) {
 			},
 		}
 	})
+}
+
+// The doc comment on Store says it does not keep participants. This is what
+// makes that a claim rather than a remark: it goes red the day somebody
+// implements [collab.SiteStore] here, which is the day the comment -- and the
+// paragraph about the collect floor moving past a reader -- has to change.
+//
+// The conformance suite's participants cases skip a store that keeps none, so
+// they cannot tell this either way; a skip is not a statement.
+func TestStoreDoesNotKeepParticipants(t *testing.T) {
+	if _, keeps := any((*Store)(nil)).(collab.SiteStore); keeps {
+		t.Fatal("this store now keeps participants; the doc comment on Store says it does not")
+	}
 }

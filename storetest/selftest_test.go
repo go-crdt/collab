@@ -247,3 +247,131 @@ var errStore = errBroken("collab: this store will not keep that name")
 type errBroken string
 
 func (e errBroken) Error() string { return string(e) }
+
+// The participants cases fail a keeper that breaks the rule each one is about.
+//
+// They need their own store: [collab.SiteStore] is optional, Go has no way to
+// implement an interface conditionally, and `broken` deliberately does not keep
+// participants -- which is what TestTheParticipantsCasesSkipAStoreThatKeepsNone
+// below relies on. So the defects live in a second type, and the correct control
+// is that same type with no defect set.
+func TestTheSuiteFailsAKeeperThatBreaksTheRule(t *testing.T) {
+	for _, c := range []struct {
+		rule  string
+		store func() *brokenKeeper
+	}{
+		{"LoadSitesOfADocumentNobodyHasSavedIsNilAndNotAnError", func() *brokenKeeper {
+			return &brokenKeeper{emptyForUnknownSites: true}
+		}},
+		{"WhatSaveSitesWroteIsWhatLoadSitesReturns", func() *brokenKeeper {
+			return &brokenKeeper{loseATrailingSiteByte: true}
+		}},
+		{"SavingSitesAgainReplaces", func() *brokenKeeper {
+			return &brokenKeeper{keepTheFirstSites: true}
+		}},
+		{"TwoDocumentsHaveTwoSiteRecords", func() *brokenKeeper {
+			// One record for every document, which is what a store that forgot
+			// to key the participants by name would do.
+			return &brokenKeeper{oneRecordForEverything: true}
+		}},
+		{"SitesAndTheDocumentDoNotOverwriteEachOther", func() *brokenKeeper {
+			// The defect this case exists for: one key space for both, so the
+			// last write answers for the other as well. Each of the two round
+			// trips alone still passes, which is why the case saves both.
+			return &brokenKeeper{oneKeySpaceForBoth: true}
+		}},
+	} {
+		t.Run(c.rule, func(t *testing.T) {
+			failed, skipped := runCase(t, c.rule, Harness{Store: c.store()})
+			if skipped {
+				t.Fatal("the case skipped, so it asked nothing")
+			}
+			if !failed {
+				t.Error("a keeper that breaks this rule passed the case for it")
+			}
+			if failed, skipped := runCase(t, c.rule, Harness{Store: &brokenKeeper{}}); failed || skipped {
+				t.Errorf("a correct keeper did not pass this case (failed=%v skipped=%v)", failed, skipped)
+			}
+		})
+	}
+}
+
+// The participants cases skip a store that keeps none, rather than failing or
+// passing it. Passing would be a suite that stopped asking; failing would make
+// an optional capability compulsory.
+func TestTheParticipantsCasesSkipAStoreThatKeepsNone(t *testing.T) {
+	for _, name := range []string{
+		"LoadSitesOfADocumentNobodyHasSavedIsNilAndNotAnError",
+		"WhatSaveSitesWroteIsWhatLoadSitesReturns",
+		"SavingSitesAgainReplaces",
+		"TwoDocumentsHaveTwoSiteRecords",
+		"SitesAndTheDocumentDoNotOverwriteEachOther",
+	} {
+		failed, skipped := runCase(t, name, Harness{Store: &broken{}})
+		if failed {
+			t.Errorf("%s failed a store that keeps no participants", name)
+		}
+		if !skipped {
+			t.Errorf("%s passed a store that keeps no participants", name)
+		}
+	}
+}
+
+// brokenKeeper is a store that keeps participants, with whichever defect a case
+// is being tested against and none when they are all false.
+type brokenKeeper struct {
+	broken
+
+	sites map[string][]byte
+
+	emptyForUnknownSites   bool
+	loseATrailingSiteByte  bool
+	keepTheFirstSites      bool
+	oneRecordForEverything bool
+	oneKeySpaceForBoth     bool
+}
+
+func (b *brokenKeeper) siteKey(document string) string {
+	if b.oneRecordForEverything {
+		return ""
+	}
+	return document
+}
+
+func (b *brokenKeeper) SaveSites(_ context.Context, document string, sites []byte) error {
+	if b.oneKeySpaceForBoth {
+		// Both go through Save, so whichever was written last answers for both.
+		return b.broken.Save(context.Background(), document, sites)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.sites == nil {
+		b.sites = map[string][]byte{}
+	}
+	if b.keepTheFirstSites {
+		if _, held := b.sites[b.siteKey(document)]; held {
+			return nil
+		}
+	}
+	b.sites[b.siteKey(document)] = append([]byte(nil), sites...)
+	return nil
+}
+
+func (b *brokenKeeper) LoadSites(_ context.Context, document string) ([]byte, error) {
+	if b.oneKeySpaceForBoth {
+		return b.broken.Load(context.Background(), document)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	held, there := b.sites[b.siteKey(document)]
+	if !there {
+		if b.emptyForUnknownSites {
+			return []byte{}, nil
+		}
+		return nil, nil
+	}
+	if b.loseATrailingSiteByte && len(held) > 0 {
+		return held[:len(held)-1], nil
+	}
+	return held, nil
+}

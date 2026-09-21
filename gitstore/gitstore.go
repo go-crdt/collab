@@ -122,6 +122,14 @@ type repository interface {
 // hangs the store, which is why every remote operation takes a context and
 // nothing in this package invents one: how long a document may go unsaved
 // because a git host is slow is a decision, and it belongs to whoever passes it.
+//
+// It does not implement [collab.SiteStore]. A server given one falls back to the
+// participants a document names, which is everyone who has WRITTEN: somebody who
+// has only ever read is in no version vector, so a document that is evicted and
+// loaded again comes back not knowing they were here and the collect floor moves
+// past them. That is bounded -- a reader has nothing of its own to lose and
+// resyncs -- and it is worth knowing before choosing this store over one that
+// keeps them. See [collab.SiteStore].
 type Store struct {
 	mu   sync.Mutex
 	repo repository
