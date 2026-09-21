@@ -278,9 +278,23 @@ func (s *Server) follow(ctx context.Context, peer Transport, document string, as
 			if !ok {
 				continue
 			}
-			if err := conn.Send(kindAcknowledge, ackMsg{Version: raw, Clocks: clocks}); err != nil {
-				sent <- err
-				return
+			// Offered to the same single send above rather than sent from here.
+			//
+			// This used to be a second conn.Send, and its error branch is the one
+			// the comment on that select says this loop exists to avoid: reachable
+			// only by breaking a carrier in the moment an acknowledgement is in
+			// flight, so no test reached it -- and it was covered on some
+			// platforms and not others, which is coverage by luck. The exact gate
+			// named it on windows-latest after passing there on the same code.
+			//
+			// Non-blocking, like the inbound path that feeds the same channel: a
+			// promise says what is collectable NOW, so a newer one says everything
+			// an older one would have and dropping the older is allowed. What
+			// follows is an operation or an acknowledgement, and both produce a
+			// fresh offer.
+			select {
+			case acks <- wireMsg{kind: kindAcknowledge, msg: ackMsg{Version: raw, Clocks: clocks}}:
+			default:
 			}
 		}
 	}()
