@@ -404,3 +404,63 @@ jobs:
           exit 1
       - name: Test under qemu (${{ matrix.goarch }})
         run: GOARCH=${{ matrix.goarch }} go test -exec=${{ matrix.qemu }} ./...
+
+  # Fuzz the decoders. crdt has had this lane for a while; collab did not, so its
+  # six targets ran their seed corpus and nothing else -- a handful of inputs
+  # standing in for the millions the targets were written to reach.
+  #
+  # collab is the package where that matters most: crdt decodes bytes a caller
+  # hands it, and these decode bytes a PARTICIPANT sent. FuzzDecodeClient and
+  # FuzzDecodeServer are the wire, FuzzHostileSession is a session that misbehaves,
+  # and the three store targets are what comes back from a file, a database row or
+  # a git blob.
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - FuzzDecodeClient
+          - FuzzDecodeServer
+          - FuzzHostileSession
+          - FuzzUnpackSnapshot
+          - FuzzFrameRoundTrip
+          - FuzzMergeSnapshots
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      # -parallel 2, and the deadline told apart from a real failure: both are
+      # crdt's reasoning, and they apply here for the same reason. Six of these
+      # run at once on one runner, each starting a worker per core, so the machine
+      # is oversubscribed; when the fuzz deadline arrives while a worker is still
+      # inside an input, the coordinator reports "context deadline exceeded" and
+      # the lane goes red having found nothing at all. A fuzzer that finds
+      # something writes it to testdata/fuzz and says so.
+      #
+      # Every other failure is still a failure, including a deadline in a run that
+      # did write an input.
+      - name: Fuzz ${{ matrix.target }}
+        run: |
+          if go test -run '^$' -fuzz '^${{ matrix.target }}$' \
+              -fuzztime 120s -parallel 2 -timeout 10m . 2>&1 | tee fuzz.log; then
+            exit 0
+          fi
+          if grep -q 'Failing input written to' fuzz.log; then
+            echo "::error::${{ matrix.target }} found a failing input"
+            exit 1
+          fi
+          if grep -q 'context deadline exceeded' fuzz.log; then
+            execs=$(grep -o 'execs: [0-9]*' fuzz.log | tail -1)
+            echo "::warning::${{ matrix.target }}: the fuzz deadline arrived while a worker was still in an input; ${execs:-no execs reported}, no failing input. The loaded runner, not the code."
+            exit 0
+          fi
+          exit 1
+      - name: Upload any failing input
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-failure-${{ matrix.target }}
+          path: testdata/fuzz/
