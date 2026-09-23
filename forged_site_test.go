@@ -160,6 +160,20 @@ func forgeAcrossALink(t *testing.T, impostorSite crdt.SiteID, theirWrite string)
 	write(join(mine, 7), "GENUINE")
 	write(join(theirs, impostorSite), theirWrite)
 
+	// Both writes must be on their servers before the link opens, and this is
+	// not tidiness. A link joins saying what it holds, so the followed server
+	// sends only what is missing -- and whether the forged history's colliding
+	// HEAD is in that is decided by whether our own participant's work had landed
+	// when the link joined. Since crdt v0.48.0 the two answers differ:
+	// [crdt.ErrCollidingID] refuses a batch whose head collides, so a link that
+	// joined too early gets the whole history and is refused, while one that
+	// joined after gets only the tail, which collides with nothing and lands.
+	//
+	// Unsynchronised, this test passed on an M4 Max and failed on four CI
+	// platforms, which is the same defect the other way round.
+	awaitOn(t, mine, "GENUINE")
+	awaitOn(t, theirs, theirWrite)
+
 	link := &directDial{srv: theirs, ctx: ctx}
 	go func() { _ = mine.Follow(ctx, link, "paper", crdt.SiteID(9001)) }()
 
@@ -210,4 +224,31 @@ func versionsEqual(a, b crdt.CompositeVersion) bool {
 		}
 	}
 	return true
+}
+
+// awaitOn waits until a server's own replica of the document holds want, so a
+// test that goes on to open a link knows what that link will say it has.
+func awaitOn(t *testing.T, s *Server, want string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		s.mu.Lock()
+		d := s.docs["paper"]
+		s.mu.Unlock()
+		got := ""
+		if d != nil {
+			d.mu.Lock()
+			if txt, err := d.doc.Text("body"); err == nil {
+				got = txt.String()
+			}
+			d.mu.Unlock()
+		}
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a server never came to hold %q; it holds %q", want, got)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

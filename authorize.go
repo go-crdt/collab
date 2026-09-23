@@ -27,9 +27,16 @@ import (
 //
 // Measured, and it is the guarantee this whole package rests on: a forger
 // writing "FORGED" as site 2, and the real site 2 working offline writing
-// "GENUINE", give two replicas that received both batches "FORGEDE" and
-// "GENUINE". Neither Apply returned an error. The divergence is silent and it
-// is permanent.
+// "GENUINE", give two replicas that received both batches two different
+// documents. The divergence is permanent.
+//
+// Since crdt v0.48.0 it is no longer silent: the second batch each replica sees
+// is refused with [github.com/go-crdt/crdt.ErrCollidingID]. That changes the
+// announcement and not the outcome — refusing the second batch does not undo the
+// first, so the replicas still disagree — and it does not reach a forger who
+// reproduces what the replica already holds before diverging. A diagnostic that
+// arrives after the document is wrong is why this policy is still the thing that
+// prevents it. Measured in TestTwoWritersOnOneSiteIdentityDiverge.
 //
 // # Why it is not the default
 //
