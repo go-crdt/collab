@@ -124,6 +124,37 @@
 // [Config.AuthorizeOperations] is where a federating deployment writes a
 // narrower one. Neither is a stricter merge: the merge is not the lever.
 //
+// # A site identity is claimed, not proved
+//
+// This bounds who may federate with whom, so it is worth being exact about.
+// A [github.com/go-crdt/crdt.SiteID] is a number a joining session states, and
+// nothing here binds the number to whoever states it: TLS authenticates the
+// server rather than the site, [Config.Authorize] decides whether a session may
+// join and cannot check a number it did not issue, and
+// [github.com/go-crdt/crdt.DeriveSiteID] is a pure function of a name, so anyone
+// who knows the name computes the identity.
+//
+// Within one operator that is a topology decision — both ends hand out site
+// identities, so a site is as trustworthy as the deployment. Across operators it
+// is not, and the cost is measured in
+// TestAFederatedPeerCanSpeakAsAnotherServersUser: a followed server whose
+// participant claims a site belonging to the follower's user makes the follower
+// hold a document that existed on neither server, my user's genuine prefix
+// grafted to the tail of a forged sequence, with every character attributed to
+// that user — and both replicas then report the SAME version vector, so each
+// believes it is completely caught up with the other and neither will ever ask
+// for anything again. Nothing returns an error: the operations were well formed
+// and the merge converged on what it was told.
+//
+// [OwnSiteOnly] is not the answer, for a reason worth knowing before reaching
+// for it: the side it breaks is the FOLLOWER, because what arrives over a link
+// names sites that server never authorised
+// (TestALinkCarryingOtherSitesMeetsOwnSiteOnly). A server that federates cannot
+// install it, which is why nothing on the wire today distinguishes a link from a
+// participant. So federate between servers you run; between servers run by
+// different actors, wait for the authority decision in
+// https://github.com/go-crdt/collab/issues/175.
+//
 // # Two servers do not share a store
 //
 // A [Store] holds snapshots and [Store.Save] replaces. A server holds the
@@ -146,7 +177,8 @@
 //   - Federation. [Server.Follow] and [Server.FollowWithRetry] make one server
 //     a participant in another's document, so the operations travel and each
 //     server's own store holds the union. The cost is that both servers are up
-//     and reachable.
+//     and reachable — and that a link is trusted for every site it carries, so
+//     both ends must be yours. See "A site identity is claimed, not proved".
 //   - A gitstore with a remote. Each server has its own repository and pulls the
 //     other's, merging snapshots rather than replacing them, with
 //     [ErrUnmergeable] when two replicas have each discarded what the other
