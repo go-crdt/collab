@@ -508,6 +508,14 @@ type document struct {
 	doc      *crdt.Composite
 	presence *awareness.Registry
 	subs     map[*subscriber]struct{}
+	// links is the subset of subs that want waking when the meet moves: the
+	// sessions [Server.follow] opened, which are the only ones with a peer to
+	// tell. Kept apart rather than found by walking subs, because walking them
+	// is O(participants) and an acknowledgement arrives per participant per
+	// edit -- measured as 2 501 ns a participant an edit becoming 8 276 at a
+	// thousand, a term that is invisible at ten and quadratic at a thousand.
+	// Almost every document has none of these.
+	links map[*subscriber]struct{}
 	// seen is the last version each site acknowledged, kept against the site and
 	// not the session so that it survives a dropped carrier. It is what this
 	// document may be collected against; see [document.collectable].
@@ -831,6 +839,7 @@ func (d *document) enrol(j joinMsg, answer bool) (*subscriber, error) {
 func (d *document) leave(ctx context.Context, sub *subscriber) {
 	d.mu.Lock()
 	delete(d.subs, sub)
+	delete(d.links, sub)
 	d.close(sub)
 	// A displaced session must not announce a departure: the identity did not
 	// leave, it moved to the session that displaced this one, which is still
@@ -1000,6 +1009,7 @@ func (d *document) broadcast(from *subscriber, msg wireMsg) {
 		default:
 			sub.dropped.Store(true)
 			delete(d.subs, sub)
+			delete(d.links, sub)
 			d.close(sub)
 		}
 	}

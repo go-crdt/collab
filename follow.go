@@ -137,6 +137,10 @@ func (s *Server) follow(ctx context.Context, peer Transport, document string, as
 	// not an operation. See [document.wakeLinks].
 	local.mu.Lock()
 	sub.promiseMoved = make(chan struct{}, 1)
+	if local.links == nil {
+		local.links = map[*subscriber]struct{}{}
+	}
+	local.links[sub] = struct{}{}
 	local.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(ctx)

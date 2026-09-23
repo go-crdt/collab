@@ -138,6 +138,13 @@ func (d *document) acknowledge(sub *subscriber, raw, raw2 []byte) error {
 // wakeLinks tells every link but the one that just spoke that the meet may have
 // moved. Called with d.mu held.
 //
+// It walks the links rather than the participants. The first version walked subs
+// looking for the ones with a channel, which is O(participants) on a path an
+// acknowledgement takes per participant per edit: BenchmarkFanOut went from
+// 2 501 ns a participant an edit to 8 276 at a thousand, flat at ten and at a
+// hundred, which is what a quadratic term looks like from below. Almost every
+// document has no links at all, so this is usually a nil map and no iteration.
+//
 // An acknowledgement is the other thing that changes what a link can promise,
 // and before this nothing carried it. A link computes its promise when it
 // relays an operation and when it applies one, both of which are edges; a
@@ -152,8 +159,8 @@ func (d *document) acknowledge(sub *subscriber, raw, raw2 []byte) error {
 // keeps work -- which is why it was invisible, and it is the same failure
 // Config.CollectEvery had in a federation before a link acknowledged at all.
 func (d *document) wakeLinks(speaker *subscriber) {
-	for sub := range d.subs {
-		if sub == speaker || sub.promiseMoved == nil {
+	for sub := range d.links {
+		if sub == speaker {
 			continue
 		}
 		select {
