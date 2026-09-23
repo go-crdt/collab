@@ -102,23 +102,39 @@ func TestAnAcknowledgementBehindALinkReachesThePeer(t *testing.T) {
 	})
 }
 
-// wakeLinks skips the participant that spoke and everyone who is not a link, and
-// a second wake for a link that has not drained the first is dropped.
+// wakeLinks walks the LINKS, skips the one that spoke, and drops a second wake
+// for a link that has not drained the first.
 //
-// Asserted directly because the arms are a select: two acknowledgements racing
-// one drain is not something to arrange through servers, and a coalescing channel
+// Asserted directly because the arms are a select: two acknowledgements racing one
+// drain is not something to arrange through servers, and a coalescing channel
 // whose coalescing is never exercised is a comment.
-func TestWakeLinksSkipsWhoItShouldAndCoalesces(t *testing.T) {
-	speaker := &subscriber{site: 1}
+//
+// It walks d.links rather than d.subs, and that is not a detail. The first version
+// walked the participants looking for the ones with a channel, which is
+// O(participants) on a path an acknowledgement takes per participant per edit:
+// BenchmarkFanOut went from 2 501 ns a participant an edit to 8 276 at a thousand.
+// This test is what pinned the old mechanism, and it failed the moment the new one
+// landed -- which is the whole point of asserting a mechanism rather than an
+// outcome.
+func TestWakeLinksWalksTheLinksAndCoalesces(t *testing.T) {
+	speaker := &subscriber{site: 9000, promiseMoved: make(chan struct{}, 1)}
 	ordinary := &subscriber{site: 2}
 	linkOne := &subscriber{site: 9001, promiseMoved: make(chan struct{}, 1)}
 	linkTwo := &subscriber{site: 9002, promiseMoved: make(chan struct{}, 1)}
 	// Already awake, and not drained.
 	linkTwo.promiseMoved <- struct{}{}
 
-	d := &document{subs: map[*subscriber]struct{}{
-		speaker: {}, ordinary: {}, linkOne: {}, linkTwo: {},
-	}}
+	d := &document{
+		subs: map[*subscriber]struct{}{
+			speaker: {}, ordinary: {}, linkOne: {}, linkTwo: {},
+		},
+		// The ordinary participant is deliberately NOT here: a session with no
+		// peer to tell is not a link, and the cost of this walk is why that
+		// distinction is kept as a set rather than rediscovered every time.
+		links: map[*subscriber]struct{}{
+			speaker: {}, linkOne: {}, linkTwo: {},
+		},
+	}
 	d.mu.Lock()
 	d.wakeLinks(speaker)
 	d.mu.Unlock()
@@ -129,11 +145,60 @@ func TestWakeLinksSkipsWhoItShouldAndCoalesces(t *testing.T) {
 	if len(linkTwo.promiseMoved) != 1 {
 		t.Fatalf("a link already awake holds %d wakes, want the one it had", len(linkTwo.promiseMoved))
 	}
-	// And nothing was written for the two that have no channel, which would have
-	// panicked on a nil channel send rather than being skipped.
-	if speaker.promiseMoved != nil || ordinary.promiseMoved != nil {
+	// The speaker is a link too, and still skipped: an acknowledgement does not
+	// move what the session that sent it can promise.
+	if len(speaker.promiseMoved) != 0 {
+		t.Fatal("the link that spoke was woken by its own acknowledgement")
+	}
+	if ordinary.promiseMoved != nil {
 		t.Fatal("this test no longer distinguishes a link from a participant")
 	}
+}
+
+// A link that leaves comes out of BOTH sets.
+//
+// The links are a second index over the subscribers, so every place that drops a
+// subscriber has to drop it here too. One that forgot would wake a departed link
+// for ever, and the wake is a non-blocking send on a channel nobody drains, so
+// nothing would say so -- the cost would be silent and permanent.
+func TestALinkThatLeavesIsOutOfTheLinkSetToo(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	paris := NewServer(Config{Store: NewMemoryStore()})
+	defer func() { _ = paris.Close(context.Background()) }()
+	lyon := NewServer(Config{Store: NewMemoryStore()})
+	defer func() { _ = lyon.Close(context.Background()) }()
+
+	tr, sc := Pipe()
+	go func() { _ = paris.ServePipe(ctx, sc) }()
+	author, err := Join(ctx, tr, ClientConfig{Document: "paper", Site: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = author.Close() }()
+
+	linkCtx, dropLink := context.WithCancel(ctx)
+	link := &directDial{srv: paris, ctx: ctx}
+	done := make(chan struct{})
+	go func() { defer close(done); _ = lyon.Follow(linkCtx, link, "paper", crdt.SiteID(9001)) }()
+
+	links := func() int {
+		lyon.mu.Lock()
+		d := lyon.docs["paper"]
+		lyon.mu.Unlock()
+		if d == nil {
+			return -1
+		}
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return len(d.links)
+	}
+	until(t, "Lyon to hold one link", func() bool { return links() == 1 })
+
+	dropLink()
+	<-done
+	until(t, "the link set to empty when the link has gone", func() bool { return links() == 0 })
 }
 
 // newParticipant joins srv over its own pipe.
