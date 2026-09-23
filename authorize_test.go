@@ -4,6 +4,7 @@ package collab
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -116,25 +117,45 @@ func TestAServerWithOwnSiteOnlyRefusesForgedOperations(t *testing.T) {
 }
 
 // The forged work of one writer and the real work of the site it named do not
-// converge, which is why the policy above is worth installing.
+// converge, which is why the policy above is worth installing — and since
+// crdt v0.48.0 the second of the two batches says so instead of being absorbed
+// in silence.
 //
 // A site identity is half of an operation's name. Two writers using one produce
-// different characters with the same ID, and a CRDT converges on names: the
-// same two batches applied in opposite orders give different documents, with no
-// error from either Apply.
+// different characters with the same ID, and a CRDT converges on names: the same
+// two batches applied in opposite orders give different documents.
+//
+// What changed is the announcement, not the outcome, and the distinction is the
+// whole reason the policy is still worth installing. Each replica now refuses the
+// SECOND batch with [crdt.ErrCollidingID] — and refusing it does not undo the
+// first, so the two replicas hold different text exactly as before, each having
+// been told. A diagnostic that arrives after the document is wrong is not a
+// defence; refusing the operations before they are applied is, and that is what
+// [OwnSiteOnly] and a federation policy do.
 func TestTwoWritersOnOneSiteIdentityDiverge(t *testing.T) {
 	forged := opsFrom(t, 2, "FORGED")
 	genuine := opsFrom(t, 2, "GENUINE")
 
 	one, two := crdt.NewComposite(9), crdt.NewComposite(10)
-	for _, err := range []error{
-		one.Apply(forged...), one.Apply(genuine...),
-		two.Apply(genuine...), two.Apply(forged...),
-	} {
+	// Written out in order rather than in a table: which batch each replica sees
+	// FIRST is the whole setup, so it should not depend on how a literal is
+	// evaluated.
+	lands := func(what string, err error) {
+		t.Helper()
 		if err != nil {
-			t.Fatalf("a replica refused a batch, so this is not the case being described: %v", err)
+			t.Fatalf("%s was refused, so this is not the case being described: %v", what, err)
 		}
 	}
+	names := func(what string, err error) {
+		t.Helper()
+		if !errors.Is(err, crdt.ErrCollidingID) {
+			t.Errorf("%s returned %v, want crdt.ErrCollidingID", what, err)
+		}
+	}
+	lands("one's first batch", one.Apply(forged...))
+	names("one's second batch", one.Apply(genuine...))
+	lands("two's first batch", two.Apply(genuine...))
+	names("two's second batch", two.Apply(forged...))
 	textOf := func(c *crdt.Composite) string {
 		d, err := c.Text("body")
 		if err != nil {
@@ -147,5 +168,5 @@ func TestTwoWritersOnOneSiteIdentityDiverge(t *testing.T) {
 		t.Skipf("the two replicas agree on %q, so this hazard no longer holds and "+
 			"OwnSiteOnly's documentation should stop claiming it", a)
 	}
-	t.Logf("two replicas given the same two batches hold %q and %q", a, b)
+	t.Logf("two replicas given the same two batches hold %q and %q, each having been told why", a, b)
 }
