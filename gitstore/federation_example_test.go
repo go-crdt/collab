@@ -68,14 +68,34 @@ func federates(name string, with ...string) func(context.Context, string, crdt.S
 }
 
 // sitesIn reports which replicas wrote the operations in a batch.
+//
+// All three kinds, because a document holds all three and a policy that reads
+// one of them is a policy with a hole in it. This walked only Text, and
+// TestTheScopeCheckSeesEveryKindOfOperation is what that cost: the same
+// unfederated site was refused when it wrote a character and allowed when it
+// wrote a map entry or a list element.
+//
+// [collab.OwnSiteOnly] walks all three and always did. That is the shape of the
+// mistake -- not a rule nobody knew, a rule restated in a second place and one
+// of the two copies behind. A batch carries exactly one kind, so two of these
+// three loops do nothing on any given call.
 func sitesIn(batch crdt.PartOps) []crdt.SiteID {
 	seen := map[crdt.SiteID]bool{}
 	var out []crdt.SiteID
-	for _, op := range batch.Text {
-		if !seen[op.ID.Site] {
-			seen[op.ID.Site] = true
-			out = append(out, op.ID.Site)
+	add := func(site crdt.SiteID) {
+		if !seen[site] {
+			seen[site] = true
+			out = append(out, site)
 		}
+	}
+	for _, op := range batch.Text {
+		add(op.ID.Site)
+	}
+	for _, op := range batch.List {
+		add(op.ID.Site)
+	}
+	for _, op := range batch.Map {
+		add(op.ID.Site)
 	}
 	return out
 }
@@ -478,4 +498,53 @@ func filesIn(stat string) []string {
 		out = append(out, strings.TrimSpace(name[strings.LastIndex(name, "/")+1:]))
 	}
 	return out
+}
+
+// The scope check must see every kind of operation a document holds.
+//
+// This is the witness for a hole that was in the example above rather than in
+// the package: sitesIn walked a batch's text operations and nothing else, so an
+// institution this one does not federate with was refused when it wrote a
+// character and ALLOWED when it wrote a map entry or a list element. A federation
+// policy that can be stepped around by writing to a different part of the
+// document is not one.
+//
+// Kept as a test rather than a fixed comment because the rule lives in two
+// places -- here and in [collab.OwnSiteOnly] -- and it was the copy that drifted
+// that had the hole.
+func TestTheScopeCheckSeesEveryKindOfOperation(t *testing.T) {
+	policy := federates("paris", "paris.example.ac")
+	link := siteFor("link@lyon.example.ac")
+	outsider := siteFor("mallory@hostile.example")
+	id := crdt.ID{Site: outsider, Seq: 1}
+
+	for _, c := range []struct {
+		kind  string
+		batch crdt.PartOps
+	}{{
+		"text", crdt.PartOps{
+			Part: crdt.Part{Kind: crdt.PartText, Name: "body"},
+			Text: []crdt.Op{{Kind: crdt.OpInsert, ID: id, Clock: 1, Char: 'x'}},
+		},
+	}, {
+		"list", crdt.PartOps{
+			Part: crdt.Part{Kind: crdt.PartList, Name: "items"},
+			List: []crdt.ListOp{{Kind: crdt.OpInsert, ID: id, Clock: 1, Value: []byte("v")}},
+		},
+	}, {
+		"map", crdt.PartOps{
+			Part: crdt.Part{Kind: crdt.PartMap, Name: "cells"},
+			Map:  []crdt.MapOp{{Kind: crdt.MapSet, ID: id, Clock: 1, Key: "k", Value: []byte("v")}},
+		},
+	}} {
+		t.Run(c.kind, func(t *testing.T) {
+			err := policy(context.Background(), "project:paper", link, []crdt.PartOps{c.batch})
+			if err == nil {
+				t.Fatalf("a %s operation from an unfederated site was allowed", c.kind)
+			}
+			if !strings.Contains(err.Error(), "federates with") {
+				t.Errorf("refused with %v, which does not name the scope", err)
+			}
+		})
+	}
 }

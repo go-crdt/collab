@@ -150,9 +150,40 @@
 // for it: the side it breaks is the FOLLOWER, because what arrives over a link
 // names sites that server never authorised
 // (TestALinkCarryingOtherSitesMeetsOwnSiteOnly). A server that federates cannot
-// install it, which is why nothing on the wire today distinguishes a link from a
-// participant. So federate between servers you run; between servers run by
-// different actors, wait for the authority decision in
+// install it, which is why nothing on the wire distinguishes a link from a
+// participant.
+//
+// # Federating with somebody else's server, then
+//
+// It takes two rules, and both are the operator's to state because only the
+// operator knows who the other actors are. Neither needs a change to the format
+// or to this package, and there is a worked example of both in gitstore's
+// federation_example_test.go, which is written as a consumer of this package
+// rather than part of it so that anything it needs and cannot reach is a gap.
+//
+//  1. SCOPE the site identity, so two actors cannot mint the same one. The
+//     example derives a site from an eduGAIN identifier —
+//     "ada@paris.example.ac" rather than "ada" — because only the home
+//     organisation issues inside its own scope. A bare name is the one failure
+//     this design cannot merge its way out of:
+//     [github.com/go-crdt/crdt.DeriveSiteID] is a function, so "42" is the same
+//     replica on every instance in the world.
+//  2. Write [Config.AuthorizeOperations] about the RELATION, not the sender: for
+//     every batch, which sites it carries, checked against the scopes this
+//     server has agreed to federate with. Every operation in the batch and every
+//     KIND of operation — the example's own check read a batch's text and
+//     nothing else, so an unfederated site was refused when it wrote a character
+//     and allowed when it wrote a map entry, until
+//     TestTheScopeCheckSeesEveryKindOfOperation.
+//
+// Two limits remain, and they are properties of this shape rather than gaps in
+// it. Trust is hop by hop: if A follows B and B follows C, B relays C's sites, so
+// A grants B the union and thereby trusts B about C — which is how mail and
+// Matrix federation trust. And an operation carries no signature, so a link is
+// believed about the attribution of everything it relays; what a server can check
+// is which sites a link may speak for, not that a site really said this. Whether
+// to close that second one, and at what cost to the snapshot and to
+// [github.com/go-crdt/crdt.Doc.Purge], is
 // https://github.com/go-crdt/collab/issues/175.
 //
 // # Two servers do not share a store
