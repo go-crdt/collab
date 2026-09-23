@@ -45,6 +45,18 @@ func siteFor(eppn string) crdt.SiteID { return crdt.DeriveSiteID([]byte(eppn)) }
 // site. Real deployments would ask their federation metadata; this one holds
 // the scopes it has agreed with, which is the same question asked of a smaller
 // register.
+//
+// `with` is the scopes a LINK may carry, and this institution's OWN scope must
+// not be among them. That is not a detail: listing it is how a link comes to be
+// allowed to write as one of this institution's own users, which is the attack
+// collab's TestAFederatedPeerCanSpeakAsAnotherServersUser measures and
+// TestALinkMayNotSpeakForOurOwnUsers holds this policy to. This example did list
+// it.
+//
+// Our own users are covered instead by the one thing that needs no register: a
+// session may always speak for the site it joined as. That is [collab.OwnSiteOnly]'s
+// rule, and composing the two is what makes this a policy about the RELATION —
+// what a session may carry depends on which session it is.
 func federates(name string, with ...string) func(context.Context, string, crdt.SiteID, []crdt.PartOps) error {
 	allowed := map[crdt.SiteID]bool{}
 	for _, scope := range with {
@@ -52,12 +64,15 @@ func federates(name string, with ...string) func(context.Context, string, crdt.S
 			allowed[siteFor(who+"@"+scope)] = true
 		}
 	}
-	return func(_ context.Context, _ string, _ crdt.SiteID, batches []crdt.PartOps) error {
+	return func(_ context.Context, _ string, from crdt.SiteID, batches []crdt.PartOps) error {
 		// Every operation in the batch, not the sender: a participant speaks
 		// for itself, but a link speaks for an institution and a batch it
 		// carries names whichever sites wrote the work.
 		for _, batch := range batches {
 			for _, site := range sitesIn(batch) {
+				if site == from {
+					continue // speaking for itself, which needs no agreement
+				}
 				if !allowed[site] {
 					return fmt.Errorf("site %d is not in a scope %s federates with", site, name)
 				}
@@ -68,14 +83,34 @@ func federates(name string, with ...string) func(context.Context, string, crdt.S
 }
 
 // sitesIn reports which replicas wrote the operations in a batch.
+//
+// All three kinds, because a document holds all three and a policy that reads
+// one of them is a policy with a hole in it. This walked only Text, and
+// TestTheScopeCheckSeesEveryKindOfOperation is what that cost: the same
+// unfederated site was refused when it wrote a character and allowed when it
+// wrote a map entry or a list element.
+//
+// [collab.OwnSiteOnly] walks all three and always did. That is the shape of the
+// mistake -- not a rule nobody knew, a rule restated in a second place and one
+// of the two copies behind. A batch carries exactly one kind, so two of these
+// three loops do nothing on any given call.
 func sitesIn(batch crdt.PartOps) []crdt.SiteID {
 	seen := map[crdt.SiteID]bool{}
 	var out []crdt.SiteID
-	for _, op := range batch.Text {
-		if !seen[op.ID.Site] {
-			seen[op.ID.Site] = true
-			out = append(out, op.ID.Site)
+	add := func(site crdt.SiteID) {
+		if !seen[site] {
+			seen[site] = true
+			out = append(out, site)
 		}
+	}
+	for _, op := range batch.Text {
+		add(op.ID.Site)
+	}
+	for _, op := range batch.List {
+		add(op.ID.Site)
+	}
+	for _, op := range batch.Map {
+		add(op.ID.Site)
 	}
 	return out
 }
@@ -256,7 +291,7 @@ func TestALinkCarriesOnlyWhatItsInstitutionMayCarry(t *testing.T) {
 
 	// Paris federates with Lyon and with nobody else.
 	paris := open(t, "paris", "paris.example.ac",
-		federates("paris", "paris.example.ac", "lyon.example.ac"))
+		federates("paris", "lyon.example.ac"))
 	elsewhere := open(t, "elsewhere", "elsewhere.example.ac", nil)
 
 	link(ctx, elsewhere, paris, "project:paper", siteFor("link@lyon.example.ac"))
@@ -365,7 +400,7 @@ func Example_federation() {
 	}
 
 	paris, parisGit := open(parisDir, "paris", "paris.example.ac",
-		federates("paris", "paris.example.ac", "lyon.example.ac"))
+		federates("paris", "lyon.example.ac"))
 	lyon, _ := open(lyonDir, "lyon", "lyon.example.ac", nil)
 	// A server is closed, not merely cancelled: it has documents to write out,
 	// and a directory removed while it is still writing is a race an operator
@@ -478,4 +513,98 @@ func filesIn(stat string) []string {
 		out = append(out, strings.TrimSpace(name[strings.LastIndex(name, "/")+1:]))
 	}
 	return out
+}
+
+// The scope check must see every kind of operation a document holds.
+//
+// This is the witness for a hole that was in the example above rather than in
+// the package: sitesIn walked a batch's text operations and nothing else, so an
+// institution this one does not federate with was refused when it wrote a
+// character and ALLOWED when it wrote a map entry or a list element. A federation
+// policy that can be stepped around by writing to a different part of the
+// document is not one.
+//
+// Kept as a test rather than a fixed comment because the rule lives in two
+// places -- here and in [collab.OwnSiteOnly] -- and it was the copy that drifted
+// that had the hole.
+func TestTheScopeCheckSeesEveryKindOfOperation(t *testing.T) {
+	policy := federates("paris")
+	link := siteFor("link@lyon.example.ac")
+	outsider := siteFor("mallory@hostile.example")
+	id := crdt.ID{Site: outsider, Seq: 1}
+
+	for _, c := range []struct {
+		kind  string
+		batch crdt.PartOps
+	}{{
+		"text", crdt.PartOps{
+			Part: crdt.Part{Kind: crdt.PartText, Name: "body"},
+			Text: []crdt.Op{{Kind: crdt.OpInsert, ID: id, Clock: 1, Char: 'x'}},
+		},
+	}, {
+		"list", crdt.PartOps{
+			Part: crdt.Part{Kind: crdt.PartList, Name: "items"},
+			List: []crdt.ListOp{{Kind: crdt.OpInsert, ID: id, Clock: 1, Value: []byte("v")}},
+		},
+	}, {
+		"map", crdt.PartOps{
+			Part: crdt.Part{Kind: crdt.PartMap, Name: "cells"},
+			Map:  []crdt.MapOp{{Kind: crdt.MapSet, ID: id, Clock: 1, Key: "k", Value: []byte("v")}},
+		},
+	}} {
+		t.Run(c.kind, func(t *testing.T) {
+			err := policy(context.Background(), "project:paper", link, []crdt.PartOps{c.batch})
+			if err == nil {
+				t.Fatalf("a %s operation from an unfederated site was allowed", c.kind)
+			}
+			if !strings.Contains(err.Error(), "federates with") {
+				t.Errorf("refused with %v, which does not name the scope", err)
+			}
+		})
+	}
+}
+
+// A link may not speak for our own users, which is the attack rather than a
+// refinement of it.
+//
+// collab's TestAFederatedPeerCanSpeakAsAnotherServersUser measures what a followed
+// server does to its follower when nothing stops it: it claims one of the
+// follower's own users, and the two replicas then diverge while reporting the same
+// version vector, each believing it is caught up with the other.
+//
+// A policy that lists the scopes it federates with does not stop that if its own
+// scope is one of the entries -- and this example listed it, so a link from Lyon
+// could write as ada@paris.example.ac. Our own users are covered by a session
+// speaking for the site it joined as, and by nothing else.
+func TestALinkMayNotSpeakForOurOwnUsers(t *testing.T) {
+	policy := federates("paris", "lyon.example.ac")
+	ours := siteFor("ada@paris.example.ac")
+	theirs := siteFor("grace@lyon.example.ac")
+	batchBy := func(site crdt.SiteID) []crdt.PartOps {
+		return []crdt.PartOps{{
+			Part: crdt.Part{Kind: crdt.PartText, Name: "file:paper.tex"},
+			Text: []crdt.Op{{Kind: crdt.OpInsert, ID: crdt.ID{Site: site, Seq: 1}, Clock: 1, Char: 'x'}},
+		}}
+	}
+	for _, c := range []struct {
+		name    string
+		session crdt.SiteID
+		carries crdt.SiteID
+		refused bool
+	}{
+		{"our own user, writing for herself", ours, ours, false},
+		{"the Lyon link, carrying Lyon", siteFor("link@lyon.example.ac"), theirs, false},
+		{"the Lyon link, carrying ONE OF OURS", siteFor("link@lyon.example.ac"), ours, true},
+		{"our own user, handing over another of ours", ours, siteFor("grace@paris.example.ac"), true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := policy(context.Background(), "project:paper", c.session, batchBy(c.carries))
+			if c.refused && err == nil {
+				t.Fatalf("session %d was allowed to carry site %d", c.session, c.carries)
+			}
+			if !c.refused && err != nil {
+				t.Fatalf("session %d was refused carrying site %d: %v", c.session, c.carries, err)
+			}
+		})
+	}
 }

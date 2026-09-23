@@ -150,9 +150,61 @@
 // for it: the side it breaks is the FOLLOWER, because what arrives over a link
 // names sites that server never authorised
 // (TestALinkCarryingOtherSitesMeetsOwnSiteOnly). A server that federates cannot
-// install it, which is why nothing on the wire today distinguishes a link from a
-// participant. So federate between servers you run; between servers run by
-// different actors, wait for the authority decision in
+// install it, which is why nothing on the wire distinguishes a link from a
+// participant.
+//
+// # Federating with somebody else's server, then
+//
+// It takes two rules, and both are the operator's to state because only the
+// operator knows who the other actors are. Neither needs a change to the format
+// or to this package, and there is a worked example of both in gitstore's
+// federation_example_test.go, which is written as a consumer of this package
+// rather than part of it so that anything it needs and cannot reach is a gap.
+//
+//  1. SCOPE the site identity, so two actors cannot mint the same one. The
+//     example derives a site from an eduGAIN identifier —
+//     "ada@paris.example.ac" rather than "ada" — because only the home
+//     organisation issues inside its own scope. A bare name is the one failure
+//     this design cannot merge its way out of:
+//     [github.com/go-crdt/crdt.DeriveSiteID] is a function, so "42" is the same
+//     replica on every instance in the world.
+//  2. Write [Config.AuthorizeOperations] about the RELATION: for every batch,
+//     which sites it carries, and whether the session carrying them may speak
+//     for those. Two details decide whether it works, and both were measured
+//     the hard way.
+//
+// Every KIND of operation, because a document holds three. gitstore's example
+// read a batch's text and nothing else, so an unfederated site was refused when
+// it wrote a character and allowed when it wrote a map entry, until
+// TestTheScopeCheckSeesEveryKindOfOperation.
+//
+// And this server's OWN scope must not be among the scopes a link may carry.
+// Listing it is how a link comes to be allowed to write as one of this server's
+// own users, which is the attack rather than a refinement of it — and the example
+// listed it. Our users need no entry in any register: a session may always speak
+// for the site it joined as, which is [OwnSiteOnly]'s rule, and composing the two
+// is what makes the policy about the relation. Held to it by
+// TestAScopedPolicyStopsALinkSpeakingForOurOwnUsers, whose third case is the
+// measured attack: a peer claiming the very user who wrote here, with a longer
+// history so the tail is actually sent. The link's session ends at once naming
+// the site it may not speak for, and this replica keeps what it had.
+//
+// One trap in testing this, because it turns a defect into something that looks
+// like a defence. When a peer claims a site one of our participants used and
+// writes LESS than that participant did, our link joins saying it holds that site
+// up to a higher clock, so the followed server sends nothing at all. Nothing
+// arrives and nothing is refused. That is the version-vector collision measured
+// in TestAFederatedPeerCanSpeakAsAnotherServersUser, and a test that only watched
+// the document would read it as the policy working.
+//
+// Two limits remain, and they are properties of this shape rather than gaps in
+// it. Trust is hop by hop: if A follows B and B follows C, B relays C's sites, so
+// A grants B the union and thereby trusts B about C — which is how mail and
+// Matrix federation trust. And an operation carries no signature, so a link is
+// believed about the attribution of everything it relays; what a server can check
+// is which sites a link may speak for, not that a site really said this. Whether
+// to close that second one, and at what cost to the snapshot and to
+// [github.com/go-crdt/crdt.Doc.Purge], is
 // https://github.com/go-crdt/collab/issues/175.
 //
 // # Two servers do not share a store
