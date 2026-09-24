@@ -162,6 +162,31 @@ type Config struct {
 	// the error to handle.
 	OnPersistError func(document string, err error)
 
+	// OnOperationsRefused, when set, is called for every batch a document
+	// refused, with the site of the session that sent it and the reason.
+	//
+	// Without it a refusal is told to the offending session and to nobody else,
+	// which is the wrong room for two of the three reasons a batch is refused.
+	// A client that sends rubbish deserves the error it gets and no more. The
+	// other two are the operator's business:
+	//
+	//   - [Config.AuthorizeOperations] refused it. On a federating server that
+	//     is a peer carrying sites it may not speak for, and the operator is the
+	//     only one who can take that up with the other operator.
+	//   - [github.com/go-crdt/crdt.ErrCollidingID]: an operation wore the name
+	//     of one this replica had already applied and said something else. Two
+	//     replicas chose the same site, by accident as easily as on purpose, and
+	//     an accident here means the identities a deployment hands out are not
+	//     unique -- which nobody can discover from inside a session.
+	//
+	// The error wraps the cause, so an implementation asks errors.Is rather than
+	// reading the wording.
+	//
+	// It is called with no lock held, after the batch has been dealt with, so an
+	// implementation that blocks delays only the session it belongs to and not
+	// everybody editing the document. Counting or logging is what it is for.
+	OnOperationsRefused func(document string, from crdt.SiteID, err error)
+
 	// Clock is what [Config.EvictAfter] measures with. It defaults to time.Now,
 	// and exists because a caller that wants a monotonic source, or a test that
 	// wants to reach an hour of idleness without waiting an hour, has nowhere
@@ -244,6 +269,7 @@ type Server struct {
 	// nil outside the test that has to make that window happen on purpose.
 	betweenOpenAndJoin func(*document)
 	onEvictError       func(document string, err error)
+	onRefused          func(document string, from crdt.SiteID, err error)
 	collectEvery       time.Duration
 	lastCollect        time.Time // guarded by mu
 
@@ -274,6 +300,7 @@ func NewServer(cfg Config) *Server {
 		authorizeOps: cfg.AuthorizeOperations,
 		now:          cfg.Clock,
 		onEvictError: cfg.OnEvictError,
+		onRefused:    cfg.OnOperationsRefused,
 		collectEvery: cfg.CollectEvery,
 		stop:         make(chan struct{}),
 		stopped:      make(chan struct{}),
@@ -436,6 +463,7 @@ func (s *Server) open(ctx context.Context, name string) (*document, error) {
 		store:        s.store,
 		backlog:      s.backlog,
 		authorizeOps: s.authorizeOps,
+		onRefused:    s.onRefused,
 		doc:          doc,
 		presence:     awareness.New(),
 		subs:         map[*subscriber]struct{}{},
@@ -501,6 +529,9 @@ type document struct {
 	// authorizeOps decides whether a session may add what it is sending; see
 	// [Config.AuthorizeOperations]. Nil is "anything a session sends".
 	authorizeOps func(ctx context.Context, document string, from crdt.SiteID, batches []crdt.PartOps) error
+	// onRefused is told about a batch this document would not take; see
+	// [Config.OnOperationsRefused]. Nil is "tell nobody but the session".
+	onRefused func(document string, from crdt.SiteID, err error)
 	// now is the server's clock, carried here so a test can move it.
 	now func() time.Time
 
@@ -892,6 +923,17 @@ func (d *document) handle(ctx context.Context, sub *subscriber, kind byte, msg a
 // relayed unchanged: applying them is idempotent and order-independent, so
 // there is nothing for the server to decide.
 func (d *document) applyOperations(ctx context.Context, from *subscriber, raw []byte) error {
+	err := d.applyOperationsLocked(ctx, from, raw)
+	// Outside the lock on purpose: an operator's logger that blocks should hold
+	// up the session it belongs to, not everybody editing the document. See
+	// [Config.OnOperationsRefused].
+	if err != nil && d.onRefused != nil {
+		d.onRefused(d.name, from.site, err)
+	}
+	return err
+}
+
+func (d *document) applyOperationsLocked(ctx context.Context, from *subscriber, raw []byte) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	// Decoding and merging share one rejection: both mean the same thing to the

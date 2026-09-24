@@ -207,6 +207,13 @@
 // [github.com/go-crdt/crdt.Doc.Purge], is
 // https://github.com/go-crdt/collab/issues/175.
 //
+// [Config.OnOperationsRefused] is how an operator hears any of it happen. A
+// refusal otherwise goes to the offending session and nowhere else, which is the
+// wrong room for both of the cases above: a peer carrying sites it may not speak
+// for, and two replicas that chose the same site, are things only an operator can
+// take up — and an accidental collision means the identities a deployment hands
+// out are not unique, which nobody can discover from inside a session.
+//
 // # Two servers do not share a store
 //
 // A [Store] holds snapshots and [Store.Save] replaces. A server holds the
