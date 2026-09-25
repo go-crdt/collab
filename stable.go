@@ -125,11 +125,28 @@ func (d *document) acknowledge(sub *subscriber, raw, raw2 []byte) error {
 	if d.seen == nil {
 		d.seen = map[crdt.SiteID]crdt.CompositeVersion{}
 	}
-	d.seen[sub.site] = have
 	if d.reached == nil {
 		d.reached = map[crdt.SiteID]crdt.CompositeClocks{}
 	}
+	d.seen[sub.site] = have
 	d.reached[sub.site] = clocks
+	// Woken unconditionally, and the alternative was built and measured before
+	// being rejected.
+	//
+	// Waking only on news reads better: a wake says "the meet you promise may
+	// have moved", the meet is taken over d.seen and d.reached and nothing else,
+	// so an acknowledgement changing neither cannot have moved it. It costs too
+	// much. Comparing a CompositeVersion walks a version vector once per site in
+	// it, and this runs once per participant per operation, so on
+	// BenchmarkFanOut/1000 it was +40% and +53% -- measured twice, with the arms
+	// in both orders, because the first pair drifted enough to look like an
+	// artefact and was not.
+	//
+	// The cycle it was meant to close is closed at the exit instead, where the
+	// same comparison costs one bytes.Equal per link rather than one map walk per
+	// participant: a link does not put a promise on the wire that says what its
+	// last one said. See the outbound loop in follow.go, go-crdt/collab#174, and
+	// TestALinkDoesNotRepeatAPromiseItAlreadySent.
 	d.wakeLinks(sub)
 	d.mu.Unlock()
 	return nil

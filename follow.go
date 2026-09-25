@@ -3,6 +3,7 @@
 package collab
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -229,6 +230,11 @@ func (s *Server) follow(ctx context.Context, peer Transport, document string, as
 	go func() {
 		defer close(running)
 		defer cancel()
+		// The last promise this session put on the wire, so one that says the
+		// same thing is not sent again. Per session, not per document: see where
+		// it is used.
+		var lastAck ackMsg
+		var sentAck bool
 		for {
 			// One message is chosen and then one send makes it, rather than a
 			// send in each arm: the two would fail the same way and be answered
@@ -260,6 +266,41 @@ func (s *Server) follow(ctx context.Context, peer Transport, document string, as
 			case <-ctx.Done():
 				sent <- ctx.Err()
 				return
+			}
+			// A promise that says what the last one said is not sent.
+			//
+			// This closes the cycle go-crdt/collab#174 describes by construction
+			// rather than by timing. document.acknowledge no longer wakes a link
+			// on an acknowledgement that taught it nothing, which removes most of
+			// the fuel -- but not all of it: news about one site need not move the
+			// meet, because the meet is a minimum and another site may be holding
+			// it. So a woken link can still compute the promise it last sent, and
+			// that message arrives at its peer as an acknowledgement, where it IS
+			// news, and wakes that server's other links.
+			//
+			// Skipping it withholds nothing. The carrier is a reliable stream, so
+			// a repeat cannot recover a message the peer missed, and an
+			// acknowledgement that says what the last one said teaches the peer
+			// nothing by definition. The state is per SESSION, declared in this
+			// goroutine: a link that reconnects gets a fresh carrier and a fresh
+			// loop, so its first promise is always sent.
+			//
+			// What it costs is two bytes.Equal per acknowledgement a link sends,
+			// on canonical encodings, so byte equality is exact. BenchmarkFanOut
+			// cannot price it and was not used to: it puts a thousand
+			// participants on one server and never calls Follow, so there is no
+			// link in it and this branch never runs. That is also why the arm
+			// differences it showed here were noise, while the ones for the
+			// rejected guard in document.acknowledge were not -- acknowledge runs
+			// for every participant in that benchmark.
+			if out.kind == kindAcknowledge {
+				if ack, isAck := out.msg.(ackMsg); isAck {
+					if sentAck && bytes.Equal(ack.Version, lastAck.Version) &&
+						bytes.Equal(ack.Clocks, lastAck.Clocks) {
+						continue
+					}
+					lastAck, sentAck = ack, true
+				}
 			}
 			if err := conn.Send(out.kind, out.msg); err != nil {
 				sent <- err
