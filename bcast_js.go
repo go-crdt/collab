@@ -32,9 +32,17 @@ import (
 // origin.
 
 // DefaultElectionWindow is how long [HostOrJoin] listens before concluding no
-// tab is already hosting. It is generous next to a same-origin round trip so
-// that two tabs opening together reliably see each other's announcements and
-// settle the host between them by the rule in [electRole].
+// tab is hosting, and how long [OpenBroadcastSession] listens when it has no
+// better rule available.
+//
+// It is the FALLBACK's window now, not the rule's. Where the browser has Web
+// Locks, [OpenBroadcastSession] asks for an exclusive lock on the room and gets
+// an immediate, exclusive answer, so no duration is waited out and two tabs
+// cannot both host. Where it does not -- and in [HostOrJoin], whose context
+// bounds only the election and so has no lifetime to hold a lock for -- this is
+// how long a tab listens. See electByLock, and
+// TestTwoTabsElectOneHostWithNoWindow for what the difference is worth: with a
+// zero window the fallback leaves BOTH tabs hosting and the lock leaves one.
 const DefaultElectionWindow = 250 * time.Millisecond
 
 // bcBus is a real BroadcastChannel presented as a [bus].
@@ -199,7 +207,16 @@ func OpenBroadcastSession(ctx context.Context, room string, window time.Duration
 	if err != nil {
 		return nil, err
 	}
-	role, host, conn, err := hostOrJoinBus(ctx, attach(b, randomID()), window)
+	bc := attach(b, randomID())
+	// The lock first, where the browser has one. It answers immediately and
+	// exclusively, so two tabs opening together cannot both host -- where
+	// electRole's window can leave both of them hosting on a loaded machine, and
+	// does. window is then the FALLBACK's window rather than the rule's.
+	//
+	// Only here and not in [HostOrJoin]: a lock is held for as long as the promise
+	// its callback returned is unsettled, and this ctx is the session's lifetime,
+	// which is the thing a lock can be tied to. See electByLock.
+	role, host, conn, err := openWith(ctx, bc, room, window)
 	if err != nil {
 		b.close()
 		return nil, err
@@ -241,4 +258,17 @@ func (bs *BroadcastSession) Close() error {
 	}
 	bs.bus.close()
 	return nil
+}
+
+// openWith decides this tab's role and wires it, by lock where the browser has one
+// and by window where it does not.
+//
+// The fallback is not a formality: a browser without Web Locks gets exactly the
+// election it got before, and [ErrHostSuperseded] still heals the room when that
+// election leaves two hosts. What the lock changes is that it cannot.
+func openWith(ctx context.Context, bc *busConn, room string, window time.Duration) (Role, *bcastHost, carrierConn, error) {
+	if role, byLock := electByLock(ctx, room); byLock {
+		return wireRole(ctx, bc, role)
+	}
+	return hostOrJoinBus(ctx, bc, window)
 }
