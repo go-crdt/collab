@@ -8,7 +8,6 @@ package collab_test
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -55,14 +54,14 @@ func TestAScopedPolicyStopsALinkSpeakingForOurOwnUsers(t *testing.T) {
 	}, {
 		name:       "an impostor claiming a paris user we do not have",
 		theirScope: "paris.example.ac", theirUser: "grace", theirWrite: "FORGED",
-		wantInMine: "GENUINE", wantRefusal: "is not one this link may speak for",
+		wantInMine: "GENUINE", wantRefusal: "may not speak for",
 	}, {
 		// The attack as measured, which needs the forged history to be LONGER
 		// than ours. See scopedPolicyRun for why a shorter one proves nothing.
 		name:       "an impostor claiming the very user who wrote ours",
 		theirScope: "paris.example.ac", theirUser: "ada",
 		theirWrite: "FORGED-AND-MUCH-LONGER-THAN-GENUINE",
-		wantInMine: "GENUINE", wantRefusal: "is not one this link may speak for",
+		wantInMine: "GENUINE", wantRefusal: "may not speak for",
 	}} {
 		t.Run(c.name, func(t *testing.T) {
 			scopedPolicyRun(t, c.theirScope, c.theirUser, c.theirWrite, c.wantInMine, c.wantRefusal)
@@ -103,32 +102,17 @@ func carriesOnly(scopes ...string) func(context.Context, string, crdt.SiteID, []
 			allowed[federatedSite(who+"@"+scope)] = true
 		}
 	}
-	return func(_ context.Context, _ string, from crdt.SiteID, batches []crdt.PartOps) error {
-		for _, b := range batches {
-			for _, site := range sitesIn(b) {
-				if site == from {
-					continue // speaking for itself, which needs no agreement
-				}
-				if !allowed[site] {
-					return fmt.Errorf("site %d is not one this link may speak for", site)
-				}
-			}
-		}
-		return nil
-	}
+	// Through the shipped shape rather than a hand-written walk. That is the
+	// point of this test now: what an operator installs is what is exercised
+	// here, and the two details a hand-written one gets wrong -- reading only a
+	// batch's text, and listing your own scope among those a link may carry --
+	// are not expressible through it. Our own scope is deliberately NOT in
+	// `scopes` below, and does not need to be.
+	return collab.SpeaksFor(func(_ context.Context, _ string, _, carried crdt.SiteID) bool {
+		return allowed[carried]
+	})
 }
 
-// scopedPolicyRun runs one document over two servers run by different people.
-//
-// theirWrite is not decoration. When the impostor claims the very site one of our
-// participants used, our link joins saying it holds that site up to clock 7, so a
-// SHORTER forged history is never sent at all -- the followed server computes that
-// we have it. Nothing arrives, nothing is refused, and a test that only looked at
-// the document would read that as the policy working. It is the version vector's
-// collision, which is the defect measured in
-// TestAFederatedPeerCanSpeakAsAnotherServersUser and not a defence. A longer
-// forged history has a tail past our count, that tail IS sent, and refusing it is
-// what this asserts.
 func scopedPolicyRun(t *testing.T, theirScope, theirUser, theirWrite, wantInMine, wantRefusal string) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
