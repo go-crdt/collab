@@ -116,6 +116,15 @@
 // do is per-session peak times sessions allowed, and the lever is the second
 // factor.
 //
+// And the bytes are not the whole cost. What an operations message decodes INTO is
+// sixteen to twenty-four times larger than the message, that being the ratio of a
+// record in memory to the smallest encoded one — so a gibibyte of operations asks
+// this server to reserve sixteen to twenty-four gibibytes, and it asks that of an
+// honest sender as much as a hostile one. [Config.MaxOperations] is the bound on
+// that, in the unit that amplifies rather than in bytes, and it is off by default.
+// Sizing it is arithmetic: multiply by 80 to 96 bytes a record and compare against
+// what one message may spend.
+//
 // And what a participant can do once it is in: everything a replica can do to a
 // document it holds. It can write anywhere and delete anything — a CRDT
 // converges on what it is told, and does not adjudicate — and it can hand over

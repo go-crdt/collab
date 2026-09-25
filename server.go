@@ -162,6 +162,35 @@ type Config struct {
 	// the error to handle.
 	OnPersistError func(document string, err error)
 
+	// MaxOperations, if set, is the most operations one message may claim, and a
+	// message claiming more is refused before anything is reserved for it. Zero
+	// is no limit, which is what this package did before the field existed.
+	//
+	// It is a second bound beside Backlog and the transport's own message size,
+	// and it bounds a different thing: how much a message may ask this server to
+	// RESERVE. The counted headers in [github.com/go-crdt/crdt] already refuse a
+	// claim larger than the bytes that follow it, so what is left is a message
+	// that is honest and enormous -- the worst claim they permit still reserves
+	// sixteen to twenty-four times the input, that being the ratio of a record in
+	// memory to the smallest encoded one. A gibibyte of operations is therefore
+	// sixteen to twenty-four gibibytes, for an honest sender as much as a hostile
+	// one.
+	//
+	// The number is here rather than in crdt for the reason crdt gives: a ceiling
+	// chosen by a library is a guess about somebody's machine. This is the layering
+	// HPACK uses, where the decoder offers the knob and the server turns it.
+	//
+	// What it costs when it fires: the message is refused whole, the session is
+	// told, and [Config.OnOperationsRefused] is called. It is not a disconnection
+	// on its own -- a binding decides that, as it does for any refused batch.
+	//
+	// Sizing it is arithmetic rather than taste. Multiply by the in-memory record
+	// size, which is 80 to 96 bytes, and compare against what this server may
+	// spend on one message: a million operations is 80 to 96 MB.
+	//
+	// See go-crdt/collab#169.
+	MaxOperations int
+
 	// OnOperationsRefused, when set, is called for every batch a document
 	// refused, with the site of the session that sent it and the reason.
 	//
@@ -270,6 +299,7 @@ type Server struct {
 	betweenOpenAndJoin func(*document)
 	onEvictError       func(document string, err error)
 	onRefused          func(document string, from crdt.SiteID, err error)
+	maxOps             int
 	collectEvery       time.Duration
 	lastCollect        time.Time // guarded by mu
 
@@ -301,6 +331,7 @@ func NewServer(cfg Config) *Server {
 		now:          cfg.Clock,
 		onEvictError: cfg.OnEvictError,
 		onRefused:    cfg.OnOperationsRefused,
+		maxOps:       cfg.MaxOperations,
 		collectEvery: cfg.CollectEvery,
 		stop:         make(chan struct{}),
 		stopped:      make(chan struct{}),
@@ -464,6 +495,7 @@ func (s *Server) open(ctx context.Context, name string) (*document, error) {
 		backlog:      s.backlog,
 		authorizeOps: s.authorizeOps,
 		onRefused:    s.onRefused,
+		maxOps:       s.maxOps,
 		doc:          doc,
 		presence:     awareness.New(),
 		subs:         map[*subscriber]struct{}{},
@@ -532,6 +564,9 @@ type document struct {
 	// onRefused is told about a batch this document would not take; see
 	// [Config.OnOperationsRefused]. Nil is "tell nobody but the session".
 	onRefused func(document string, from crdt.SiteID, err error)
+	// maxOps bounds what one message may ask this document to reserve; see
+	// [Config.MaxOperations]. Zero is no limit.
+	maxOps int
 	// now is the server's clock, carried here so a test can move it.
 	now func() time.Time
 
@@ -942,8 +977,22 @@ func (d *document) applyOperationsLocked(ctx context.Context, from *subscriber, 
 	// apart here because [Config.AuthorizeOperations] runs between them — after
 	// the operations are known and before any is applied — and Apply's error is
 	// dropped rather than turned into that unreachable branch.
-	batches, err := crdt.ParsePartOps(raw)
+	// Bounded by what this server said it would reserve, not only by what the
+	// bytes could hold: see [Config.MaxOperations]. Zero passes through as no
+	// limit, which is what this did before the field existed.
+	batches, err := crdt.ParsePartOpsLimit(raw, d.maxOps)
 	if err != nil {
+		if errors.Is(err, crdt.ErrTooManyOps) {
+			// Said apart from a malformed message because it is a different fact
+			// about a different sender: this one is well formed and larger than
+			// this server allows, and an operator reading a log wants to know
+			// which of the two happened.
+			//
+			// The cause is kept, as it is for crdt.ErrStranded below, so a binding
+			// or [Config.OnOperationsRefused] can ask errors.Is rather than parse
+			// the wording.
+			return &sessionError{kind: errInvalid, msg: "collab: operations refused: " + err.Error(), cause: err}
+		}
 		return fail(errInvalid, "collab: unusable operations")
 	}
 	// After decoding and before applying, so a refused batch changes nothing:
