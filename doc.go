@@ -168,26 +168,30 @@
 //     this design cannot merge its way out of:
 //     [github.com/go-crdt/crdt.DeriveSiteID] is a function, so "42" is the same
 //     replica on every instance in the world.
-//  2. Write [Config.AuthorizeOperations] about the RELATION: for every batch,
-//     which sites it carries, and whether the session carrying them may speak
-//     for those. Two details decide whether it works, and both were measured
-//     the hard way.
+//  2. Install [SpeaksFor] and answer its one question: may this session hand over
+//     work that site made? It is [Config.AuthorizeOperations] about the RELATION
+//     rather than about the sender, which is the difference that matters — a
+//     participant speaks for itself, a link speaks for a server, and what a link
+//     carries is not what it joined as.
 //
-// Every KIND of operation, because a document holds three. gitstore's example
-// read a batch's text and nothing else, so an unfederated site was refused when
-// it wrote a character and allowed when it wrote a map entry, until
-// TestTheScopeCheckSeesEveryKindOfOperation.
+// Two details decide whether such a policy works, both learned the hard way, and
+// [SpeaksFor] now gets both right so a deployment does not have to.
 //
-// And this server's OWN scope must not be among the scopes a link may carry.
-// Listing it is how a link comes to be allowed to write as one of this server's
-// own users, which is the attack rather than a refinement of it — and the example
-// listed it. Our users need no entry in any register: a session may always speak
-// for the site it joined as, which is [OwnSiteOnly]'s rule, and composing the two
-// is what makes the policy about the relation. Held to it by
+// Every KIND of operation, because a document holds three. gitstore's example read
+// a batch's text and nothing else, so an unfederated site was refused when it wrote
+// a character and allowed when it wrote a map entry, until
+// TestTheScopeCheckSeesEveryKindOfOperation. [Sites] is that walk, exported once.
+//
+// And this server's OWN scope must never be among the scopes a link may carry.
+// Listing it is how a link comes to be allowed to write as one of this server's own
+// users, which is the attack rather than a refinement of it — and the example
+// listed it. With [SpeaksFor] there is nothing to list: a session's own site is
+// allowed without the predicate being consulted at all, so the predicate names only
+// the scopes you federate with. Held to it by
 // TestAScopedPolicyStopsALinkSpeakingForOurOwnUsers, whose third case is the
 // measured attack: a peer claiming the very user who wrote here, with a longer
-// history so the tail is actually sent. The link's session ends at once naming
-// the site it may not speak for, and this replica keeps what it had.
+// history so the tail is actually sent. The link's session ends at once naming the
+// site it may not speak for, and this replica keeps what it had.
 //
 // One trap in testing this, because it turns a defect into something that looks
 // like a defence. When a peer claims a site one of our participants used and
