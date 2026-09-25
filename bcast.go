@@ -631,6 +631,17 @@ func hostOrJoinBus(ctx context.Context, bc *busConn, window time.Duration) (Role
 	if err != nil {
 		return 0, nil, nil, err
 	}
+	return wireRole(ctx, bc, role)
+}
+
+// wireRole makes a decided role live: a host that is already answering hellos, or a
+// client that has already dialled the host.
+//
+// Apart from the deciding because there are two ways to decide and only one way to
+// wire. [electRole] listens for a window; electByLock asks the browser for an
+// exclusive lock and gets an immediate answer with no window at all. What follows
+// either of them is the same, and a second copy of it is how the two would drift.
+func wireRole(ctx context.Context, bc *busConn, role Role) (Role, *bcastHost, carrierConn, error) {
 	if role == RoleHost {
 		return RoleHost, newBcastHost(ctx, bc), nil, nil
 	}
