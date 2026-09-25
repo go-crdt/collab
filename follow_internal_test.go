@@ -391,12 +391,37 @@ func TestFollowEndsWhenItCannotSendItsPromise(t *testing.T) {
 
 	// Somebody other than the link writes, so the broadcast reaches it: an
 	// operation the link delivered itself would never come back to it.
+	//
+	// Waited for on the LINK rather than on the document, which is what this test
+	// used to do. It lost that race once on the arch amd64 lane and passed on the
+	// re-run, and it has not been reproduced here -- not in a hundred runs of the
+	// test alone, nor in fifteen passes of the whole package at reduced
+	// parallelism and three at a time. So this is a race shown by READING the
+	// order, not one caught in the act; see go-crdt/collab#177 for what was tried.
+	// Server.openAndEnrol publishes the document and THEN enrols the session --
+	// the window between them is one the code names, having a test seam for it --
+	// so a test that waits only for s.docs["doc"] can go on to write and
+	// acknowledge while the link is neither a subscriber nor in d.links. The
+	// broadcast then misses it and wakeLinks has nobody to wake, and the promise
+	// this test is about is never offered: the failure printed "it sent kinds
+	// [1 3]", a join and ONE operation, the first batch having gone nowhere.
+	//
+	// d.links is the right thing to wait for because it is the last of the three
+	// to be set, and it is what the wake needs. Through the package's own until
+	// rather than a second waiter beside it -- collect_federation_test.go already
+	// waits for a link this way, on len(d.subs).
 	var doc *document
-	for doc == nil {
+	until(t, "the link to register itself in the document", func() bool {
 		s.mu.Lock()
 		doc = s.docs["doc"]
 		s.mu.Unlock()
-	}
+		if doc == nil {
+			return false
+		}
+		doc.mu.Lock()
+		defer doc.mu.Unlock()
+		return len(doc.links) > 0
+	})
 	other, err := doc.enrol(joinMsg{Document: "doc", Site: 7}, false)
 	if err != nil {
 		t.Fatal(err)
