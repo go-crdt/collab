@@ -37,6 +37,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/go-crdt/collab"
 )
@@ -141,7 +142,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 			document   text PRIMARY KEY,
 			snapshot   bytea NOT NULL,
 			updated_at timestamptz NOT NULL DEFAULT now()
-		)`, s.table, s.table))
+		);
+		ALTER TABLE %s ADD COLUMN IF NOT EXISTS version bigint NOT NULL DEFAULT 1`,
+		s.table, s.table, s.table))
 	if err == nil {
 		err = tx.Commit()
 	}
@@ -184,7 +187,8 @@ func (s *Store) Save(ctx context.Context, document string, snapshot []byte) erro
 	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (document, snapshot) VALUES ($1, $2)
 		ON CONFLICT (document) DO UPDATE
-			SET snapshot = EXCLUDED.snapshot, updated_at = now()`, s.table),
+			SET snapshot = EXCLUDED.snapshot, updated_at = now(),
+			    version = %s.version + 1`, s.table, s.table),
 		document, collab.PackSnapshot(snapshot))
 	if err != nil {
 		return fmt.Errorf("pgstore: writing %q: %w", document, err)
@@ -214,4 +218,89 @@ func (s *Store) Documents(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("pgstore: listing %s: %w", s.table, err)
 	}
 	return out, nil
+}
+
+// LoadToken is [Store.Load] and also the version naming what it returned, so a later
+// [Store.SaveIf] can be made against it. See [collab.ConditionalStore].
+//
+// nil and nil is a document nobody has written, which is what asks SaveIf for an
+// insert rather than an update.
+func (s *Store) LoadToken(ctx context.Context, document string) ([]byte, collab.Token, error) {
+	var snapshot []byte
+	var version int64
+	err := s.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT snapshot, version FROM %s WHERE document = $1`, s.table),
+		document).Scan(&snapshot, &version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("pgstore: reading %q: %w", document, err)
+	}
+	if len(snapshot) == 0 {
+		// A row that holds nothing, refused for the reason Load gives: nil is how a
+		// store says "new document" and there is no row for that, so this is a row
+		// somebody emptied and answering nil would make the loss permanent.
+		return nil, nil, fmt.Errorf("pgstore: document %q has an empty row, which is not a new document", document)
+	}
+	out, err := collab.UnpackSnapshot(snapshot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("pgstore: reading %q: %w", document, err)
+	}
+	return out, token(version), nil
+}
+
+// SaveIf records the snapshot only while this table still holds the version expect
+// names, and returns the version it wrote. See [collab.ConditionalStore].
+//
+// The comparison and the write are one statement, which is the whole of it: anything
+// that read the version and then wrote would have the race it exists to prevent. A
+// nil expect asks for a row that is not there, so two servers opening one new
+// document cannot both believe they created it.
+func (s *Store) SaveIf(ctx context.Context, document string, snapshot []byte, expect collab.Token) (collab.Token, error) {
+	packed := collab.PackSnapshot(snapshot)
+	var written int64
+	var err error
+	if expect == nil {
+		// DO NOTHING rather than DO UPDATE: a row that is already there means
+		// somebody wrote it since this server read nothing, which is exactly what
+		// this is asked to refuse.
+		err = s.db.QueryRowContext(ctx, fmt.Sprintf(`
+			INSERT INTO %s (document, snapshot) VALUES ($1, $2)
+			ON CONFLICT (document) DO NOTHING
+			RETURNING version`, s.table), document, packed).Scan(&written)
+	} else {
+		var want int64
+		if want, err = versionOf(expect); err != nil {
+			return nil, fmt.Errorf("pgstore: writing %q: %w", document, err)
+		}
+		err = s.db.QueryRowContext(ctx, fmt.Sprintf(`
+			UPDATE %s SET snapshot = $2, updated_at = now(), version = version + 1
+			WHERE document = $1 AND version = $3
+			RETURNING version`, s.table), document, packed, want).Scan(&written)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		// No row matched, which for either statement means the table holds
+		// something this server did not read.
+		return nil, collab.ErrChanged
+	}
+	if err != nil {
+		return nil, fmt.Errorf("pgstore: writing %q: %w", document, err)
+	}
+	return token(written), nil
+}
+
+// token and versionOf carry a row version as a [collab.Token], which is opaque to
+// everyone but this package. Decimal rather than eight raw bytes so that a token in
+// a log or an error is readable by whoever is reading it.
+func token(version int64) collab.Token {
+	return collab.Token(strconv.FormatInt(version, 10))
+}
+
+func versionOf(t collab.Token) (int64, error) {
+	v, err := strconv.ParseInt(string(t), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("unusable token %q", string(t))
+	}
+	return v, nil
 }
