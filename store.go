@@ -35,6 +35,64 @@ type Store interface {
 	Save(ctx context.Context, document string, snapshot []byte) error
 }
 
+// A Token names a version of a stored document, opaquely: a caller keeps one and
+// hands it back, and only the store that issued it knows what is inside.
+//
+// nil means "nothing was there". A caller that loaded a document nobody had written
+// holds nil, and passing nil to [ConditionalStore.SaveIf] asks for a save that
+// succeeds only while that is still true.
+type Token []byte
+
+// A ConditionalStore is a [Store] that can refuse a save over a document somebody
+// else has written since it was read.
+//
+// [Store.Save] replaces, which is what makes two servers over one store lose the
+// earlier save — measured in TestTwoServersOverOneStoreLoseTheEarlierSave, where the
+// store ends holding one server's work and no error is returned to anybody. This is
+// the interface that lets a store say no instead, and it is optional because most
+// stores have no way to: saying no means comparing before writing, under whatever
+// the store uses to keep its own writes apart.
+//
+// It does not make a shared store a supported way to run two servers. The document
+// each server holds in memory is still not shared, so the second one's replica is
+// still missing what the first one applied; what changes is that the loss is
+// reported rather than silent, which is the difference between an operator finding
+// out and not. See the package documentation on the two shapes that are supported.
+//
+// # What it costs, measured
+//
+// The condition has to be cheap or it is not worth having, and the shape of it
+// decides that. Compared on PostgreSQL 18.6 with pgstore's own table, medians of
+// nine rounds, each updating a row that is already there:
+//
+//	snapshot   blind save   conditioned on a token   conditioned on md5(snapshot)
+//	   1 MiB      2.878ms                  3.143ms                       5.291ms
+//	   8 MiB     13.287ms                 12.791ms                      23.022ms
+//	  32 MiB     51.349ms                 50.261ms                      88.467ms
+//
+// A token the store already has costs nothing measurable — the arm carrying it sits
+// inside the blind save's noise, and it was the pessimistic arm, paying an extra
+// read per round that a real caller would not. Hashing the stored snapshot instead
+// nearly doubles every save, because it is not the hash that costs but detoasting a
+// blob to feed it. That is why this is a token and not a digest.
+type ConditionalStore interface {
+	Store
+
+	// LoadToken is [Store.Load] and also the token naming what it returned, so a
+	// caller can later ask for a save that only lands while that is still what is
+	// there. nil and nil is a document nobody has written.
+	LoadToken(ctx context.Context, document string) ([]byte, Token, error)
+
+	// SaveIf records the snapshot only while the store still holds the version
+	// expect names, and returns the token naming what it wrote.
+	//
+	// It reports [ErrChanged] if the store holds something else, which is the same
+	// answer [Archivable.Release] gives to the same question. A nil expect asks for
+	// a document that is not there yet, so a second server opening the same new
+	// document is refused rather than racing.
+	SaveIf(ctx context.Context, document string, snapshot []byte, expect Token) (Token, error)
+}
+
 // A SiteStore keeps, beside a document, the participants that have been in it.
 //
 // [Store] is enough to hold a document and not enough to collect one.
