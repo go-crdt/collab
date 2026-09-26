@@ -541,13 +541,68 @@ func offer(conn carrierConn, local *document, version []byte) error {
 // unfederatable -- a fresh second datacentre could never follow one -- so it is
 // taken, under the conditions [document.seed] states.
 func (d *document) adopt(ctx context.Context, from *subscriber, w welcomeMsg) error {
-	if len(w.Snapshot) > 0 {
-		return d.seed(from, w.Snapshot)
+	switch {
+	case len(w.Snapshot) > 0:
+		if err := d.seed(from, w.Snapshot); err != nil {
+			return err
+		}
+	case len(w.Operations) > 0:
+		if err := d.applyOperations(ctx, from, w.Operations); err != nil {
+			return err
+		}
 	}
-	if len(w.Operations) == 0 {
+	return d.agreesWith(from, w)
+}
+
+// agreesWith checks the peer's digest against this replica, now that the link
+// has caught up to what the welcome described.
+//
+// Only when the two versions are EQUAL, and that is the whole of the rule. A
+// version vector says what each side has applied; when the two agree, the two
+// documents have to agree, and when they do not, some site has put its name on
+// two different operations. Each replica then believes it is completely caught
+// up with the other and neither will ever ask for anything again -- which is
+// the half of the failure that has no repair, and the reason this is worth a
+// link ending rather than a line in a log.
+//
+// When the versions differ, nothing is compared. A digest is not ordered: it
+// cannot say which side is ahead, and two replicas at different points are
+// SUPPOSED to hold different documents. Comparing there would report a
+// disagreement on every honest catch-up, and an alarm that cries on the normal
+// case is an alarm that gets switched off.
+//
+// An empty digest is a peer that did not send one, which is every peer built
+// before [CapDigest]. It is not a mismatch and is not reported as one.
+func (d *document) agreesWith(from *subscriber, w welcomeMsg) error {
+	if len(w.Digest) == 0 {
 		return nil
 	}
-	return d.applyOperations(ctx, from, w.Operations)
+	var theirs crdt.CompositeVersion
+	if err := theirs.UnmarshalBinary(w.Version); err != nil {
+		return ErrProtocol
+	}
+	d.mu.Lock()
+	same := d.doc.Version().Equal(theirs)
+	var mine crdt.Digest
+	if same {
+		// Taken under the same lock as the comparison that asked for it, so
+		// what is fingerprinted is the replica whose version was just found
+		// equal and not whatever it became a moment later.
+		mine = d.doc.Digest()
+	}
+	d.mu.Unlock()
+	if !same || bytes.Equal(mine[:], w.Digest) {
+		return nil
+	}
+	err := fmt.Errorf("collab: %q: this replica and site %d hold the same history and different documents: %w",
+		d.name, from.site, ErrDiverged)
+	// The operator, because nobody else can act on it: a site identity is being
+	// claimed by two replicas, and which two is not a thing a session can find
+	// out from inside itself.
+	if d.onRefused != nil {
+		d.onRefused(d.name, from.site, err)
+	}
+	return err
 }
 
 // seed replaces this replica with the peer's, which is what a peer that has

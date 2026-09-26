@@ -3,6 +3,7 @@
 package collab
 
 import (
+	"bytes"
 	"encoding/binary"
 	"sort"
 
@@ -29,6 +30,17 @@ const (
 	CapList      Capability = "snapshot.list"
 	CapMap       Capability = "snapshot.map"
 	CapComposite Capability = "snapshot.composite"
+
+	// CapDigest says this build reads a digest block on a welcome, and is what
+	// lets one be sent without a flag day: a server appends one only to a peer
+	// that asked for it, so a peer built before this never sees a message it
+	// would refuse.
+	//
+	// It is not a snapshot format and carries no format versions. Its value is
+	// the version of the COMPARISON -- what is hashed and in what order -- which
+	// is the thing that has to match for two digests to mean anything, and which
+	// crdt owns rather than this package.
+	CapDigest Capability = "digest.welcome"
 )
 
 // Capabilities is what a peer says it understands: for each capability, every
@@ -43,7 +55,7 @@ type Capabilities map[Capability][]byte
 // Mine is what this build understands, taken from crdt rather than from a list
 // here that would have to be kept in step with it.
 func Mine() Capabilities {
-	out := Capabilities{}
+	out := Capabilities{CapDigest: []byte{digestComparison}}
 	for _, f := range crdt.Formats() {
 		if versions := crdt.Reads(f); len(versions) > 0 {
 			out[capabilityOf(f)] = versions
@@ -51,6 +63,11 @@ func Mine() Capabilities {
 	}
 	return out
 }
+
+// digestComparison is the version of what a digest covers and in what order.
+// A peer announcing a different one is announcing a different comparison, and
+// two digests computed under different rules say nothing about each other.
+const digestComparison byte = 1
 
 // capabilityOf names a crdt snapshot format. A format this build does not know
 // gets no name and is left out rather than announced under a made-up one.
@@ -184,6 +201,28 @@ func (c *Capabilities) UnmarshalBinary(data []byte) error {
 // that reads composites and not texts reads nothing this would send it. A peer
 // that said nothing reads nothing as far as this can tell, which is the answer
 // that keeps it safe.
+// readsDigest reports whether a peer announced that it reads a digest block on
+// a welcome, under the comparison this build computes.
+//
+// A different comparison version is a NO rather than a yes: two digests computed
+// under different rules are two numbers that have nothing to say to each other,
+// and reporting a difference between them would be an alarm about nothing, which
+// is the way an alarm stops being read.
+//
+// A peer that says nothing, or whose advertisement will not decode, reads no
+// digest -- the same answer readsOurSnapshots gives, and for the same reason:
+// silence is not acceptance.
+func readsDigest(said []byte) bool {
+	if len(said) == 0 {
+		return false
+	}
+	var speaks Capabilities
+	if err := speaks.UnmarshalBinary(said); err != nil {
+		return false
+	}
+	return bytes.Contains(speaks[CapDigest], []byte{digestComparison})
+}
+
 func readsOurSnapshots(said []byte) bool {
 	if len(said) == 0 {
 		return false

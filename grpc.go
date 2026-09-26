@@ -109,6 +109,7 @@ func (c *grpcConn) Recv() (byte, any, error) {
 			Version:    w.GetVersion(),
 			Presence:   w.GetPresence(),
 			Speaks:     w.GetSpeaks(),
+			Digest:     w.GetDigest(),
 		}, nil
 	case *collabpb.ServerMessage_Operations:
 		return kindOperation, opsMsg{Operations: body.Operations.GetOperations()}, nil
@@ -251,6 +252,7 @@ func (c *grpcCarrier) Send(kind byte, msg any) error {
 				Version:    w.Version,
 				Presence:   w.Presence,
 				Speaks:     w.Speaks,
+				Digest:     w.Digest,
 			}},
 		})
 	case kindOperation:

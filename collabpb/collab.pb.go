@@ -348,7 +348,17 @@ type Welcome struct {
 	//
 	// A federated link is a participant, so this is how the server it follows
 	// learns what it can be sent.
-	Speaks        []byte `protobuf:"bytes,5,opt,name=speaks,proto3" json:"speaks,omitempty"`
+	Speaks []byte `protobuf:"bytes,5,opt,name=speaks,proto3" json:"speaks,omitempty"`
+	// digest fingerprints the document this version describes: crdt.Digest, as
+	// bytes. Empty from any server built before this, which is why a receiver
+	// treats an empty one as "said nothing" rather than as a mismatch.
+	//
+	// It is here because a version vector cannot tell two replicas apart when one
+	// site has put its name on two different operations. Their vectors agree,
+	// each concludes it is caught up, and neither asks again. A receiver that
+	// catches up to exactly this version and then holds a different document has
+	// met that, and only a digest can show it.
+	Digest        []byte `protobuf:"bytes,6,opt,name=digest,proto3" json:"digest,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -414,6 +424,13 @@ func (x *Welcome) GetVersion() []byte {
 func (x *Welcome) GetSpeaks() []byte {
 	if x != nil {
 		return x.Speaks
+	}
+	return nil
+}
+
+func (x *Welcome) GetDigest() []byte {
+	if x != nil {
+		return x.Digest
 	}
 	return nil
 }
@@ -611,7 +628,7 @@ const file_collab_proto_rawDesc = "" +
 	"\bdocument\x18\x01 \x01(\tR\bdocument\x12\x12\n" +
 	"\x04site\x18\x02 \x01(\x04R\x04site\x12\x12\n" +
 	"\x04have\x18\x03 \x01(\fR\x04have\x12\x16\n" +
-	"\x06speaks\x18\x04 \x01(\fR\x06speaks\"\x93\x01\n" +
+	"\x06speaks\x18\x04 \x01(\fR\x06speaks\"\xab\x01\n" +
 	"\aWelcome\x12\x1a\n" +
 	"\bsnapshot\x18\x01 \x01(\fR\bsnapshot\x12\x1e\n" +
 	"\n" +
@@ -619,7 +636,8 @@ const file_collab_proto_rawDesc = "" +
 	"operations\x12\x1a\n" +
 	"\bpresence\x18\x03 \x03(\fR\bpresence\x12\x18\n" +
 	"\aversion\x18\x04 \x01(\fR\aversion\x12\x16\n" +
-	"\x06speaks\x18\x05 \x01(\fR\x06speaks\",\n" +
+	"\x06speaks\x18\x05 \x01(\fR\x06speaks\x12\x16\n" +
+	"\x06digest\x18\x06 \x01(\fR\x06digest\",\n" +
 	"\n" +
 	"Operations\x12\x1e\n" +
 	"\n" +

@@ -70,6 +70,14 @@ type welcomeMsg struct {
 	// with whatever the server is missing, which is what lets work done while
 	// disconnected reach everyone else rather than being stranded here.
 	Version []byte
+	// Digest fingerprints the document Version describes: [crdt.Digest] as
+	// bytes, and empty unless the joining peer announced [CapDigest].
+	//
+	// It travels in a SECOND trailing block, after the advertisement, which is
+	// why it needs asking for: a peer built before this reads one trailing block
+	// and refuses whatever follows. Nothing has to wait a release for it,
+	// because the peer says in its join whether it can read one.
+	Digest []byte
 }
 
 // An opsMsg carries operations addressed to the parts of a document, encoded by
@@ -109,7 +117,7 @@ func encodeJoin(m joinMsg) []byte {
 	return appendAdvertisement(out, m.Speaks)
 }
 
-func encodeWelcome(m welcomeMsg) []byte {
+func encodeWelcome(m welcomeMsg) ([]byte, error) {
 	out := []byte{kindWelcome}
 	out = appendBytes(out, m.Snapshot)
 	out = appendBytes(out, m.Operations)
@@ -118,7 +126,18 @@ func encodeWelcome(m welcomeMsg) []byte {
 	for _, p := range m.Presence {
 		out = appendBytes(out, p)
 	}
-	return appendAdvertisement(out, m.Speaks)
+	out = appendAdvertisement(out, m.Speaks)
+	if len(m.Digest) == 0 {
+		return out, nil
+	}
+	// The digest is the SECOND trailing block, so there has to be a first one
+	// for it to be second to. Without the advertisement it would be read as the
+	// advertisement -- a message that decodes to something other than what was
+	// encoded, which is worse than one that fails to encode.
+	if len(m.Speaks) == 0 {
+		return nil, ErrProtocol
+	}
+	return appendBytes(out, m.Digest), nil
 }
 
 func encodeOps(m opsMsg) []byte {
@@ -228,6 +247,38 @@ func readAdvertisement(f *frame) ([]byte, error) {
 	return speaks, nil
 }
 
+// readWelcomeTail reads the optional blocks at the end of a welcome: the
+// advertisement, and then the digest.
+//
+// Two blocks rather than one, and this is the only message with room for a
+// second. It is not a general extension point: a peer is sent the second block
+// only when it announced [CapDigest] in its join, so a peer that reads one block
+// and refuses the rest is never handed one. Anything after the second is still a
+// protocol error, for the reason [readAdvertisement] gives -- room for one block
+// is not room for anything at all, and a wire that quietly swallows what it
+// cannot name cannot tell a new field from a corrupt one.
+func readWelcomeTail(f *frame) (speaks, digest []byte, err error) {
+	if f.done() {
+		return nil, nil, nil
+	}
+	var ok bool
+	// An empty block is refused here for the same reason readAdvertisement
+	// refuses one: a peer with nothing to say says nothing.
+	if speaks, ok = f.copied(); !ok || len(speaks) == 0 {
+		return nil, nil, ErrProtocol
+	}
+	if f.done() {
+		return speaks, nil, nil
+	}
+	if digest, ok = f.copied(); !ok || len(digest) == 0 {
+		return nil, nil, ErrProtocol
+	}
+	if !f.done() {
+		return nil, nil, ErrProtocol
+	}
+	return speaks, digest, nil
+}
+
 // decodeClient reads a message a participant sent. The kind is returned so the
 // caller can tell a join from what may follow it.
 func decodeClient(data []byte) (byte, any, error) {
@@ -312,13 +363,13 @@ func decodeServer(data []byte) (byte, any, error) {
 			}
 			presence = append(presence, one)
 		}
-		speaks, err := readAdvertisement(f)
+		speaks, digest, err := readWelcomeTail(f)
 		if err != nil {
 			return 0, nil, err
 		}
 		return kindWelcome, welcomeMsg{
 			Snapshot: snapshot, Operations: ops, Version: version,
-			Presence: presence, Speaks: speaks,
+			Presence: presence, Speaks: speaks, Digest: digest,
 		}, nil
 	case kindOperation:
 		ops, ok := f.copied()
@@ -382,7 +433,7 @@ func encodeServer(kind byte, msg any) ([]byte, error) {
 		if !ok {
 			return nil, ErrProtocol
 		}
-		return encodeWelcome(m), nil
+		return encodeWelcome(m)
 	case kindOperation:
 		m, ok := msg.(opsMsg)
 		if !ok {

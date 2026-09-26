@@ -1333,6 +1333,23 @@ func (d *document) compose(welcome *welcomeMsg, j joinMsg) error {
 	//
 	// Cannot fail; see joinOn.
 	welcome.Speaks, _ = Mine().MarshalBinary()
+
+	// And the digest, to a peer that said it reads one.
+	//
+	// Only to such a peer, because it travels in a second trailing block and a
+	// peer built before this refuses whatever follows the first. That is what
+	// [CapDigest] is for, and it is why this needed no release of waiting: the
+	// peer says in its join whether it can be told.
+	//
+	// It fingerprints the document this Version describes, so the two have to be
+	// taken together -- they are, both under the document's lock, and a receiver
+	// that catches up to exactly this version may then compare. A receiver that
+	// ends up somewhere else compares nothing: a digest is not ordered and says
+	// nothing about who is ahead.
+	if readsDigest(j.Speaks) {
+		digest := d.doc.Digest()
+		welcome.Digest = digest[:]
+	}
 	return nil
 }
 
