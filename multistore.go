@@ -21,6 +21,36 @@ import (
 // for them, because choosing here is losing text somebody wrote.
 var ErrUnmergeable = errors.New("collab: neither snapshot can serve the other")
 
+// ErrDiverged reports two snapshots that claim the SAME history and do not hold
+// the same document.
+//
+// A version vector counts operations per site, so two replicas whose vectors
+// match have, by that account, applied the same operations — and must therefore
+// hold the same document. When they do not, some site put its name on two
+// different operations, and the two replicas each believe they are completely
+// caught up with the other. Neither will ever ask for anything again, which is
+// why this is worth a merge refusing rather than a note in a log: merging them
+// grafts one history onto the other and produces a document that existed on
+// neither side, with every character attributed to whoever the names say.
+//
+// It is not a corruption and the checksums will not see it. Both snapshots are
+// well formed, and both replicas applied what they were sent. What differs is
+// what the operations SAID, and only comparing the documents can show it —
+// [crdt.Composite.Digest] is that comparison, and this is the one place in this
+// package where two documents are both in hand.
+//
+// An operator who meets this has two replicas claiming one site identity. Within
+// one deployment that means the identities it hands out are not unique; across
+// two, it means one of them is speaking for the other's users, which is what
+// [SpeaksFor] refuses at a link and nothing refuses in a shared repository.
+//
+// What it does NOT catch: a side that is genuinely ahead. If one version covers
+// the other, the operations they disagree about are exactly the ones
+// [crdt.Composite.OpsSince] will not carry, because it selects by name and the
+// names match. That case is silent here and is why a link is the better place to
+// federate from.
+var ErrDiverged = errors.New("collab: two snapshots claim the same history and hold different documents")
+
 // MergeSnapshots combines two snapshots of the same document into one that
 // holds everything either of them still holds.
 //
@@ -88,8 +118,10 @@ var ErrUnmergeable = errors.New("collab: neither snapshot can serve the other")
 //
 // # What it cannot carry, it names
 //
-// It returns [ErrUnmergeable] when neither side can serve the other, and passes
-// on [crdt.ErrStranded] when an operation cannot be carried onto the base — a
+// It returns [ErrDiverged] when the two sides claim the same history and do not
+// hold the same document, [ErrUnmergeable] when neither side can serve the
+// other, and passes on [crdt.ErrStranded] when an operation cannot be carried
+// onto the base — a
 // write at or below a collected floor naming a key the base does not hold,
 // which is a key that would otherwise come back alive. Both of those used to be
 // a wrong document returned with a nil error, and a wrong document is found by
@@ -111,6 +143,19 @@ func MergeSnapshots(ours, theirs []byte) ([]byte, error) {
 	yours, err := crdt.LoadComposite(1, theirs)
 	if err != nil {
 		return nil, fmt.Errorf("collab: reading their side: %w", err)
+	}
+	// Before choosing a base, and before carrying anything: two sides that
+	// claim the same operations have to hold the same document, or the names
+	// are not telling the truth. See [ErrDiverged].
+	//
+	// Cheap enough to do on every merge that gets this far -- both documents
+	// are already decoded, and a digest is about twice what decoding one
+	// costs -- and it is checked here rather than after the carry because the
+	// carry would hide it: OpsSince selects by name, so an operation wearing a
+	// name the base already holds is never sent, and the merge would return the
+	// base unchanged and call it agreement.
+	if mine.Version().Equal(yours.Version()) && mine.Digest() != yours.Digest() {
+		return nil, ErrDiverged
 	}
 	base, from := chooseBase(mine, yours, ours, theirs)
 	if base == nil {
