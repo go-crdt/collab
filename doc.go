@@ -122,6 +122,30 @@
 // this server to reserve sixteen to twenty-four gibibytes, and it asks that of an
 // honest sender as much as a hostile one. [Config.MaxOperations] is the bound on
 // that, in the unit that amplifies rather than in bytes, and it is off by default.
+//
+// The unit is the point, and it is measured: a parse allocates 80 bytes an
+// operation, flat from a thousand to a million of them. What that is a multiple of
+// is the SENDER's choice — 6.2 times a realistic single-character insert, 20.0
+// times the four-byte floor an operation can encode in — so a bound written in
+// bytes would be a different bound for every peer, and this one is not.
+//
+// That bound is the server's. Every path where this package is the server goes
+// through it, a federation link included: [Server.Follow] hands what it receives
+// to the same apply as a participant's batch, so a followed server run by another
+// actor is bounded like anybody else. Nothing bounds the path where this package
+// is the CLIENT — [Client] parses what it is sent with no limit and [ClientConfig]
+// has no knob for it.
+//
+// For a client that is mostly no trust at all, because a client's peer is the
+// server its own operator runs: the one that reads every document it holds, keeps
+// the store in the clear and decides who may join. The exception is the
+// peer-to-peer carriers, where the other end is another participant rather than
+// that server. The tab or page that hosts builds its own [Server] and can bound
+// what it is sent; the one that joins builds a [Client] and cannot, so the guest
+// of a [DataChannel] or [JoinBroadcastChannel] session extends a trust its host
+// does not have to extend back. Whether that wants a knob, and the two
+// deployments that would give one a consumer, is
+// https://github.com/go-crdt/collab/issues/193.
 // Sizing it is arithmetic: multiply by 80 to 96 bytes a record and compare against
 // what one message may spend.
 //
