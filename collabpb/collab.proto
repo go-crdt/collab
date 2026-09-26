@@ -95,6 +95,17 @@ message Welcome {
   // A federated link is a participant, so this is how the server it follows
   // learns what it can be sent.
   bytes speaks = 5;
+
+  // digest fingerprints the document this version describes: crdt.Digest, as
+  // bytes. Empty from any server built before this, which is why a receiver
+  // treats an empty one as "said nothing" rather than as a mismatch.
+  //
+  // It is here because a version vector cannot tell two replicas apart when one
+  // site has put its name on two different operations. Their vectors agree,
+  // each concludes it is caught up, and neither asks again. A receiver that
+  // catches up to exactly this version and then holds a different document has
+  // met that, and only a digest can show it.
+  bytes digest = 6;
 }
 
 // Operations carries operations addressed to the parts of a document, encoded
