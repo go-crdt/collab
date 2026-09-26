@@ -3,9 +3,9 @@ module github.com/go-crdt/collab/gitstore
 go 1.26.4
 
 require (
-	github.com/andybalholm/brotli v1.2.4
-	github.com/go-crdt/collab v0.64.0
-	github.com/go-crdt/crdt v0.49.0
+	github.com/andybalholm/brotli v1.2.5
+	github.com/go-crdt/collab v0.66.0
+	github.com/go-crdt/crdt v0.50.0
 	github.com/go-git/go-git/v5 v5.19.2
 )
 
