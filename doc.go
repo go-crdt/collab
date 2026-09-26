@@ -248,11 +248,19 @@
 // Signatures do not rule it out — Kleppmann says so explicitly in "Making CRDTs
 // Byzantine Fault Tolerant" (PaPoC '22, §2.3.1), whose Figure 1 is that failure —
 // because a signature says who produced a batch, not that a name is unique. What
-// does rule it out is comparing hashes of heads rather than trusting two version
-// vectors that match: a content hash on a batch rather than a signature on one,
-// which leaves [github.com/go-crdt/crdt.OpID] alone. That, and what a snapshot can
-// carry once [github.com/go-crdt/crdt.Doc.Purge] has removed what a head depends
-// on, is https://github.com/go-crdt/crdt/issues/123.
+// rules it out is something the two replicas can COMPARE: a digest of the document
+// they each hold, beside the version vector they already exchange, so that
+// disagreeing replicas cannot both conclude they are finished.
+//
+// A digest of state rather than of history, and that is decided by this design
+// rather than chosen. [github.com/go-crdt/crdt.Doc] keeps no operations: it holds
+// the document, and Doc.OpsSince synthesises operations by walking it. So there is
+// no history to hash-link, in the way Automerge hash-links stored changes. The
+// happy half is that [github.com/go-crdt/crdt.Doc.Purge] discards only runs whose
+// every character is already deleted, so a digest over the VISIBLE document
+// survives a purge, and two replicas that purged differently still compare equal.
+// What such a digest costs and what a snapshot carries is
+// https://github.com/go-crdt/crdt/issues/123.
 //
 // [Config.OnOperationsRefused] is how an operator hears any of it happen. A
 // refusal otherwise goes to the offending session and nowhere else, which is the
