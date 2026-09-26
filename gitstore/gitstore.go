@@ -48,6 +48,16 @@
 // a document that is missing a paragraph, and the choice between the two is an
 // operator's.
 //
+// A pull stops for a second reason, and this one is not an accident: two
+// snapshots that claim the SAME history and hold different documents are
+// [collab.ErrDiverged]. A version vector counts operations per site, so two
+// replicas whose vectors agree have applied the same operations by that account
+// — when their documents differ, some site put its name on two different
+// operations. Merging them would graft one history onto the other and attribute
+// every character to whoever the names say. Across two actors that is the whole
+// reason a site identity has to be scoped to the organisation that issues it;
+// within one, it means the identities that deployment hands out are not unique.
+//
 // The latency is a pull interval rather than a link, and what it costs is a
 // repository both instances may reach rather than two servers up and reachable
 // at once. A store with no remote does none of it and is exactly what it was
@@ -742,7 +752,9 @@ var _ collab.Store = (*Store)(nil)
 // have each discarded something no operation carries, and no merge can put them
 // back together: that is [collab.ErrUnmergeable], and it is an operator's
 // decision rather than this function's. An operation that cannot be carried
-// onto the side kept is named too, rather than dropped.
+// onto the side kept is named too, rather than dropped. And two sides that
+// claim one history and hold two documents are [collab.ErrDiverged], which is
+// not a merge failing but two replicas wearing one name.
 //
 // The rendered text is not merged and must not be. It is derived, so whichever
 // side of a conflict is taken is wrong: it is written again from the merged
