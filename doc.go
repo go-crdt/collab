@@ -239,10 +239,20 @@
 // A grants B the union and thereby trusts B about C — which is how mail and
 // Matrix federation trust. And an operation carries no signature, so a link is
 // believed about the attribution of everything it relays; what a server can check
-// is which sites a link may speak for, not that a site really said this. Whether
-// to close that second one, and at what cost to the snapshot and to
-// [github.com/go-crdt/crdt.Doc.Purge], is
-// https://github.com/go-crdt/collab/issues/175.
+// is which sites a link may speak for, not that a site really said this.
+//
+// Closing that second one is not a matter of signing anything, which is worth
+// knowing before reaching for a signature. The failure it would be reached for is
+// two replicas holding different text while reporting the SAME version vector, and
+// that is equivocation: a site claiming one name for two different operations.
+// Signatures do not rule it out — Kleppmann says so explicitly in "Making CRDTs
+// Byzantine Fault Tolerant" (PaPoC '22, §2.3.1), whose Figure 1 is that failure —
+// because a signature says who produced a batch, not that a name is unique. What
+// does rule it out is comparing hashes of heads rather than trusting two version
+// vectors that match: a content hash on a batch rather than a signature on one,
+// which leaves [github.com/go-crdt/crdt.OpID] alone. That, and what a snapshot can
+// carry once [github.com/go-crdt/crdt.Doc.Purge] has removed what a head depends
+// on, is https://github.com/go-crdt/crdt/issues/123.
 //
 // [Config.OnOperationsRefused] is how an operator hears any of it happen. A
 // refusal otherwise goes to the offending session and nowhere else, which is the
