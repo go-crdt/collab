@@ -1,7 +1,11 @@
 package pgstore_test
 
 import (
+	"database/sql"
 	"errors"
+	"fmt"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/go-crdt/collab"
@@ -114,5 +118,121 @@ func TestAnUnusableTokenIsNotARefusal(t *testing.T) {
 	} else if errors.Is(err, collab.ErrChanged) {
 		t.Errorf("an unusable token was reported as ErrChanged (%v), which says the store "+
 			"holds something else rather than that the caller passed rubbish", err)
+	}
+}
+
+// LoadToken reads the document as Load does, and the token it returns is one SaveIf
+// accepts — which is the round trip the capability is for, and which the first
+// version of these tests never exercised: it only ever asked for a token on a
+// document nobody had written, so the path that returns one was never taken. The
+// coverage gate said so.
+func TestLoadTokenReadsTheDocumentAndAUsableToken(t *testing.T) {
+	db := connect(t)
+	store := fresh(t, db)
+	ctx := t.Context()
+
+	if _, err := store.SaveIf(ctx, "paper", []byte("AAAA"), nil); err != nil {
+		t.Fatalf("creating the document: %v", err)
+	}
+	got, token, err := store.LoadToken(ctx, "paper")
+	if err != nil {
+		t.Fatalf("LoadToken: %v", err)
+	}
+	if string(got) != "AAAA" {
+		t.Errorf("LoadToken read %q, want AAAA — it must read what Load reads", got)
+	}
+	if token == nil {
+		t.Fatal("LoadToken gave no token for a document that is there")
+	}
+	// The round trip: a server that opened this document can save against what it
+	// read, which is the whole point of reading the token with it.
+	if _, err := store.SaveIf(ctx, "paper", []byte("BBBB"), token); err != nil {
+		t.Errorf("saving against the token LoadToken gave: %v", err)
+	}
+}
+
+// An emptied row is refused by LoadToken for the reason Load refuses it: nil is how a
+// store says "new document", there is no row for that, so a row holding nothing is
+// one somebody emptied and answering nil would make the loss permanent.
+func TestLoadTokenRefusesAnEmptyRow(t *testing.T) {
+	db := connect(t)
+	store, table := freshNamed(t, db)
+	if _, err := db.Exec("INSERT INTO "+table+" (document, snapshot) VALUES ($1, $2)", "d", []byte{}); err != nil {
+		t.Fatal(err)
+	}
+	got, token, err := store.LoadToken(t.Context(), "d")
+	if err == nil {
+		t.Fatalf("an empty row was served as %d bytes and token %q rather than refused", len(got), token)
+	}
+	if !strings.Contains(err.Error(), "empty row") {
+		t.Errorf("refused, but not for the reason this test is about: %v", err)
+	}
+}
+
+// LoadToken checks the frame exactly as Load does: a token is no reason to serve
+// bytes whose checksum no longer matches.
+//
+// Asserted as AGREEMENT rather than against a chosen byte, because which offsets
+// break a frame is the frame's business and a test that picks one is a test of the
+// layout. The first version of this flipped byte four and the row still read, so it
+// proved nothing. It also requires that some offset really is refused, or agreement
+// would be satisfied by a frame nothing could break.
+func TestLoadTokenRefusesWhatLoadRefuses(t *testing.T) {
+	db := connect(t)
+	store, table := freshNamed(t, db)
+	ctx := t.Context()
+	refusals := 0
+	for offset := range 24 {
+		doc := fmt.Sprintf("d%d", offset)
+		if _, err := store.SaveIf(ctx, doc, []byte("AAAABBBBCCCC"), nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec("UPDATE "+table+
+			" SET snapshot = set_byte(snapshot, $1, get_byte(snapshot, $1) # 1) WHERE document = $2",
+			offset, doc); err != nil {
+			t.Fatal(err)
+		}
+		_, loadErr := store.Load(ctx, doc)
+		_, _, tokenErr := store.LoadToken(ctx, doc)
+		if (loadErr == nil) != (tokenErr == nil) {
+			t.Errorf("byte %d: Load said %v and LoadToken said %v — one is laxer than the other",
+				offset, loadErr, tokenErr)
+		}
+		if loadErr != nil {
+			refusals++
+		}
+	}
+	if refusals == 0 {
+		t.Error("no flipped byte was refused, so this test agreed about nothing")
+	}
+}
+
+// And on a database that is gone, both of them say so rather than answering.
+func TestTheConditionalPathReportsADatabaseThatIsGone(t *testing.T) {
+	db := connect(t)
+	_ = fresh(t, db)
+	closed, err := sql.Open("pgx", os.Getenv("COLLAB_POSTGRES"))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if err := closed.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	gone, err := pgstore.New(closed)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := t.Context()
+	if _, _, err := gone.LoadToken(ctx, "doc"); err == nil {
+		t.Error("LoadToken on a closed database reported success")
+	}
+	if _, err := gone.SaveIf(ctx, "doc", []byte("AAAA"), nil); err == nil {
+		t.Error("SaveIf on a closed database reported success")
+	} else if errors.Is(err, collab.ErrChanged) {
+		t.Errorf("a closed database was reported as ErrChanged (%v), which says the store "+
+			"holds something else rather than that it could not be asked", err)
+	}
+	if _, err := gone.SaveIf(ctx, "doc", []byte("AAAA"), collab.Token("1")); err == nil {
+		t.Error("a conditional SaveIf on a closed database reported success")
 	}
 }
