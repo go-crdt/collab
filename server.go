@@ -430,7 +430,19 @@ func (s *Server) open(ctx context.Context, name string) (*document, error) {
 	// Reading from the store can be slow, so it happens without the lock held;
 	// another session may open the same document meanwhile, and the first one
 	// registered wins.
-	snapshot, err := s.store.Load(ctx, name)
+	// LoadToken where the store has it, so a later save can be made against what
+	// this read found. A store that cannot do that answers the same snapshot
+	// through Load and the token stays nil, which every save path treats as "no
+	// condition".
+	cond, conditional := s.store.(ConditionalStore)
+	var snapshot []byte
+	var token Token
+	var err error
+	if conditional {
+		snapshot, token, err = cond.LoadToken(ctx, name)
+	} else {
+		snapshot, err = s.store.Load(ctx, name)
+	}
 	if err != nil {
 		return nil, fail(errInternal, "collab: reading document %q: %v", name, err)
 	}
@@ -496,6 +508,8 @@ func (s *Server) open(ctx context.Context, name string) (*document, error) {
 		authorizeOps: s.authorizeOps,
 		onRefused:    s.onRefused,
 		maxOps:       s.maxOps,
+		cond:         cond,
+		token:        token,
 		doc:          doc,
 		presence:     awareness.New(),
 		subs:         map[*subscriber]struct{}{},
@@ -567,10 +581,19 @@ type document struct {
 	// maxOps bounds what one message may ask this document to reserve; see
 	// [Config.MaxOperations]. Zero is no limit.
 	maxOps int
+	// cond is store, when store can refuse a save over a document that changed
+	// since it was read, and nil when it cannot. Asserted once at open rather
+	// than at every save.
+	cond ConditionalStore
 	// now is the server's clock, carried here so a test can move it.
 	now func() time.Time
 
-	mu       sync.Mutex
+	mu sync.Mutex
+	// token names the version this server last read or wrote, and is what a
+	// conditional save is made against. It is nil for a document nobody had
+	// written, which is what asks for a save that lands only while that holds.
+	// Guarded by mu, like everything below it.
+	token    Token
 	doc      *crdt.Composite
 	presence *awareness.Registry
 	subs     map[*subscriber]struct{}
@@ -1139,6 +1162,11 @@ func (d *document) persist(ctx context.Context) error {
 		snapshot = d.doc.Snapshot()
 		d.dirty = false
 	}
+	// Taken with the snapshot and under the same lock, because the save below
+	// happens without it: what is written has to be conditioned on the version
+	// this server believed was there when it took the bytes, not on whatever it
+	// believes by the time the write lands.
+	expect := d.token
 	var sites []byte
 	var sitesErr error
 	if keeps {
@@ -1150,7 +1178,25 @@ func (d *document) persist(ctx context.Context) error {
 	d.mu.Unlock()
 
 	if snapshot != nil {
-		if err := d.store.Save(ctx, d.name, snapshot); err != nil {
+		// Conditionally where the store can, which is what turns "two servers over
+		// one store lose the earlier save" into an error somebody is told about.
+		// The failure path below is the one that already existed and is exactly
+		// right for it: the document goes back to dirty, so the work is kept, and
+		// the error travels to whoever asked for the save -- Config.OnPersistError
+		// for a periodic one, Config.OnEvictError for the last.
+		var err error
+		if d.cond != nil {
+			var token Token
+			token, err = d.cond.SaveIf(ctx, d.name, snapshot, expect)
+			if err == nil {
+				d.mu.Lock()
+				d.token = token
+				d.mu.Unlock()
+			}
+		} else {
+			err = d.store.Save(ctx, d.name, snapshot)
+		}
+		if err != nil {
 			d.mu.Lock()
 			d.dirty = true
 			d.mu.Unlock()

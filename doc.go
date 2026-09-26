@@ -238,6 +238,14 @@
 // BBBB, and the store ends holding BBBB alone. There is no error anywhere,
 // because each save did exactly what Save is documented to do.
 //
+// A [ConditionalStore] makes that loss loud rather than silent: it saves only while
+// the store still holds what this server last read or wrote, and answers
+// [ErrChanged] otherwise, at which point the document goes back to unsaved and the
+// error reaches [Config.OnPersistError]. It does not make a shared store supported —
+// the replicas in memory are still not shared, so the refused server is still
+// missing what the other applied — and it is optional, because a store can only
+// refuse if it can compare before writing. What it buys is an operator finding out.
+//
 // It is the sequential case that works, and it is the one that makes this
 // tempting: a server that starts, loads, serves and stops hands the next server
 // everything, so a rolling restart is fine and a failover to a cold standby is
