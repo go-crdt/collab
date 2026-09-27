@@ -47,6 +47,34 @@ type ClientConfig struct {
 	// caller's — but the participant cannot be caught up from that server and
 	// has to be reseeded from it instead.
 	Resume []byte
+
+	// MaxOperations bounds how many operations ONE message from the server may
+	// ask this participant to reserve. Zero, the default, is no bound.
+	//
+	// It is the mirror of [Config.MaxOperations], and it exists because the two
+	// ends of a session are not always the same kind of thing. A participant
+	// joining a server its own operator runs is trusting that server with far
+	// more than a message size -- it reads every document, holds the store and
+	// decides who may join -- so a bound there protects against nothing.
+	//
+	// The peer-to-peer carriers are the case this is for. Over [DataChannel] the
+	// far end is ANOTHER PERSON's browser, and over [JoinBroadcastChannel] it is
+	// whichever tab won the election. The page that hosts builds a [Server] and
+	// can bound what it is sent; without this the page that joins could not, so
+	// one session had a bound in one direction only.
+	//
+	// The unit is operations rather than bytes, and that is the whole of why it
+	// is worth a field. crdt allocates a flat 80 bytes an operation -- 6.2 times
+	// a realistic single-character insert and 20 times the four-byte floor one
+	// can encode in -- so what a message costs is decided by how many operations
+	// it claims, and a bound written in bytes would be a different bound for
+	// every peer. A message over the bound is refused with [crdt.ErrTooManyOps]
+	// and the session ends.
+	//
+	// Set it far above an honest catch-up: a document holds roughly one
+	// operation per character ever typed into it, so a bound a real document
+	// could reach refuses the session it exists to protect.
+	MaxOperations int
 }
 
 // A Client is one participant's view of a document: a replica that edits
@@ -57,6 +85,10 @@ type ClientConfig struct {
 type Client struct {
 	site     crdt.SiteID
 	document string
+	// maxOps is [ClientConfig.MaxOperations], and zero is no bound. Held here
+	// rather than read from a config the client does not keep, and read only on
+	// the path that parses what the server sent.
+	maxOps   int
 	conn     carrierConn
 	cancel   context.CancelFunc
 	changes  chan struct{}
@@ -177,6 +209,7 @@ func joinOn(ctx context.Context, cancel context.CancelFunc, transport Transport,
 	c := &Client{
 		site:     cfg.Site,
 		document: cfg.Document,
+		maxOps:   cfg.MaxOperations,
 		conn:     conn,
 		cancel:   cancel,
 		changes:  make(chan struct{}, 1),
@@ -366,7 +399,7 @@ func (c *Client) applyOperations(raw []byte) error {
 	// One rejection covers both: ParsePartOps already guarantees what
 	// ApplyChanges checks, so a separate branch for the merge could not be
 	// reached.
-	batches, err := crdt.ParsePartOps(raw)
+	batches, err := crdt.ParsePartOpsLimit(raw, c.maxOps)
 	if err != nil {
 		return err
 	}
