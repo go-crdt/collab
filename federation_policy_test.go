@@ -8,6 +8,7 @@ package collab_test
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -200,6 +201,104 @@ func scopedPolicyRun(t *testing.T, theirScope, theirUser, theirWrite, wantInMine
 			t.Errorf("the link ended with %v, want it to name the site it may not speak for", err)
 		}
 	case <-time.After(6 * time.Second):
-		t.Error("the link neither carried the work nor ended: a refusal has to be visible")
+		// Everything this knows, because it has happened once and said nothing
+		// usable (go-crdt/collab#202).
+		//
+		// The budget is not tight: measured on the machine this was written on,
+		// the refusal arrives 95 to 155 MICROSECONDS after Follow is called, so
+		// six seconds is a margin of about forty thousand. A loaded runner does
+		// not spend that. Whatever this is, it is something not happening rather
+		// than something happening slowly -- and a bare "it did not" cannot tell
+		// which goroutine is where.
+		//
+		// One explanation was measured and ruled out: the peer's write landing
+		// only AFTER the link is up. That is unsynchronised here, and it is
+		// harmless -- TestALateForgeryIsStillRefused, written to force exactly
+		// that order, is refused just the same.
+		t.Errorf("the link neither carried the work nor ended: a refusal has to be visible\n%s", stacks())
+	}
+}
+
+// stacks returns every goroutine, for a failure that has to be diagnosed from
+// its log because it does not reproduce.
+func stacks() []byte {
+	buf := make([]byte, 1<<20)
+	return buf[:runtime.Stack(buf, true)]
+}
+
+// A forgery that arrives after the link is up is refused just the same.
+//
+// The policy is about what a session may hand over, not about when. That ought
+// to be obvious and was not: the test above opens its link immediately after the
+// peer's participant writes, with nothing between them — the client returns once
+// it has published, and the peer's server applying it is asynchronous — so the
+// two orders are both reachable and only one of them was ever exercised.
+//
+// It was written to explain go-crdt/collab#202, where the link neither carried
+// the work nor ended, and it RULES THAT EXPLANATION OUT: forcing the order the
+// flake would need does not reproduce it. Keeping it is worth more than the
+// answer it gave, because the property it pins is one a future change to the
+// welcome or the fan-out could quietly break — a policy that only refused what
+// arrived in the welcome would pass every other test in this file.
+func TestALateForgeryIsStillRefused(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mine := collab.NewServer(collab.Config{Store: collab.NewMemoryStore(),
+		AuthorizeOperations: carriesOnly("lyon.example.ac")})
+	t.Cleanup(func() { _ = mine.Close(context.Background()) })
+	theirs := collab.NewServer(collab.Config{Store: collab.NewMemoryStore()})
+	t.Cleanup(func() { _ = theirs.Close(context.Background()) })
+
+	join := func(s *collab.Server, at crdt.SiteID) *collab.Client {
+		t.Helper()
+		transport, conn := collab.Pipe()
+		go func() { _ = s.ServePipe(ctx, conn) }()
+		c, err := collab.Join(ctx, transport, collab.ClientConfig{Document: "paper", Site: at})
+		if err != nil {
+			t.Fatalf("join as %d: %v", at, err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		return c
+	}
+	body := func(c *collab.Client) *collab.Text {
+		t.Helper()
+		txt, err := c.Text("body")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return txt
+	}
+
+	if err := body(join(mine, federatedSite("ada@paris.example.ac"))).Insert(0, "GENUINE"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The link goes up FIRST, against a peer that holds nothing, and is given
+	// time to settle. A link that ended here would mean the rest proves nothing.
+	transport, conn := collab.Pipe()
+	go func() { _ = theirs.ServePipe(ctx, conn) }()
+	ended := make(chan error, 1)
+	go func() { ended <- mine.Follow(ctx, transport, "paper", federatedSite("link@lyon.example.ac")) }()
+	time.Sleep(500 * time.Millisecond)
+	select {
+	case err := <-ended:
+		t.Fatalf("the link ended before the peer had written anything: %v", err)
+	default:
+	}
+
+	// Only now does the impostor write, claiming one of our own users.
+	theirWriter := join(theirs, federatedSite("ada@paris.example.ac"))
+	if err := body(theirWriter).Insert(0, "FORGED-AND-MUCH-LONGER-THAN-GENUINE"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-ended:
+		if err == nil || !strings.Contains(err.Error(), "may not speak for") {
+			t.Errorf("the link ended with %v, want it to name the site it may not speak for", err)
+		}
+	case <-time.After(6 * time.Second):
+		t.Errorf("a forgery that arrived after the link was up was never refused\n%s", stacks())
 	}
 }
