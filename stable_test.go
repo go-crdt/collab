@@ -4,6 +4,7 @@ package collab_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +31,29 @@ func totalSeen(v crdt.CompositeVersion) uint64 {
 // It is asked here rather than assumed because the answer decides whether a
 // policy for collecting is worth writing. A meet that never moves is a feature
 // nobody can use.
+// perSite reports what each participant is acknowledged up to, and how far
+// short of its own contribution that is.
+//
+// The total alone cannot say what stalled. This failed once on arch amd64 at
+// 124 of 160 (go-crdt/collab#204): the arithmetic rules out one participant
+// having stopped -- a single site stuck would leave at least 140 -- and cannot
+// choose among the ways several could be a little behind. A breakdown can.
+func perSite(v crdt.CompositeVersion, editors, rounds int) string {
+	var b strings.Builder
+	for i := 1; i <= editors; i++ {
+		site := crdt.SiteID(i)
+		var at uint64
+		for _, vv := range v {
+			if seq, held := vv[site]; held && seq > at {
+				at = seq
+			}
+		}
+		fmt.Fprintf(&b, "\tsite %d: acknowledged up to %d of %d%s\n",
+			site, at, rounds, map[bool]string{true: "  <-- behind", false: ""}[at < uint64(rounds)])
+	}
+	return b.String()
+}
+
 func TestWhatEverybodyHasSeenAdvances(t *testing.T) {
 	const editors = 8
 	const rounds = 20
@@ -79,7 +103,16 @@ func TestWhatEverybodyHasSeenAdvances(t *testing.T) {
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("what everybody has certainly seen stalled at %d of %d operations", seen, want)
+			// WHICH sites are behind, not merely how many operations are
+			// missing. This stalled once on arch amd64 at 124 of 160
+			// (go-crdt/collab#204) and the number alone could not say whether
+			// one participant had stopped acknowledging or several were a
+			// little behind -- the arithmetic rules out the first (one site
+			// stuck would leave at least 140) and cannot choose among the
+			// rest. A per-site breakdown can.
+			v, _ := srv.Stable("paper")
+			t.Fatalf("what everybody has certainly seen stalled at %d of %d operations\n%s",
+				seen, want, perSite(v, editors, rounds))
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
