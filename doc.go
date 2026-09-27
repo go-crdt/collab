@@ -132,20 +132,20 @@
 // That bound is the server's. Every path where this package is the server goes
 // through it, a federation link included: [Server.Follow] hands what it receives
 // to the same apply as a participant's batch, so a followed server run by another
-// actor is bounded like anybody else. Nothing bounds the path where this package
-// is the CLIENT — [Client] parses what it is sent with no limit and [ClientConfig]
-// has no knob for it.
+// actor is bounded like anybody else. [ClientConfig.MaxOperations] is the same
+// bound in the other direction, for a participant.
 //
-// For a client that is mostly no trust at all, because a client's peer is the
-// server its own operator runs: the one that reads every document it holds, keeps
-// the store in the clear and decides who may join. The exception is the
-// peer-to-peer carriers, where the other end is another participant rather than
-// that server. The tab or page that hosts builds its own [Server] and can bound
-// what it is sent; the one that joins builds a [Client] and cannot, so the guest
-// of a [DataChannel] or [JoinBroadcastChannel] session extends a trust its host
-// does not have to extend back. Whether that wants a knob, and the two
-// deployments that would give one a consumer, is
-// https://github.com/go-crdt/collab/issues/193.
+// A participant usually needs no such thing, because its peer is the server its
+// own operator runs: the one that reads every document it holds, keeps the store
+// in the clear and decides who may join. Bounding a message from it protects
+// against nothing that is not already extended.
+//
+// The peer-to-peer carriers are why the field exists. Over [DataChannel] the far
+// end is another PERSON's browser, and over [JoinBroadcastChannel] it is whichever
+// tab won the election. The page that hosts builds a [Server] and could always
+// bound what it was sent; until [ClientConfig.MaxOperations] the page that joined
+// could not, so one session had a bound in one direction only. go-tex's playground
+// is the deployment that made that concrete, and it now sets both.
 // Sizing it is arithmetic: multiply by 80 to 96 bytes a record and compare against
 // what one message may spend.
 //
