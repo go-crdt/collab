@@ -241,6 +241,21 @@
 // believed about the attribution of everything it relays; what a server can check
 // is which sites a link may speak for, not that a site really said this.
 //
+// That second one is a choice the field makes deliberately, and the nearest
+// neighbour with a written specification makes it in the same shape. Jazz states
+// it as invariants: a client "MUST reject any attempt to attribute a write to
+// another author" (INV-API-29), which is [OwnSiteOnly]; a session link's author
+// "MUST equal that identity or be rejected" while a trusted backend link may
+// differ (INV-RLS-18), which is the participant-and-link distinction this package
+// draws; and a write whose author differs from the authenticated subject "MUST be
+// accepted only via a trusted serving node" (INV-RLS-17), which is trust hop by
+// hop. Their relay links carry "no permission subject" at all, and they say
+// plainly that theirs is "a local relay forwarding contract, not an end-to-end
+// signature protocol". Two designs that share almost nothing else — theirs has a
+// trusted core, this has links between operators — arrive at the same place:
+// attribution is checked at the edge, by the identity of the link, and not by a
+// signature on the operation.
+//
 // Closing that second one is not a matter of signing anything, which is worth
 // knowing before reaching for a signature. The failure it would be reached for is
 // two replicas holding different text while reporting the SAME version vector, and
