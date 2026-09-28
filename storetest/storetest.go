@@ -35,6 +35,7 @@ package storetest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -129,6 +130,16 @@ var cases = []struct {
 	// left nil. The signal is the interface itself, so a store gains these cases
 	// by implementing it and nothing has to be wired up twice.
 	{"LoadSitesOfADocumentNobodyHasSavedIsNilAndNotAnError", loadSitesOfNothing},
+	// [collab.ConditionalStore] is optional in the same way, and skipped the
+	// same way. It is asked here rather than only where it is implemented
+	// because that is what this package is for: the divergences it exists to
+	// prevent were all found late, in the second implementation, and a contract
+	// written only once there is a contract the second one has to guess at.
+	{"LoadTokenOfADocumentNobodyHasSavedIsNilAndNotAnError", tokenOfNothing},
+	{"ANilTokenCreatesTheDocumentAndRefusesTheSecondCreator", createsOnce},
+	{"SaveIfLandsOnTheTokenItWasGiven", savesOnItsToken},
+	{"SaveIfOnAStaleTokenIsRefusedAndChangesNothing", refusesStale},
+	{"LoadTokenReturnsWhatLoadReturns", tokenAgreesWithLoad},
 	{"WhatSaveSitesWroteIsWhatLoadSitesReturns", sitesRoundTrip},
 	{"SavingSitesAgainReplaces", sitesReplace},
 	{"TwoDocumentsHaveTwoSiteRecords", sitesPerDocument},
@@ -501,4 +512,141 @@ func concurrent(t T, h Harness) {
 		}()
 	}
 	wg.Wait()
+}
+
+// conditional is the skip for [collab.ConditionalStore], the same shape as
+// keeper: the signal is the interface, so a store gains these cases by
+// implementing it.
+func conditional(t T, h Harness) collab.ConditionalStore {
+	t.Helper()
+	c, can := h.Store.(collab.ConditionalStore)
+	if !can {
+		t.Skip("this store cannot condition a save on what it already holds")
+	}
+	return c
+}
+
+// nil AND nil, which is the sentence the interface uses: "nil and nil is a
+// document nobody has written". A store answering an empty non-nil token would
+// hand a caller something to pass back to SaveIf, which would then mean "the
+// document is already there" -- the opposite of what it was told.
+func tokenOfNothing(t T, h Harness) {
+	got, tok, err := conditional(t, h).LoadToken(context.Background(), "nobody has saved this")
+	if err != nil {
+		t.Fatalf("a document nobody has saved is not an error, got %v", err)
+	}
+	if got != nil {
+		t.Fatalf("a document nobody has saved answered %d bytes, want nil", len(got))
+	}
+	if tok != nil {
+		t.Fatalf("a document nobody has saved answered a token of %d bytes, want nil", len(tok))
+	}
+}
+
+// "A nil expect asks for a document that is not there yet, so a second server
+// opening the same new document is refused rather than racing."
+//
+// Both halves, because the second is the whole point: a store that created on
+// a nil token and then created AGAIN would let two servers each believe they
+// opened the document, which is the race this answers.
+func createsOnce(t T, h Harness) {
+	ctx := context.Background()
+	c := conditional(t, h)
+	want := snapshot(t, "first")
+	tok, err := c.SaveIf(ctx, "doc", want, nil)
+	if err != nil {
+		t.Fatalf("creating a document with a nil token: %v", err)
+	}
+	if tok == nil {
+		t.Fatal("creating a document answered a nil token, which nothing can be conditioned on")
+	}
+	if _, err := c.SaveIf(ctx, "doc", snapshot(t, "second"), nil); !errors.Is(err, collab.ErrChanged) {
+		t.Fatalf("a second creator got %v, want collab.ErrChanged", err)
+	}
+	got, err := c.Load(ctx, "doc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatal("the refused creator's snapshot is what the store holds")
+	}
+}
+
+// "records the snapshot only while the store still holds the version expect
+// names, and returns the token naming what it wrote."
+func savesOnItsToken(t T, h Harness) {
+	ctx := context.Background()
+	c := conditional(t, h)
+	first, err := c.SaveIf(ctx, "doc", snapshot(t, "first"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := snapshot(t, "second")
+	second, err := c.SaveIf(ctx, "doc", want, first)
+	if err != nil {
+		t.Fatalf("saving on the token the store just gave: %v", err)
+	}
+	if second == nil {
+		t.Fatal("a save answered a nil token, so the next one has nothing to be conditioned on")
+	}
+	got, _, err := c.LoadToken(ctx, "doc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("the store holds %d bytes, saved %d", len(got), len(want))
+	}
+}
+
+// "It reports [collab.ErrChanged] if the store holds something else."
+//
+// And it must CHANGE nothing: a refusal that wrote anyway would be the silent
+// loss the whole interface exists to turn into an error.
+func refusesStale(t T, h Harness) {
+	ctx := context.Background()
+	c := conditional(t, h)
+	stale, err := c.SaveIf(ctx, "doc", snapshot(t, "first"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := snapshot(t, "second")
+	if _, err := c.SaveIf(ctx, "doc", want, stale); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SaveIf(ctx, "doc", snapshot(t, "third"), stale); !errors.Is(err, collab.ErrChanged) {
+		t.Fatalf("saving on a token the store no longer holds gave %v, want collab.ErrChanged", err)
+	}
+	got, err := c.Load(ctx, "doc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatal("a refused save changed what the store holds")
+	}
+}
+
+// "LoadToken is [collab.Store.Load] and also the token naming what it
+// returned." The two must not drift: a caller reads through one and conditions
+// on the other.
+func tokenAgreesWithLoad(t T, h Harness) {
+	ctx := context.Background()
+	c := conditional(t, h)
+	want := snapshot(t, "only")
+	if _, err := c.SaveIf(ctx, "doc", want, nil); err != nil {
+		t.Fatal(err)
+	}
+	viaLoad, err := c.Load(ctx, "doc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	viaToken, tok, err := c.LoadToken(ctx, "doc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(viaLoad) != string(viaToken) {
+		t.Fatalf("Load gave %d bytes and LoadToken %d", len(viaLoad), len(viaToken))
+	}
+	if tok == nil {
+		t.Fatal("a document that is there answered a nil token, which means nobody has written it")
+	}
 }
