@@ -250,7 +250,9 @@
 // because a signature says who produced a batch, not that a name is unique. What
 // rules it out is something the two replicas can COMPARE: a digest of the document
 // they each hold, beside the version vector they already exchange, so that
-// disagreeing replicas cannot both conclude they are finished.
+// disagreeing replicas cannot both conclude they are finished. That is
+// [github.com/go-crdt/crdt.Composite.Digest], and this package compares it in the
+// two places where a document arrives from somewhere else.
 //
 // A digest of state rather than of history, and that is decided by this design
 // rather than chosen. [github.com/go-crdt/crdt.Doc] keeps no operations: it holds
@@ -259,8 +261,32 @@
 // happy half is that [github.com/go-crdt/crdt.Doc.Purge] discards only runs whose
 // every character is already deleted, so a digest over the VISIBLE document
 // survives a purge, and two replicas that purged differently still compare equal.
-// What such a digest costs and what a snapshot carries is
-// https://github.com/go-crdt/crdt/issues/123.
+//
+// Where it is compared:
+//
+//   - [MergeSnapshots], which is where two documents are both in hand. Two
+//     snapshots claiming the same history and holding different documents are
+//     [ErrDiverged], and the merge refuses rather than grafting one onto the
+//     other. Checked BEFORE anything is carried, because the carry would hide it:
+//     OpsSince selects by name, so an operation wearing a name the base already
+//     holds is never sent, and the merge would return the base unchanged and call
+//     that agreement.
+//   - A link, on the welcome. A server appends its digest for a peer that
+//     announced [CapDigest], and a link that catches up to exactly that version
+//     compares. Equal versions and different digests ends the session and reaches
+//     [Config.OnOperationsRefused], since a site identity claimed by two replicas
+//     is not something a session can discover from inside itself.
+//
+// ONLY when the two versions are equal, and that is the whole rule. Two replicas
+// at different points are supposed to hold different documents, and every honest
+// catch-up passes through that state; comparing there would cry on the normal
+// case, which is how an alarm stops being read.
+//
+// What it does not do: attribute, prevent or repair. It says two replicas differ,
+// which is the half of the failure that otherwise has no remedy at all — a replica
+// that believes it is finished never asks again. And it cannot see a side that is
+// merely AHEAD: when one version covers the other, the operations they disagree
+// about are exactly the ones OpsSince will not carry.
 //
 // [Config.OnOperationsRefused] is how an operator hears any of it happen. A
 // refusal otherwise goes to the offending session and nowhere else, which is the
