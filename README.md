@@ -210,6 +210,28 @@ document being joined is in neither — it arrives in the stream's first message
 Authentication, being per connection rather than per document, still belongs in
 an interceptor; the context carries whatever it put there.
 
+**Joining is one question and writing is another.** Once in, a participant can
+hand over operations another site made, which is worse than it sounds and is not
+refused by default: two writers under one site identity make characters that
+share an ID, and replicas that saw both resolve them differently, silently and
+for good. `Config.AuthorizeOperations` is the second question.
+
+```go
+// A session may write only as the site it joined as. One line, and right for
+// every deployment that does not federate.
+AuthorizeOperations: collab.OwnSiteOnly,
+
+// Federating? A link IS meant to carry other sites, so OwnSiteOnly breaks the
+// FOLLOWER. collab.SpeaksFor asks about the relation instead — may this session
+// hand over work that site made? — and walks every kind of operation, which a
+// hand-written policy tends not to.
+AuthorizeOperations: collab.SpeaksFor(mayCarry),
+```
+
+See the package documentation for what a site identity is and is not: it is a
+number a session states, so across two operators it has to be scoped to the
+organisation that issues it.
+
 ## Persistence
 
 `Store` is a two-method seam — `Load` and `Save` on snapshots, which are
@@ -236,8 +258,16 @@ the state, which carries identities and authorship and the comments anchored to
 characters, and the rendered text, which is what makes the repository readable
 by a person. A release is a tag on a commit that already exists. It is also a
 federation channel: two servers sharing a repository diverge, git reports a
-conflict on the state file, and `gitstore.Merge` resolves it without anybody
-having to choose a side.
+conflict on the state file, and `gitstore.Merge` holds both sides rather than
+taking one.
+
+It can refuse, and a caller has to be ready for that. Two replicas that have
+each purged text the other still needs cannot be merged at all
+(`collab.ErrUnmergeable`), and two snapshots that claim the **same** history and
+hold **different** documents are `collab.ErrDiverged` — not a merge failing but
+two replicas wearing one site identity. Both stop the pull rather than
+committing a document that is missing a paragraph or grafting one history onto
+another.
 
 `MultiStore` writes to several stores at once and reads from all of them:
 
