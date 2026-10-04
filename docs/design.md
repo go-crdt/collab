@@ -148,14 +148,20 @@ something else.
 | --- | --- | --- |
 | `conn.Recv`'s error, in `follow` | green | *the welcome never arrives* fails |
 | `kindOperation` carries operations | green | *an operations message that is not one* fails |
-| `stream.Recv`'s error, opening a session | green, four times slower | `TestServerHandlesAnImmediateHangUp` fails |
+| `stream.Recv`'s error, opening a session | green | `TestServerHandlesAnImmediateHangUp` fails |
 
 Coverage reported all three as executed. The third is the clearest: a client
 that hangs up without sending anything was handed `InvalidArgument` and the
 message "a session must open with a join", for something it never did, where
 the stream's own `EOF` is the truth. The suite passed because the client got
-*an* error either way — and it took four times as long, because several tests
-waited for a deadline instead of a refusal.
+*an* error either way.
+
+One reading during the run said that mutant took four times as long, and that
+was the machine and not the mutant: the run shared a host whose load average
+was above 100 at the time. Measured afterwards in pairs, baseline against
+mutant twice over, the ratios were 0.86x and 0.98x. A duration taken during a
+mutation campaign measures the campaign; only the verdict is safe to read from
+it.
 
 That proportion is not a surprise, and it is why this is a tool rather than a
 gate: at Google, over almost 17 million mutants, developers initially judged

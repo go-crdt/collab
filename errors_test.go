@@ -127,7 +127,9 @@ func TestServerRejectsBadSessions(t *testing.T) {
 // join", and the client is handed InvalidArgument for something it never did.
 // Measured both ways -- EOF under Unknown as the code is, InvalidArgument with
 // that one check deleted -- and the suite was green for the second, which is
-// why the code is named here rather than only the fact of an error.
+// why the code is named here rather than only the fact of an error. The suite
+// takes the same time either way; a reading that said otherwise was taken on a
+// loaded machine (paired afterwards: 0.86x and 0.98x).
 func TestServerHandlesAnImmediateHangUp(t *testing.T) {
 	_, conn := serve(t, collab.Config{})
 	stream := rawSession(t, conn)
