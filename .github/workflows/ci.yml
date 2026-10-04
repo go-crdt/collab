@@ -373,7 +373,18 @@ jobs:
             exit 1
           fi
           echo "targets: $(echo $targets | tr '\n' ' ')"
-          go test -v -run "^($(echo "$targets" | paste -sd'|' -))$" .
+          go test -v -run "^($(echo "$targets" | paste -sd'|' -))$" . | tee browser.log
+          # And prove each one ran. COLLAB_REQUIRE_BROWSER turns a missing tool
+          # into a failure, but it cannot speak for a test that -run never
+          # matched -- a file renamed out of *_browser_test.go would be
+          # discovered no more and missed no less silently than before. This is
+          # go-crdt/crdt's lesson, written in its own trace lane: "a gate that
+          # runs one test is a gate that hides the rest", after TestSnapshotBudget
+          # failed on main for two releases with no lane able to see it.
+          for t in $targets; do
+            grep -q -- "--- PASS: $t" browser.log || {
+              echo "::error::$t was discovered but did not run"; exit 1; }
+          done
 
   arch-native:
     name: arch ${{ matrix.label }}
