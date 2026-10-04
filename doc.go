@@ -182,9 +182,20 @@
 // [OwnSiteOnly] is not the answer, for a reason worth knowing before reaching
 // for it: the side it breaks is the FOLLOWER, because what arrives over a link
 // names sites that server never authorised
-// (TestALinkCarryingOtherSitesMeetsOwnSiteOnly). A server that federates cannot
+// (TestALinkCarryingOtherSitesMeetsOwnSiteOnly, with
+// TestAServerWithOwnSiteOnlyRefusesForgedOperations,
+// TestAFederatedPeerCanSpeakAsAnotherServersUser and
+// TestAnOperatorIsToldWhichBatchesWereRefused on the rest of that path). A server that federates cannot
 // install it, which is why nothing on the wire distinguishes a link from a
 // participant.
+//
+// Those names are not decoration. Each was established by taking the guarantee
+// out and watching what went red: deleting the version-and-digest comparison in
+// [MergeSnapshots] fails exactly the first test named above and nothing else,
+// and disabling [Config.AuthorizeOperations] fails the other four — at least
+// four, because with it disabled the package does not finish, several tests
+// waiting out deadlines for a refusal that never arrives. A guarantee whose
+// removal breaks nothing is a sentence, not a property.
 //
 // # Federating with somebody else's server, then
 //
@@ -282,10 +293,10 @@
 //   - [MergeSnapshots], which is where two documents are both in hand. Two
 //     snapshots claiming the same history and holding different documents are
 //     [ErrDiverged], and the merge refuses rather than grafting one onto the
-//     other. Checked BEFORE anything is carried, because the carry would hide it:
-//     OpsSince selects by name, so an operation wearing a name the base already
-//     holds is never sent, and the merge would return the base unchanged and call
-//     that agreement.
+//     other (TestAMergeRefusesTwoSnapshotsThatClaimOneHistory). Checked BEFORE
+//     anything is carried, because the carry would hide it: OpsSince selects by
+//     name, so an operation wearing a name the base already holds is never sent,
+//     and the merge would return the base unchanged and call that agreement.
 //   - A link, on the welcome. A server appends its digest for a peer that
 //     announced [CapDigest], and a link that catches up to exactly that version
 //     compares. Equal versions and different digests ends the session and reaches
