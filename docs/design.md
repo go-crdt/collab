@@ -113,6 +113,58 @@ A skipped test is not a passing one, so CI sets `COLLAB_REQUIRE_WASM` on the job
 that exists to run the last of these: a missing Node or wasm glue fails it rather
 than turning it green.
 
+### What 100% of statements does not say
+
+CI gates on full statement coverage, and that gate says every line runs — not
+that anything would notice if a line were wrong. The difference is measurable:
+delete a guard, run the suite, and see whether it still passes.
+
+The subjects are the 126 refusals and bounds in the files that read from the
+network, found by walking the AST for an `if` whose body returns a refusal. As
+of 2026-10-04 22:08 CEST, 79 of them have been run: **44 of the deletions did
+not compile**, which makes them not mutants at all, 27 were caught by the
+suite, and **8 survived** at 100% of statements. The run continues; these
+numbers are what has been measured, not an estimate of the rest.
+
+Five of the eight are what Petrović and Ivanković call unproductive — "either
+trivially equivalent to the original program or it is detectable, but adding a
+test for it would not improve the test suite" — and they are worth naming so
+the next reading does not re-open them:
+
+- two early returns for an empty capability advertisement, where the decode
+  below refuses empty input anyway and gives the same answer;
+- `Client.edit` skipping an empty batch, which saves a round trip and changes
+  no state;
+- `document.persist` returning early when nothing is dirty, which saves a write
+  of the participants file and changes no state;
+- the receiving goroutine returning after a failed `Recv`, where the next
+  `Recv` gives the same error and the session is already ending.
+
+**Three were real**, and all three are the same mistake: a test that asserts an
+error happened, where the code after the deleted guard also fails and says
+something else.
+
+| guard deleted | the suite said | what it says now |
+| --- | --- | --- |
+| `conn.Recv`'s error, in `follow` | green | *the welcome never arrives* fails |
+| `kindOperation` carries operations | green | *an operations message that is not one* fails |
+| `stream.Recv`'s error, opening a session | green, four times slower | `TestServerHandlesAnImmediateHangUp` fails |
+
+Coverage reported all three as executed. The third is the clearest: a client
+that hangs up without sending anything was handed `InvalidArgument` and the
+message "a session must open with a join", for something it never did, where
+the stream's own `EOF` is the truth. The suite passed because the client got
+*an* error either way — and it took four times as long, because several tests
+waited for a deadline instead of a refusal.
+
+That proportion is not a surprise, and it is why this is a tool rather than a
+gate: at Google, over almost 17 million mutants, developers initially judged
+85% of what was reported to them unproductive, and rules for suppressing those
+are what made the technique usable at all (Petrović & Ivanković, *Practical
+Mutation Testing at Scale: A View From Google*, IEEE TSE, 2021). Here the
+filtering is a reading of each survivor, which is affordable because there are
+eight.
+
 ## Who may open what
 
 `Config.Authorize` decides it, once per session, after the join arrives and
