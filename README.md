@@ -224,6 +224,13 @@ collab.NewServer(collab.Config{
 })
 ```
 
+That last part is an *order*, which is invisible to a test that only checks
+whether the join was refused: the whole suite stayed green with the
+authorisation moved to after the document was opened, where a refusal would
+have read the store and created the document's entry. `TestARefusedJoinDoesNotTouchTheStore`
+watches the store and holds the order, with an allowed join first so that
+"never asked" cannot pass against a store nobody uses.
+
 It lives here rather than in a gRPC interceptor, which is where one would first
 look for it: an interceptor sees the method and the request metadata, and the
 document being joined is in neither — it arrives in the stream's first message.
