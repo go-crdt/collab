@@ -121,7 +121,9 @@
 // record in memory to the smallest encoded one — so a gibibyte of operations asks
 // this server to reserve sixteen to twenty-four gibibytes, and it asks that of an
 // honest sender as much as a hostile one. [Config.MaxOperations] is the bound on
-// that, in the unit that amplifies rather than in bytes, and it is off by default.
+// that, in the unit that amplifies rather than in bytes, and it is off by default
+// (TestAServerBoundsWhatOneMessageMayReserve, and
+// TestALinkIsBoundedLikeAnybodyElse for the link, which is the point of it).
 //
 // The unit is the point, and it is measured: a parse allocates 80 bytes an
 // operation, flat from a thousand to a million of them. What that is a multiple of
@@ -190,12 +192,20 @@
 // participant.
 //
 // Those names are not decoration. Each was established by taking the guarantee
-// out and watching what went red: deleting the version-and-digest comparison in
-// [MergeSnapshots] fails exactly the first test named above and nothing else,
-// and disabling [Config.AuthorizeOperations] fails the other four — at least
-// four, because with it disabled the package does not finish, several tests
-// waiting out deadlines for a refusal that never arrives. A guarantee whose
-// removal breaks nothing is a sentence, not a property.
+// out and watching what went red, and all four of this arc's safety properties
+// have now been through it:
+//
+//   - deleting the version-and-digest comparison in [MergeSnapshots] fails
+//     exactly one test and nothing else;
+//   - disabling [Config.AuthorizeOperations] fails four — at least four, because
+//     with it disabled the package does not finish, several tests waiting out
+//     deadlines for a refusal that never arrives;
+//   - passing no bound where [Config.MaxOperations] goes fails two;
+//   - and the welcome digest fails two from the server's side and one from the
+//     link's, depending on which half is removed.
+//
+// A guarantee whose removal breaks nothing is a sentence, not a property, and
+// reading the tests cannot tell the two apart.
 //
 // # Federating with somebody else's server, then
 //
@@ -301,7 +311,10 @@
 //     announced [CapDigest], and a link that catches up to exactly that version
 //     compares. Equal versions and different digests ends the session and reaches
 //     [Config.OnOperationsRefused], since a site identity claimed by two replicas
-//     is not something a session can discover from inside itself.
+//     is not something a session can discover from inside itself
+//     (TestALinkFindsTwoReplicasWearingOneName, and
+//     TestAPeerThatDidNotAskIsNotSentADigest for the half that keeps the block
+//     off a peer that never announced it).
 //
 // ONLY when the two versions are equal, and that is the whole rule. Two replicas
 // at different points are supposed to hold different documents, and every honest
