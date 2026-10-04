@@ -354,10 +354,26 @@ jobs:
           cat chrome.txt
           echo "CHROME=$(awk '{print $NF}' chrome.txt)" >> "$GITHUB_ENV"
           echo "COLLAB_BROWSER_NODE_PATH=$RUNNER_TEMP/node_modules" >> "$GITHUB_ENV"
-      - name: Two WebRTC peers in a real browser
+      # Discovered rather than named. This lane named one test and there were
+      # two: TestTwoTabsElectOneHostWithNoWindow needs exactly what this job
+      # installs -- node, Chrome, puppeteer-core, wasm_exec.js -- and was never
+      # run with COLLAB_REQUIRE_BROWSER set, so it skipped wherever it did run.
+      # That is the same thing the comment above says was wrong for the handshake
+      # and fixed: a proof nobody was collecting.
+      #
+      # Naming the second one would have left the third to be stranded the same
+      # way, so the lane asks the files instead, the way crdt's hostile fuzz lane
+      # does -- and refuses, as that one does, if the question comes back empty.
+      - name: Every proof that needs a real browser
         run: |
           "$CHROME" --version
-          go test -v -run TestPeerBrowserHandshake .
+          targets=$(grep -rhoE 'func (Test[A-Za-z0-9_]+)' *_browser_test.go | awk '{print $2}' | sort)
+          if [ -z "$targets" ]; then
+            echo "::error::no browser tests found; this lane has stopped asking anything"
+            exit 1
+          fi
+          echo "targets: $(echo $targets | tr '\n' ' ')"
+          go test -v -run "^($(echo "$targets" | paste -sd'|' -))$" .
 
   arch-native:
     name: arch ${{ matrix.label }}
