@@ -69,6 +69,71 @@ jobs:
 
   # The generated code must match the .proto it came from, or the wire format
   # and the Go API can drift apart silently.
+  vulnerabilities:
+    name: known vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Scan, and judge the findings rather than the exit status
+        run: |
+          # govulncheck exits 0 over an advisory it decides this module does not
+          # call -- measured, on GO-2026-6443 in grpc v1.84.0 -- so a lane that
+          # reads the exit status is silent about exactly the finding somebody
+          # has to decide about. This reads the findings.
+          govulncheck -format json ./... > findings.json
+          python3 - findings.json <<'EOF'
+          import json, sys
+
+          text = open(sys.argv[1], encoding="utf8").read()
+          dec, i = json.JSONDecoder(), 0
+          kinds, findings = {}, []
+          while i < len(text):
+              while i < len(text) and text[i] in " \n\r\t":
+                  i += 1
+              if i >= len(text):
+                  break
+              obj, i = dec.raw_decode(text, i)
+              for k in obj:
+                  kinds[k] = kinds.get(k, 0) + 1
+              if "finding" in obj:
+                  findings.append(obj["finding"])
+
+          # A scan that did not run reports nothing wrong. govulncheck exits 0 over an
+          # advisory it decided we do not call, so the exit status cannot be the gate.
+          if not kinds.get("config") or not kinds.get("osv"):
+              print("::error::govulncheck produced no config or no advisories: it did not run")
+              sys.exit(1)
+          print(f"advisories in the database: {kinds.get('osv', 0)}; findings against this module: {len(findings)}")
+
+          released = lambda v: v and v.count(".") == 2 and "-" not in v and "+" not in v
+          bad = False
+          seen = set()
+          for f in findings:
+              osv, fix = f.get("osv"), f.get("fixed_version")
+              trace = f.get("trace") or []
+              called = any(fr.get("function") for fr in trace)
+              key = (osv, called)
+              if key in seen:
+                  continue
+              seen.add(key)
+              if called:
+                  where = next((fr for fr in trace if fr.get("function")), {})
+                  print(f"::error::{osv} is reachable from this module: {where.get('module')}.{where.get('function')} (fixed in {fix})")
+                  bad = True
+              elif released(fix):
+                  print(f"::error::{osv} is not called from here, and a RELEASED fix exists ({fix}): upgrade rather than carry it")
+                  bad = True
+              else:
+                  print(f"::notice::{osv} is in a module this one requires, not called from here, "
+                        f"and has no released fix yet (upstream fix: {fix})")
+          sys.exit(1 if bad else 0)
+          EOF
+
   proto-sync:
     name: generated code in sync
     runs-on: ubuntu-latest

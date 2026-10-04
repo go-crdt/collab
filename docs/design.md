@@ -120,25 +120,39 @@ that anything would notice if a line were wrong. The difference is measurable:
 delete a guard, run the suite, and see whether it still passes.
 
 The subjects are the 126 refusals and bounds in the files that read from the
-network, found by walking the AST for an `if` whose body returns a refusal. As
-of 2026-10-04 22:08 CEST, 79 of them have been run: **44 of the deletions did
-not compile**, which makes them not mutants at all, 27 were caught by the
-suite, and **8 survived** at 100% of statements. The run continues; these
-numbers are what has been measured, not an estimate of the rest.
+network, found by walking the AST for an `if` whose body returns a refusal. All
+126 were run on 2026-10-04:
 
-Five of the eight are what Petrović and Ivanković call unproductive — "either
-trivially equivalent to the original program or it is detectable, but adding a
-test for it would not improve the test suite" — and they are worth naming so
-the next reading does not re-open them:
+| | |
+| --- | --- |
+| deletions that did not compile, so not mutants at all | 73 |
+| caught by the suite | 43 |
+| survived, at 100% of statements | 10 |
+
+The 73 are not a result about the tests: deleting `if err != nil { return err }`
+orphans the `err` the line above declared, and the package stops building. A
+run that counts those as killed, or as survived, is wrong either way.
+
+Seven of the ten survivors are what Petrović and Ivanković call unproductive --
+"either trivially equivalent to the original program or it is detectable, but
+adding a test for it would not improve the test suite" -- and they are named
+here so the next reading does not re-open them:
 
 - two early returns for an empty capability advertisement, where the decode
   below refuses empty input anyway and gives the same answer;
-- `Client.edit` skipping an empty batch, which saves a round trip and changes
-  no state;
+- `frame.copied` returning nil for an empty field, where the `append` below it
+  returns nil for an empty field too: the same value by a different line;
+- `Client.edit` skipping an empty batch, which saves a round trip;
 - `document.persist` returning early when nothing is dirty, which saves a write
-  of the participants file and changes no state;
+  of the participants file;
+- `Server.open`'s fast path, where the second lookup under the lock after the
+  slow load already returns the registered replica -- the mutant reads the
+  store for nothing and then discards what it read;
 - the receiving goroutine returning after a failed `Recv`, where the next
   `Recv` gives the same error and the session is already ending.
+
+None of those changes what anybody observes. The first three are equivalent;
+the last three save work.
 
 **Three were real**, and all three are the same mistake: a test that asserts an
 error happened, where the code after the deleted guard also fails and says
@@ -169,7 +183,32 @@ gate: at Google, over almost 17 million mutants, developers initially judged
 are what made the technique usable at all (Petrović & Ivanković, *Practical
 Mutation Testing at Scale: A View From Google*, IEEE TSE, 2021). Here the
 filtering is a reading of each survivor, which is affordable because there are
-eight.
+ten.
+
+### Known advisories
+
+CI scans with `govulncheck` on every run, and judges the findings rather than
+the exit status: measured on 2026-10-04, govulncheck **exits 0** over an
+advisory it has decided this module does not call, so a lane reading the exit
+status is silent about exactly the finding somebody has to decide about.
+
+One is open, and it is worth stating plainly:
+
+**GO-2026-6443** — a gRPC server panics on a request with no `:authority` or
+`Host` header, present in `google.golang.org/grpc` v1.84.0, which this module
+requires. govulncheck places it in an imported module rather than in a call
+this code makes; that is a statement about the call graph from this module's
+own symbols, and the panic lives in the HTTP/2 server that `Server.Serve`
+hands its listener to, so the honest reading is that a server built from this
+is exposed to it.
+
+There is **no released fix**: the advisory names
+`v1.85.0-dev.0.20260825072537-93e31b48545e`, and the proxy offers nothing above
+v1.84.0 but dev branch markers. Pinning a published library to an unreleased
+commit of its transport would put that commit in every consumer's build, which
+is the worse of the two. So this is carried, named here, and the lane fails the
+day a released fix exists: a finding whose `fixed_version` is a plain semantic
+version is an error, not a notice.
 
 ## Who may open what
 
