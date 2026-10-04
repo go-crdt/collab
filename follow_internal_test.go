@@ -105,44 +105,70 @@ func TestFollowEndsOnEveryWayThePeerCanFail(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Each case says WHICH refusal it expects, and not merely that the link
+	// ended. "It returned an error" is satisfied by a link that hung until
+	// [followed] gave up, and by the wrong refusal arriving for the right
+	// input -- see the case lifted out of this table below, which was written
+	// after exactly that happened.
+	//
+	// Measured, with the guard for its own case removed: "the welcome never
+	// arrives" and "an operations message that is not one" both still passed
+	// under "err != nil", because the next thing the code does fails too and
+	// says something else. They are the two that forced this column.
+	carries := func(target error) func(error) bool {
+		return func(err error) bool { return errors.Is(err, target) }
+	}
+	refused := func(err error) bool {
+		var se *sessionError
+		return errors.As(err, &se) && se.kind == errInvalid
+	}
 	tests := []struct {
 		name string
 		peer *brokenPeer
+		want func(error) bool
+		said string // what the message must name, where the error alone is not specific
 	}{
-		{"the connection cannot be opened", &brokenPeer{openErr: boom}},
-		{"the join cannot be sent", &brokenPeer{sendErr: boom}},
-		{"the welcome never arrives", &brokenPeer{recvErr: boom}},
+		{"the connection cannot be opened", &brokenPeer{openErr: boom}, carries(boom), ""},
+		{"the join cannot be sent", &brokenPeer{sendErr: boom}, carries(boom), ""},
+		{"the welcome never arrives", &brokenPeer{recvErr: boom}, carries(boom), ""},
 		{"something other than a welcome arrives", &brokenPeer{
 			firstMsg: func() (byte, any, error) { return kindOperation, opsMsg{}, nil },
-		}},
+		}, carries(ErrProtocol), ""},
 		{"a welcome that is not one", &brokenPeer{
 			firstMsg: func() (byte, any, error) { return kindWelcome, opsMsg{}, nil },
-		}},
+		}, carries(ErrProtocol), ""},
 		{"a welcome carrying a snapshot, which was not what was asked for", &brokenPeer{
 			firstMsg: welcomeWith(welcomeMsg{Snapshot: []byte("whatever")}),
-		}},
+		}, carries(crdt.ErrMalformed), "snapshot"},
 		{"a welcome carrying operations that are not operations", &brokenPeer{
 			firstMsg: welcomeWith(welcomeMsg{Operations: []byte{0x09, 0x09}}),
-		}},
+		}, refused, "operations"},
 		{"the stream ends after the welcome", &brokenPeer{
 			firstMsg: welcomeWith(welcomeMsg{}),
 			then:     func() (byte, any, error) { return 0, nil, boom },
-		}},
+		}, carries(boom), ""},
 		{"an operations message that is not one", &brokenPeer{
 			firstMsg: welcomeWith(welcomeMsg{}),
 			then:     func() (byte, any, error) { return kindOperation, welcomeMsg{}, nil },
-		}},
+		}, carries(ErrProtocol), ""},
 		{"operations that cannot be applied", &brokenPeer{
 			firstMsg: welcomeWith(welcomeMsg{}),
 			then: func() (byte, any, error) {
 				return kindOperation, opsMsg{Operations: []byte{0x09, 0x09}}, nil
 			},
-		}},
+		}, refused, "operations"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := followed(t, tt.peer); err == nil {
+			err := followed(t, tt.peer)
+			if err == nil {
 				t.Fatal("Follow returned no error")
+			}
+			if !tt.want(err) {
+				t.Fatalf("Follow ended with %v (%T), which is not the refusal this case is about", err, err)
+			}
+			if tt.said != "" && !strings.Contains(err.Error(), tt.said) {
+				t.Fatalf("the error does not say %q: %v", tt.said, err)
 			}
 		})
 	}
