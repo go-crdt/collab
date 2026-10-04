@@ -367,9 +367,14 @@ pause.
 
 ## Status
 
-Version 0.1. **100% statement coverage**, race-clean, six-arch CI, and the
-WebAssembly end-to-end test running on every pull request — where a missing
-toolchain is a failure, not a skipped test.
+**100% statement coverage**, race-clean, six-arch CI, and the WebAssembly
+end-to-end test running on every pull request — where a missing toolchain is a
+failure, not a skipped test.
+
+Full statement coverage says every line runs, not that anything would notice if
+a line were wrong. [What 100% of statements does not
+say](docs/design.md#what-100-of-statements-does-not-say) is the measurement of
+the difference, and the two guards it found that no test held.
 
 ## License
 
