@@ -21,15 +21,35 @@ replaced** without anyone losing work.
 The client builds for `js/wasm`, so **a browser tab and the server run the same
 code down to the merge** — over either of two carriers, from one server:
 
-| carrier | for | browser client, gzipped |
+| carrier | for | gzipped |
 |---|---|---|
-| `collab.WebSocket` — the session's own framing | anywhere, browsers included | **919 KB** |
-| `collab.GRPC` — over gRPC | native peers | 4 461 KB |
+| `collab.WebSocket` — the session's own framing | anywhere, browsers included | **1 535 KB** |
+| `collab.GRPC` — over gRPC | native peers | 4 461 KB *(2026-08-17, see below)* |
 
 Everything a session carries is already bytes `crdt` encoded and will check on
 arrival, so protobuf describes fields nobody reads through it — and compiled to
 wasm its machinery cannot be linked away. For scale, the CRDT alone is 633 KB.
 Outside a browser none of that matters, which is why gRPC is still there.
+
+Re-take the first row with:
+
+```sh
+GOOS=js GOARCH=wasm go build -o /tmp/c.wasm ./wasmtest && gzip -9 -c /tmp/c.wasm | wc -c
+```
+
+That recipe is written down because its absence cost four wrong answers: the
+figure is of `./wasmtest`, not of `./wasm` (the JavaScript binding, larger) nor
+of `./browsertest` (which did not exist when this was first measured) nor of a
+hand-rolled client. Measured that way the August commit that published **919 KB**
+still reads **916**, on today's toolchain — so the method is sound and the number
+is not: the client grew **1.67×** between then and now, and the toolchain is not
+why, both ends having been built with the same Go.
+
+The second row has no browser recipe and cannot have one: `grpc.go` is
+`//go:build !js`, so that carrier has never compiled for a browser. Its figure is
+the 2026-08-17 measurement of what a protobuf-carrying client cost in a tab, which
+is the measurement that produced `collab.WebSocket` — kept because it is the
+reason the first row exists, not because it is current.
 
 ## From a page
 
