@@ -119,6 +119,15 @@ than turning it green.
 before the document is touched — so a refused session neither reads the store nor
 reveals whether the document exists.
 
+The second half of that sentence is an order, and an order is invisible to a
+test that only looks at the answer: the suite stayed green with the
+authorisation moved to after the open, where a refused session would have read
+the store and created the document's entry — an existence oracle whatever the
+refusal said. `TestARefusedJoinDoesNotTouchTheStore` wraps the `Store`, records
+every name the server asks about, and fails if a refused join is one of them. An
+allowed join runs first as the positive control, because "it never asked" proves
+nothing against a store nobody uses.
+
 The obvious place for this is a gRPC interceptor, and that is the wrong place: an
 interceptor sees the method and the request metadata, and the document being
 joined is in neither. It arrives in the stream's first message, so anything
