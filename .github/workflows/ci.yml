@@ -41,6 +41,32 @@ jobs:
             exit 1
           fi
 
+      # A workflow whose shell is broken is still valid YAML. An edit to the
+      # sibling repository split one of these run blocks in half, parsed, passed a
+      # yaml.safe_load check, and failed on the runner with "unexpected end of
+      # file" (go-crdt/crdt#138). Eleven jobs here, so the shell is parsed too.
+      - name: Every run block must parse as shell
+        run: |
+          python3 - <<'EOF'
+          import subprocess, sys, yaml
+          bad = []
+          for name in ("ci.yml",):
+              doc = yaml.safe_load(open(f".github/workflows/{name}"))
+              for job, spec in (doc.get("jobs") or {}).items():
+                  for step in spec.get("steps") or []:
+                      src = step.get("run")
+                      if not src:
+                          continue
+                      r = subprocess.run(["bash", "-n"], input=src, text=True,
+                                         capture_output=True)
+                      if r.returncode != 0:
+                          bad.append((name, job, step.get("name", "(unnamed)"),
+                                      r.stderr.strip().splitlines()[-1]))
+          for name, job, step, err in bad:
+              print(f"::error file=.github/workflows/{name}::{job} / {step}: {err}")
+          sys.exit(1 if bad else 0)
+          EOF
+
   # The generated code must match the .proto it came from, or the wire format
   # and the Go API can drift apart silently.
   proto-sync:
@@ -442,6 +468,34 @@ jobs:
       #
       # Every other failure is still a failure, including a deadline in a run that
       # did write an input.
+      # go-crdt/crdt#138, where this was measured: what `go test -fuzz` discovers
+      # lives in $GOCACHE/fuzz, setup-go's cache restores it but does not write it
+      # back on an exact key hit, so nothing a fuzz lane finds is ever saved. The
+      # same thing is true here, and the logs say so — these targets start from
+      # `gathering baseline coverage: 5/5`, the seeds in testdata/fuzz and nothing
+      # else, and then find 58 more inputs that the run then discards.
+      #
+      # The key carries ${{ matrix.target }} as well as the run id, which crdt's
+      # single-job lane did not need: six jobs of one run sharing a key would race,
+      # one would save and five would find the key already taken, so five of the
+      # six corpora would be the one that got there first. Per target, each
+      # accumulates its own.
+      - name: Locate the fuzz corpus
+        run: echo "FUZZ_CORPUS=$(go env GOCACHE)/fuzz" >> "$GITHUB_ENV"
+      - name: Restore the corpus for ${{ matrix.target }}
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FUZZ_CORPUS }}
+          key: fuzz-corpus-${{ runner.os }}-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ runner.os }}-${{ matrix.target }}-
+      # Counted on the way in and on the way out, because a cache that restores
+      # nothing and a cache that works report the same success.
+      - name: What the corpus arrived with
+        run: |
+          n=$(find "$FUZZ_CORPUS" -type f 2>/dev/null | wc -l | tr -d ' ')
+          echo "corpus on entry: ${n:-0} inputs"
+          echo "FUZZ_CORPUS_IN=${n:-0}" >> "$GITHUB_ENV"
       - name: Fuzz ${{ matrix.target }}
         run: |
           if go test -run '^$' -fuzz '^${{ matrix.target }}$' \
@@ -458,6 +512,14 @@ jobs:
             exit 0
           fi
           exit 1
+      - name: What the corpus leaves with
+        if: always()
+        run: |
+          n=$(find "$FUZZ_CORPUS" -type f 2>/dev/null | wc -l | tr -d ' ')
+          echo "corpus on exit: ${n:-0} inputs (entered with $FUZZ_CORPUS_IN)"
+          if [ "${n:-0}" -lt "$FUZZ_CORPUS_IN" ]; then
+            echo "::warning::the corpus shrank; the cache is not carrying what this lane finds"
+          fi
       - name: Upload any failing input
         if: failure()
         uses: actions/upload-artifact@v7
