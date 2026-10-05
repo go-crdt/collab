@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version: 1.27.1
       - name: gofmt
         run: |
           unformatted=$(gofmt -l .)
@@ -76,7 +76,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version: 1.27.1
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - name: Scan, and judge the findings rather than the exit status
@@ -141,7 +141,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version: 1.27.1
       - uses: arduino/setup-protoc@v3
         with:
           version: "31.1"
@@ -176,7 +176,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version: 1.27.1
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
@@ -258,7 +258,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version: 1.27.1
       - run: go vet ./...
       - run: go test -race -v ./...
       - name: Test + 100% coverage gate
@@ -293,7 +293,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version: 1.27.1
       - run: go vet ./...
       - run: go test -race -v ./...
       - name: Test + 100% coverage gate
@@ -329,7 +329,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version: 1.27.1
       - run: go vet ./...
       - run: go test -race ./...
       - name: Test + 100% coverage gate on the logic
@@ -357,7 +357,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version: 1.27.1
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
@@ -402,7 +402,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version: 1.27.1
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
@@ -464,7 +464,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version: 1.27.1
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
@@ -490,7 +490,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version: 1.27.1
       # This has not hung here. It hung in go-crdt/crdt, on the same runner
       # image and the same one-line install, for the better part of an hour and
       # more than once — and bounding it is what identified the culprit: three
@@ -549,7 +549,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version: 1.27.1
       # -parallel 2, and the deadline told apart from a real failure: both are
       # crdt's reasoning, and they apply here for the same reason. Six of these
       # run at once on one runner, each starting a worker per core, so the machine
