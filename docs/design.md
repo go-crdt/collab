@@ -234,7 +234,7 @@ carries whatever it put there.
 
 Over a WebSocket, that authentication is a **cookie**, because a browser cannot
 put a header on one — and a cookie only exists while the upgrade is still an HTTP
-request. `grpc-transports/websocket` v0.2.0 carries it across:
+request. `grpc-transports/websocket` has carried it across since v0.2.0:
 
 ```go
 lis, _ := wstransport.ListenWebSocket(addr, wstransport.ServerConfig{
