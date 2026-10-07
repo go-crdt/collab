@@ -379,7 +379,7 @@ jobs:
       # browser-only path goes wrong.
       - name: The browser build's own tests
         run: |
-          GOOS=js GOARCH=wasm go test -v \
+          GOOS=js GOARCH=wasm go test -v -coverprofile=js.cover \
             -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./... | tee js.log
           grep -q 'two browsers, no server' js.log || {
             echo "::error::the browser-to-browser session did not run"; exit 1; }
@@ -387,6 +387,59 @@ jobs:
             echo "::error::the tab-to-tab BroadcastChannel session did not run"; exit 1; }
           grep -q 'gap-free tab-to-tab session' js.log || {
             echo "::error::the serve-gap BroadcastSession proof did not run"; exit 1; }
+
+      # The 100% coverage gate runs natively, so it compiles none of this:
+      # five files, 780 lines, 15.8% of the package, built only for the browser.
+      # They are TESTED -- by the step above and by the real-browser lane -- and
+      # they were never MEASURED, which is how a gate at a hundred per cent and
+      # a blind spot live side by side.
+      #
+      # A floor rather than a gate, because 100% is not where this is today:
+      # measured on 2026-10-07, 427 of 510 statements, with websocket_js.go the
+      # thinnest at 54.8%. The floor catches a collapse and makes the number
+      # visible on every run; closing the gap is work, and pretending the gate
+      # already covers it would be worse than saying so.
+      #
+      # An empty selection is an error, not a clean pass: renaming a file out of
+      # *_js.go is enough to make this measure nothing.
+      - name: What the native gate never sees
+        run: |
+          python3 - js.cover <<'EOF'
+          import collections, sys
+
+          FLOOR = 75.0  # see the step's comment for why this is a floor and not a gate
+
+          per = collections.defaultdict(lambda: [0, 0])
+          for line in open(sys.argv[1]):
+              if line.startswith("mode:"):
+                  continue
+              loc, stmts, count = line.rsplit(" ", 2)
+              name = loc.split(":")[0].split("/")[-1]
+              per[name][0] += int(stmts)
+              if int(count) > 0:
+                  per[name][1] += int(stmts)
+
+          browser = {f: v for f, v in per.items() if f.endswith("_js.go")}
+          if not browser:
+              print("::error::no browser-only file appears in the profile: this measure has "
+                    "stopped measuring anything, which a rename is enough to cause")
+              sys.exit(1)
+
+          total = covered = 0
+          print("browser-only code, which the native 100% gate never sees:")
+          for f in sorted(browser):
+              st, cv = browser[f]
+              total += st
+              covered += cv
+              print(f"  {f:24} {cv:4}/{st:<4} {100 * cv / st:5.1f}%")
+          pct = 100 * covered / total
+          print(f"  {'total':24} {covered:4}/{total:<4} {pct:5.1f}%")
+
+          if pct < FLOOR:
+              print(f"::error::browser-only coverage is {pct:.1f}%, below the {FLOOR}% floor")
+              sys.exit(1)
+          print(f"::notice::browser-only coverage {pct:.1f}% over {total} statements, floor {FLOOR}%")
+          EOF
 
   real-browser:
     name: real browser
