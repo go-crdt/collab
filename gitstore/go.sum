@@ -26,10 +26,10 @@ github.com/emirpasic/gods v1.18.1 h1:FXtiHYKDGKCW2KzwZKx0iC0PQmdlorYgdFG9jPXJ1Bc
 github.com/emirpasic/gods v1.18.1/go.mod h1:8tpGGwCnJ5H4r6BWwaV6OrWmMoPhUl5jm/FMNAnJvWQ=
 github.com/gliderlabs/ssh v0.3.8 h1:a4YXD1V7xMF9g5nTkdfnja3Sxy1PVDCj1Zg4Wb8vY6c=
 github.com/gliderlabs/ssh v0.3.8/go.mod h1:xYoytBv1sV0aL3CavoDuJIQNURXkkfPA/wxQ1pL1fAU=
-github.com/go-crdt/collab v0.76.0 h1:/L9po+Ud39mkaKNUtym2FM3ykmwOMKEhZxHcOVpJZxM=
-github.com/go-crdt/collab v0.76.0/go.mod h1:rIejchnSkg5jmllQJj2Xlt0wWKQmXcYcdTyFjxVY110=
-github.com/go-crdt/crdt v0.56.0 h1:XVCJEJ6r5XAApC0zUlD3RuRJ/aVmBiiNNh4odB+YF6k=
-github.com/go-crdt/crdt v0.56.0/go.mod h1:pJLSxNxbzPptCmT81aAYz7Jx/XLE02kgTnMR1QTFaik=
+github.com/go-crdt/collab v0.76.1 h1:O364+gPqRfTPaxfnuGxuaYLPY34cx36MqGD3C2Ngcqs=
+github.com/go-crdt/collab v0.76.1/go.mod h1:sCDfJIcZjEUpzTF82JzKiBGVKVs40CdqNXrGlObFLIQ=
+github.com/go-crdt/crdt v0.56.1 h1:7V8JlT7RsjyTB/2RZGTzwOA1s4vTnVn4gSccKlrRa28=
+github.com/go-crdt/crdt v0.56.1/go.mod h1:pJLSxNxbzPptCmT81aAYz7Jx/XLE02kgTnMR1QTFaik=
 github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 h1:+zs/tPmkDkHx3U66DAb0lQFJrpS6731Oaa12ikc+DiI=
 github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376/go.mod h1:an3vInlBmSxCcxctByoQdvwPiA7DTK7jaaFDBTtu0ic=
 github.com/go-git/go-billy/v5 v5.9.2 h1:OXFSRyz4g20upsGDJgQG9Bak1l/ZEv8GHVYB52O71sE=
@@ -44,8 +44,8 @@ github.com/golang/protobuf v1.5.4 h1:i7eJL8qZTpSEXOPTxNKhASYpMn+8e5Q6AdndVa1dWek
 github.com/golang/protobuf v1.5.4/go.mod h1:lnTiLA8Wa4RWRcIUkrtSVa5nRhsEGBg48fD6rSs7xps=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
-github.com/grpc-transports/websocket v0.2.0 h1:n4lN066PPcVTvTfLdwa84gfNiAzvS9k4SSQ1yWuG3+g=
-github.com/grpc-transports/websocket v0.2.0/go.mod h1:2z7Qy11qgPaGDfqzImOt0iyLwH0wjfsvaiidCIIpzgg=
+github.com/grpc-transports/websocket v0.4.0 h1:P/PyEwzEOQRooWw4HNGEk/D8bkuoHJ/kwVw8EaPspPg=
+github.com/grpc-transports/websocket v0.4.0/go.mod h1:mgExQGqHkZm7empGD6W/+/Va58EaptwEqUpOR2DmnYY=
 github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 h1:BQSFePA1RWJOlocH6Fxy8MmwDt+yVQYULKfN0RoTN8A=
 github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99/go.mod h1:1lJo3i6rXxKeerYnT8Nvf0QmHCRC1n8sfWVwXF2Frvo=
 github.com/kevinburke/ssh_config v1.2.0 h1:x584FjTGwHzMwvHx18PXxbBVzfnxogHaAReU4gf13a4=
