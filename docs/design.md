@@ -119,15 +119,20 @@ CI gates on full statement coverage, and that gate says every line runs — not
 that anything would notice if a line were wrong. The difference is measurable:
 delete a guard, run the suite, and see whether it still passes.
 
-The subjects are the 126 refusals and bounds in the files that read from the
-network, found by walking the AST for an `if` whose body returns a refusal. All
-126 were run on 2026-10-04:
+The subjects are every refusal and bound in the code that reads bytes somebody
+else wrote, found by walking the AST for an `if` whose body returns a refusal:
+the files that read from the network, run on 2026-10-04, and the stores, run on
+2026-10-06 — a store holds what a document is made of and reads it back from a
+disk that may have been anywhere, which is the reasoning sites.go already gives
+for checksumming the participants file.
 
-| | |
-| --- | --- |
-| deletions that did not compile, so not mutants at all | 73 |
-| caught by the suite | 43 |
-| survived, at 100% of statements | 10 |
+| | the wire | the stores |
+| --- | --- | --- |
+| refusals and bounds taken as subjects | 126 | 64 |
+| deletions that did not compile, so not mutants at all | 73 | 20 |
+| caught by the suite | 43 | 38 |
+| survived, at 100% of statements | 10 | 6 |
+| of those, **real** | **3** | **1** |
 
 The 73 are not a result about the tests: deleting `if err != nil { return err }`
 orphans the `err` the line above declared, and the package stops building. A
@@ -154,9 +159,17 @@ here so the next reading does not re-open them:
 None of those changes what anybody observes. The first three are equivalent;
 the last three save work.
 
-**Three were real**, and all three are the same mistake: a test that asserts an
-error happened, where the code after the deleted guard also fails and says
-something else.
+**Four were real.** Three are the same mistake: a test that asserts an error
+happened, where the code after the deleted guard also fails and says something
+else. The fourth came from the stores and is not that shape at all —
+[Config.CollectEvery] is off by default, one line in collectStable holds the
+off position, and NO test could see that line: every test that collects sets
+the interval, and [Server.CollectNow], written so a test need not wait for a
+timer, sets the interval ITSELF. With the line deleted, a server with
+collection off gave back thirty versions' worth of map tombstones.
+TestCollectionOffMeansOff sweeps the same document twice, off and then armed,
+because "the floor did not move" would otherwise be satisfied by a document
+nobody could collect anyway.
 
 | guard deleted | the suite said | what it says now |
 | --- | --- | --- |
