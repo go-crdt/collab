@@ -45,17 +45,21 @@ jobs:
       # sibling repository split one of these run blocks in half, parsed, passed a
       # yaml.safe_load check, and failed on the runner with "unexpected end of
       # file" (go-crdt/crdt#138). Eleven jobs here, so the shell is parsed too.
+      # A workflow whose shell is broken is still valid YAML: an edit to the
+      # sibling repository split a run block between a loop's body and its
+      # `done`, parsed, and failed on the runner (go-crdt/crdt#138).
+      #
+      # actionlint is the tool for this and it already existed -- a Go program,
+      # maintained, which runs shellcheck over every run block and also checks
+      # the workflow's own schema, its expressions and its runner labels. I had
+      # written a checker of my own before looking; measured on 2026-10-08,
+      # actionlint catches both shapes that motivated it (SC1061/SC1062/SC1072
+      # for the unclosed loop, SC1044 for an unterminated heredoc) and exits 0
+      # on a sound workflow. Mine caught less and was one more thing to keep.
       - name: Every run block must parse as shell
         run: |
-          # A workflow whose shell is broken is still valid YAML: an edit to the
-          # sibling repository split a run block between a loop's body and its
-          # `done`, parsed, and failed on the runner (go-crdt/crdt#138).
-          #
-          # The oracle is bash, because the question is whether the shell that
-          # RUNS these accepts them -- with one exception measured on
-          # 2026-10-07: `bash -n` accepts an UNTERMINATED HEREDOC silently, so
-          # tools/runblocks checks the delimiter itself.
-          cd tools && go run ./runblocks ../.github/workflows/ci.yml
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$(go env GOPATH)/bin/actionlint" .github/workflows/ci.yml
 
   vulnerabilities:
     name: known vulnerabilities
