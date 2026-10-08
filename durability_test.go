@@ -131,6 +131,28 @@ func TestWhatWasWrittenSurvivesARestartMidSession(t *testing.T) {
 	// Ada is still connected. Before this, nothing would have been saved.
 	store.awaitSave(t, "the periodic save")
 
+	// And the server HAS both writes, witnessed the way the test below this one
+	// already witnesses its own: a second session sees what the server has
+	// taken. Without it, what follows asserts that a restart kept something the
+	// server may not have been given yet -- Close saves everything it holds,
+	// and an append still in flight is not held. Measured once on a loaded
+	// macOS runner, where the chat came back empty; 130 runs here, with -race
+	// and under load, never reproduced it, which is what an assumption about
+	// delivery looks like from a fast machine.
+	watcher := join(t, conn, collab.ClientConfig{Document: "project:default", Site: 2})
+	await(t, watcher, "both writes to reach the server", func() bool {
+		m, err := watcher.Map("comment:9f3c")
+		if err != nil {
+			return false
+		}
+		body, held := m.Get("body")
+		l, err := watcher.List("chat")
+		if err != nil {
+			return false
+		}
+		return held && string(body) == "à revoir" && len(l.Values()) == 1
+	})
+
 	// The server goes away with the session still open, which is what a restart
 	// or a redeploy looks like from here.
 	if err := srv.Close(t.Context()); err != nil {
