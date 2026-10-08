@@ -41,6 +41,49 @@ on one replica for ever. With the server's vector in hand the client answers wit
 exactly what is missing. `TestResumeCarriesWorkBothWays` fails if either
 direction is dropped.
 
+## The third outcome: the document has purged past you
+
+The section above says a `Welcome` carries a snapshot or the operations a
+participant missed. There is a third answer, and it is a refusal.
+
+A *purge* is not collection. Collection has a floor this server holds and will
+not cross. A purge arrives from **outside** the server, through its store — an
+operator's gitstore, a `MultiStore` merge of a purged side, a `pgstore` row, a
+`Resume` snapshot from a `crdt`-level tool. Nothing in this package performs one,
+which is exactly why it cannot be ruled out here.
+
+A purged run appears in no [crdt.Composite.OpsSince] at all. Serving the
+difference across one therefore hands the participant a history with a hole, and
+everything that follows it parks for ever, with no error anywhere. That is what
+[crdt.Composite.CanServe] answers, and the rule is: **this replica never serves a
+history it knows has a hole.** Where a snapshot serves the participant exactly it
+sends one; otherwise the join is refused. Silence is not one of the outcomes.
+
+A snapshot replaces operations only when **both** of these hold, and the second
+is the load-bearing one:
+
+1. the participant has said what snapshots it reads, so it is not handed a
+   format it may not decode;
+2. this replica already contains everything the participant holds. A snapshot
+   **replaces** a replica. Sending one to a participant carrying work this
+   server has not got would trade a silent divergence for silent data loss — and
+   it would do it to every build already deployed, which cannot be taught to
+   refuse. Sending one only where this replica is a superset means the
+   participant has nothing to lose.
+
+The refusal is `FailedPrecondition`, which is neither `Internal` ("try again")
+nor the `ResourceExhausted` this package uses for "rejoin to be caught up":
+waiting will not help, and the answer is to reseed the document. It wraps
+[crdt.ErrPurged], so a binding or a test asks `errors.Is` rather than parsing
+wording, and the wording leads with the purge, the document and the remedy
+because a WebSocket close frame keeps only the first 120 bytes of it.
+
+`TestAResumingParticipantWithWorkIsRefusedRatherThanServedAHole` fails if the
+hole is served, and `TestAParticipantHoldingOnlyAPartThisServerLacksIsRefused`
+fails if the second gate is dropped — it is the isolated shape of it, a
+participant whose whole document is one part this server has never seen, which
+reads as "nothing to lose" to anything that counts an absent part as zero.
+
 ## One replica identity per participant
 
 `crdt` assumes every replica editing a document has an identity of its own. When
