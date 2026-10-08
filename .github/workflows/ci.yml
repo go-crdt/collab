@@ -41,25 +41,31 @@ jobs:
             exit 1
           fi
 
-      # A workflow whose shell is broken is still valid YAML. An edit to the
-      # sibling repository split one of these run blocks in half, parsed, passed a
-      # yaml.safe_load check, and failed on the runner with "unexpected end of
-      # file" (go-crdt/crdt#138). Eleven jobs here, so the shell is parsed too.
       # A workflow whose shell is broken is still valid YAML: an edit to the
       # sibling repository split a run block between a loop's body and its
       # `done`, parsed, and failed on the runner (go-crdt/crdt#138).
       #
       # actionlint is the tool for this and it already existed -- a Go program,
       # maintained, which runs shellcheck over every run block and also checks
-      # the workflow's own schema, its expressions and its runner labels. I had
-      # written a checker of my own before looking; measured on 2026-10-08,
-      # actionlint catches both shapes that motivated it (SC1061/SC1062/SC1072
-      # for the unclosed loop, SC1044 for an unterminated heredoc) and exits 0
-      # on a sound workflow. Mine caught less and was one more thing to keep.
+      # the workflow's own schema, its expressions and its runner labels.
+      #
+      # Two things measured on 2026-10-08 before trusting it. At the default
+      # severity it fails this repository's workflow on style (SC2086 and
+      # friends), so shellcheck is asked for errors only -- and at that setting
+      # it still catches both shapes that matter: SC1061/SC1062/SC1072 for an
+      # unclosed loop, SC1044/SC1072/SC1073 for an unterminated heredoc.
+      #
+      # And it SKIPS shellcheck silently when it cannot find it: exit 0 over an
+      # unterminated heredoc, no output. A check that cannot run is not a check
+      # that passed, so its presence is asserted first.
       - name: Every run block must parse as shell
         run: |
+          command -v shellcheck >/dev/null || {
+            echo "::error::shellcheck is not installed, and actionlint would skip it and pass"
+            exit 1
+          }
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-          "$(go env GOPATH)/bin/actionlint" .github/workflows/ci.yml
+          "$(go env GOPATH)/bin/actionlint" -shellcheck="shellcheck -S error" .github/workflows/ci.yml
 
   vulnerabilities:
     name: known vulnerabilities
