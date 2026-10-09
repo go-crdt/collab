@@ -4,4 +4,4 @@
 // reporting script to a hundred per cent or weakening the gate that matters.
 module github.com/go-crdt/collab/tools
 
-go 1.27.1
+go 1.27.2
