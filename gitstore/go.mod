@@ -4,7 +4,7 @@ go 1.27.2
 
 require (
 	github.com/andybalholm/brotli v1.2.6
-	github.com/go-crdt/collab v0.77.0
+	github.com/go-crdt/collab v0.77.1
 	github.com/go-crdt/crdt v0.57.0
 	github.com/go-git/go-git/v5 v5.19.3
 )
