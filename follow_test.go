@@ -98,10 +98,38 @@ func TestTwoServersFollowingEachOther(t *testing.T) {
 		return text(t, ada) == "aller retour"
 	})
 
+	// Settled means the queue is empty, and that has to be made so rather than
+	// hoped for.
+	//
+	// awaitFor stops as soon as its predicate holds, and it checks the predicate
+	// BEFORE reading the channel -- so when the text is already up to date at
+	// the moment of the check, the notification for that very edit is never
+	// consumed and stays in Changes(). The assertion below then counts it as a
+	// change that arrived after everything had settled, when it is the change
+	// that CAUSED the settling.
+	//
+	// That is what failed on macos-latest on 2026-10-11 -- "Ada was told about
+	// 1 changes after everything had settled" -- and it had been passing on the
+	// interleaving rather than on anything this test arranged. Emptying what is
+	// already queued is part of the definition of settled.
+	settle := func(c *collab.Client) {
+		for {
+			select {
+			case <-c.Changes():
+			default:
+				return
+			}
+		}
+	}
+	settle(ada)
+	settle(grace)
+
 	// Now the part that would fail if an operation nobody learned from were
 	// passed on: with the two links echoing each other, a participant would
 	// keep being told about a document that has stopped changing. Nothing is
-	// edited from here on, so nothing should arrive.
+	// edited from here on, so nothing should arrive -- and with the queues
+	// emptied above, anything that does arrive is NEW traffic, which is the
+	// property this is about.
 	drained := func(c *collab.Client) int {
 		n := 0
 		for {
