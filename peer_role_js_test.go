@@ -85,3 +85,38 @@ func TestAnsweringTwiceIsRefusedByTheRoleAndNotByTheDecoder(t *testing.T) {
 		t.Errorf("answering after offering gave %q, which does not say the role was already taken", err)
 	}
 }
+
+// A browser that refuses to build an answer is reported, not carried past.
+//
+// The twin of TestOfferReportsARejection, which this package already had. The
+// fake could make createOffer reject and had nothing for createAnswer, so the
+// check after it was the one guard of the symmetric pair that no test reached --
+// and the first sweep of these files found it surviving.
+//
+// Deleted, a zero js.Value goes on to setLocalDescription, and what the caller
+// gets depends on what the browser does with it rather than on what went wrong.
+func TestAnswerReportsARejection(t *testing.T) {
+	installFake(t)
+	offer, err := offerer2Offer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	setFake("rejectAnswer", true)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+
+	_, err = p.Answer(context.Background(), offer)
+	if err == nil {
+		t.Fatal("an answer the browser refused should fail")
+	}
+	if !errors.Is(err, ErrTransport) {
+		t.Errorf("got %v, want an ErrTransport", err)
+	}
+	if !strings.Contains(err.Error(), "createAnswer refused") {
+		t.Errorf("got %q, which does not carry the reason the browser gave", err)
+	}
+}
