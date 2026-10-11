@@ -162,9 +162,18 @@ func TestStalledLeavesANilErrorAlone(t *testing.T) {
 //	held by TestReleasingAConnectionTwiceIsANoOp, which is the part that could
 //	stop being true under us.
 //
-//	bcast_js.go:136 (after dialBus), bcast_js.go:220 (after openWith) and
-//	peer_js.go:209 (after createAnswer). Real, and not pinned because the fake
-//	cannot make any of those three fail: it has knobs for a stalled ICE and for
-//	an answer with no channel, and nothing for a rejected promise. Holding these
-//	means extending the fake, which is a change to the fixture rather than a
-//	test, and it is the obvious next step here.
+//	bcast_js.go:220, after openWith. The one still unheld, and for a measured
+//	reason rather than for want of trying: OpenBroadcastSession SUCCEEDS on a
+//	context that is already over, because a tab alone in a room becomes its host
+//	immediately and the election never waits for anything. Making openWith fail
+//	needs a fixture that can break the election itself, and the BroadcastChannel
+//	fake has no knob at all.
+//
+// Two neighbours were in this list and are not any more, both reached without
+// much. peer_js.go:209, after createAnswer, is held by
+// TestAnswerReportsARejection once the fake gained a rejectAnswer knob to match
+// the rejectOffer it already had -- the answer half of a symmetric pair had no
+// way to be made to fail, which is exactly why that one guard of the two
+// survived. bcast_js.go:136, after dialBus, is held by
+// TestATabThatCannotReachAHostInTimeIsToldSo and needed no new knob: a room
+// nobody serves and a deadline already passed.

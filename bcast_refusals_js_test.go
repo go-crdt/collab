@@ -3,6 +3,7 @@
 package collab
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"syscall/js"
@@ -75,5 +76,43 @@ func assertNamesTheMissingChannel(t *testing.T, err error) {
 	}
 	if !strings.Contains(err.Error(), "no BroadcastChannel") {
 		t.Errorf("got %q, which does not name what the page is missing", err)
+	}
+}
+
+// A tab that cannot reach a host in time is told so, and handed nothing.
+//
+// The transport dials and waits for a host to answer. Given a room nobody
+// serves and a deadline that has already passed, it has to come back with an
+// error and no connection -- and the check that makes sure of it,
+// bcast_js.go:136 after dialBus, survived the first sweep of these files.
+// Deleted, open returns (nil, nil): a caller told nothing went wrong, holding
+// nothing, with the bus left open behind it, since that branch is also what
+// closes it.
+//
+// The deadline is short on purpose. The same combination without a deadline is
+// how the first version of the control above went wrong -- it called open()
+// with the test's own context and waited the ten minutes `go test` allows -- so
+// here the waiting is the subject rather than an accident, and bounded.
+//
+// Its sibling, bcast_js.go:220 after openWith, is NOT held and could not be by
+// this means: measured, OpenBroadcastSession succeeds on a context that is
+// already over, because a tab alone in a room becomes its host immediately and
+// the election never has to wait for anything. Making openWith fail needs a
+// fixture that can break the election itself, which the BroadcastChannel fake
+// has no knob for.
+func TestATabThatCannotReachAHostInTimeIsToldSo(t *testing.T) {
+	js.Global().Call("eval", fakeBroadcastChannel)
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Millisecond)
+	defer cancel()
+	conn, err := JoinBroadcastChannel("room:nobody-serves-this").open(ctx)
+	if err == nil {
+		t.Fatal("open succeeded in a room nobody serves")
+	}
+	if conn != nil {
+		t.Error("open returned a connection alongside its error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("got %v, want the deadline it was given", err)
 	}
 }

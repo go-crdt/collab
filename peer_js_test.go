@@ -24,7 +24,11 @@ import (
 // globalThis.__collabFake tunes it: stallICE leaves gathering forever
 // incomplete, and noChannel answers an offer without ever delivering a channel —
 // the two ways a handshake stops halfway, which a Peer has to wait on and a
-// context has to be able to cut short.
+// context has to be able to cut short. rejectOffer and rejectAnswer make the
+// browser refuse the operation outright instead, which is the third way and the
+// one a caller is simply told about. They come in a pair because the checks they
+// reach do: the answer side had no knob, and a mutation sweep found exactly that
+// one guard of the symmetric pair surviving.
 const fakeWebRTC = `
 (function () {
   globalThis.__collabFake = globalThis.__collabFake || {};
@@ -63,7 +67,10 @@ const fakeWebRTC = `
         if (globalThis.__collabFake.rejectOffer) return Promise.reject(new Error("createOffer refused"));
         return Promise.resolve({ type: "offer", sdp: "v=0\r\n" });
       },
-      createAnswer() { return Promise.resolve({ type: "answer", sdp: "v=0\r\n" }); },
+      createAnswer() {
+        if (globalThis.__collabFake.rejectAnswer) return Promise.reject(new Error("createAnswer refused"));
+        return Promise.resolve({ type: "answer", sdp: "v=0\r\n" });
+      },
       setLocalDescription(desc) {
         // Stamp the registry id into the sdp so an answerer can find the offerer.
         this.localDescription = { type: desc.type, sdp: desc.sdp + "a=pcid:" + id + "\r\n" };
