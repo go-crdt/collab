@@ -75,17 +75,29 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: 1.27.2
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Install govulncheck and the gate that judges it
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.7.0
       - name: Scan, and judge the findings rather than the exit status
         run: |
           # govulncheck exits 0 over an advisory it decides this module does not
           # call -- measured, on GO-2026-6443 in grpc v1.84.0 -- so a lane that
           # reads the exit status is silent about exactly the finding somebody
-          # has to decide about. tools/vulngate reads the findings, and unlike an
-          # inline script it has tests of its own.
+          # has to decide about. vulngate reads the findings instead. It lives in
+          # go-fleettools/fleettools rather than in tools/ here because this
+          # repository and go-crdt/crdt each held a byte-identical copy, so a fix
+          # had to be applied twice.
+          #
+          # This lane is the one that proved it worth having: on 2026-10-09 four
+          # x/net HTTP/2 advisories were REACHABLE from this module -- ReadFrame,
+          # WriteHeaders, WriteContinuation, String -- and govulncheck exited 0
+          # over every one of them.
+          #
+          # -go holds the scan to the toolchain this job pins, because standard
+          # library findings are decided by that one version.
           govulncheck -format json ./... > findings.json
-          cd tools && go run ./vulngate ../findings.json
+          vulngate -go go1.27.2 findings.json
 
   test:
     name: test (${{ matrix.os }})
