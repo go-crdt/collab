@@ -640,3 +640,139 @@ func TestAPeerThatAcceptsAndDropsDoesNotResetTheWaiting(t *testing.T) {
 		})
 	}
 }
+
+// heldPeer is a dialler the test drives: it fails immediately until it is told
+// to hold, and then blocks in the dial until released.
+//
+// Holding is what makes the cancellation deterministic. The loop must notice
+// the cancellation at the TOP, after an attempt has returned -- if it notices
+// it inside the backoff's sleep instead, that path returns ctx.Err() on its
+// own and says nothing about the guard above it.
+type heldPeer struct {
+	mu      sync.Mutex
+	hold    bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p *heldPeer) dial(context.Context) (Transport, error) {
+	p.mu.Lock()
+	hold := p.hold
+	p.mu.Unlock()
+	if hold {
+		p.entered <- struct{}{}
+		<-p.release
+	}
+	return nil, errors.New("the peer is not reachable")
+}
+
+func (p *heldPeer) holdNext() {
+	p.mu.Lock()
+	p.hold = true
+	p.mu.Unlock()
+}
+
+// ⛔ A link torn down on purpose has not FAILED, so the operator's policy is
+// not asked about it and nobody is told the link went down.
+//
+// reconnect.go:242, `if ctx.Err() != nil`, survived a mutation sweep on
+// 2026-10-17. Deleting it still returns context.Canceled -- backoff.down
+// returns it one line further on -- so no test that read the returned error
+// could see the difference. What it loses is in between: RetryPolicy.Permanent
+// is consulted about whatever error the dying attempt happened to return, and
+// if an operator's policy says that error is permanent then Follow reports
+// "the peer is not reachable" for a link its owner shut down. The comment
+// above the guard says exactly this, and nothing held it.
+//
+// It is the twin of rejoin.go:104, held in rejoin_internal_test.go: the same
+// shape in the other retry loop, found in the same sweep.
+func TestALinkTornDownOnPurposeIsNotAFailureToDecideAbout(t *testing.T) {
+	srv := NewServer(Config{Store: NewMemoryStore()})
+	t.Cleanup(func() { _ = srv.Close(context.Background()) })
+	participant(t, srv, ClientConfig{Document: "doc", Site: 1})
+
+	peer := &heldPeer{entered: make(chan struct{}, 4), release: make(chan struct{})}
+	var mu sync.Mutex
+	var asked []error
+	var downs int
+	link, err := srv.reconnecting(peer.dial, "doc", 999, RetryPolicy{
+		Wait:    time.Millisecond,
+		Ceiling: time.Millisecond,
+		Permanent: func(err error) bool {
+			mu.Lock()
+			asked = append(asked, err)
+			mu.Unlock()
+			return false
+		},
+		Notify: func(st LinkStatus) {
+			if st.Up {
+				return
+			}
+			mu.Lock()
+			downs++
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The backoff hands its wait straight back, so the loop turns as fast as
+	// the test can read it.
+	slept := make(chan struct{}, 64)
+	link.back.sleep = func(ctx context.Context, _ time.Duration) error {
+		select {
+		case slept <- struct{}{}:
+		default:
+		}
+		return ctx.Err()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ended := make(chan error, 1)
+	go func() { ended <- link.run(ctx) }()
+
+	// The control, first: an ordinary failure IS put to the policy and IS
+	// reported as an outage. Without it, the zeroes asserted below would pass
+	// over a policy that is never consulted at all.
+	<-slept
+	mu.Lock()
+	controlAsks, controlDowns := len(asked), downs
+	mu.Unlock()
+	if controlAsks == 0 {
+		t.Fatal("a failed attempt was not put to RetryPolicy.Permanent, so this test cannot see it being skipped")
+	}
+	if controlDowns == 0 {
+		t.Fatal("a failed attempt was not reported as an outage, so this test cannot see one being avoided")
+	}
+
+	// Now the next attempt is held inside the dial, the owner cancels, and the
+	// attempt comes back afterwards: the loop reaches its top with the context
+	// already done.
+	peer.holdNext()
+	<-peer.entered
+	mu.Lock()
+	asked, downs = nil, 0
+	mu.Unlock()
+	cancel()
+	close(peer.release)
+
+	select {
+	case err := <-ended:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("run returned %v, want context.Canceled: a link told to stop reports why it was told, "+
+				"not what the dying attempt happened to say", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("run did not return after its context was cancelled")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) != 0 {
+		t.Errorf("RetryPolicy.Permanent was asked about %v after the link was cancelled: "+
+			"a policy that called it permanent would make Follow report that error instead of the cancellation", asked)
+	}
+	if downs != 0 {
+		t.Errorf("%d outage(s) were reported for a link its owner shut down", downs)
+	}
+}
