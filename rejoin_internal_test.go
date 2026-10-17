@@ -761,3 +761,112 @@ func TestAnEditThatMeetsADyingCarrierIsKept(t *testing.T) {
 	}
 	close(first.held)
 }
+
+// ⛔ A client its owner cancelled must not announce an OUTAGE on its way out.
+//
+// rejoin.go:104, `if ctx.Err() != nil`, survived a mutation sweep of the 61
+// refusals in six of this package's files on 2026-10-17. Deleting it does not
+// hang the supervisor -- the comment two lines above says the select would
+// have picked between two branches that said the same thing, and backoff.down
+// returns ctx.Err() on the next turn, so the loop still leaves. What it loses
+// is which story the operator is told: without it the supervisor marks the
+// client DOWN and notifies LinkStatus{Err: nil, Attempt: 1, RetryIn: …} for a
+// participant nobody is waiting for, which reads as an outage the network
+// caused.
+//
+// The absence is synchronised rather than slept on: both paths end at
+// c.fail(ctx.Err()), so waiting for Err() to be set means the path has run,
+// and the count of outages at that moment is what distinguishes them.
+func TestACancelledClientDoesNotReportAnOutage(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := NewServer(Config{Store: NewMemoryStore()})
+	defer func() { _ = srv.Close(context.Background()) }()
+
+	link := &breakable{srv: srv, ctx: ctx}
+	var mu sync.Mutex
+	var ups, downs int
+	c, err := JoinWithRetry(ctx, link.dial, ClientConfig{Document: "d", Site: 1}, RetryPolicy{
+		Wait:    time.Millisecond,
+		Ceiling: 2 * time.Millisecond,
+		Notify: func(s LinkStatus) {
+			mu.Lock()
+			defer mu.Unlock()
+			if s.Up {
+				ups++
+			} else {
+				downs++
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+
+	// The control, and it has to come first: a REAL outage is reported, and
+	// the link then comes back. Without it, a test that counted no outages
+	// would pass over a Notify that is never called at all.
+	link.cut()
+	waitFor2(t, "the outage to be noticed", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return downs > 0
+	})
+	waitFor2(t, "the link to come back", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return ups > 0
+	})
+
+	mu.Lock()
+	before := downs
+	mu.Unlock()
+
+	// Now the owner cancels. Nothing is wrong with the network.
+	cancel()
+	waitFor2(t, "the supervisor to answer the cancellation", func() bool {
+		return c.Err() != nil
+	})
+
+	mu.Lock()
+	after := downs
+	mu.Unlock()
+	if after != before {
+		t.Errorf("a cancelled client reported %d more outage(s): its owner asked it to stop, "+
+			"and LinkStatus says the link failed", after-before)
+	}
+}
+
+// The other two survivors of that sweep are named here rather than pinned,
+// because reading them says they are the same answer by another line. The
+// tool's own closing advice is to read the END of the function first, and
+// both were held there.
+//
+//	stable.go:263, clockFloor's `len(d.seen) == 0`. With no participants the
+//	loop below it never runs, `out` stays nil, and the function's LAST guard
+//	-- `if len(out) == 0 { return nil, false }` -- gives exactly the same
+//	(nil, false). The behaviour is already asserted, in
+//	TestTheClockFloorIsTheLeastEverybodyPromised's first line: "a document
+//	nobody has been in promised something". An equivalent mutant, not a hole.
+//	I first read it as a floor of "nothing" returned as a floor that EXISTS,
+//	which would have let a collection run below what anybody acknowledged;
+//	the correction is recorded rather than the first guess, because the first
+//	guess is what a reader would otherwise inherit.
+//
+//	rejoin.go:195, the `err != nil` after Recv in attach. Deleting it reaches
+//	`msg.(welcomeMsg)` with a nil message, which fails, and returns
+//	ErrProtocol through the same `fail` closure -- the carrier is closed
+//	either way, and the only difference is which error value comes back.
+//	attach has exactly one caller, rejoin.go:129, and it discards the error
+//	with `continue`. So nothing observable changes.
+//
+//	⛔ That last reading is worth keeping for a different reason: it says the
+//	rejoin loop THROWS AWAY the error of a failed attempt, while the
+//	follower's loop hands the same kind of error to RetryPolicy.Permanent
+//	(reconnect.go:245). A client whose rejoin keeps failing on a protocol
+//	mismatch therefore retries for ever and no operator policy can stop it.
+//	That is an asymmetry between two retry loops in one package, found by
+//	reading a survivor rather than by the survivor itself, and it is a
+//	decision about the API rather than a missing test -- so it is reported as
+//	an issue and not quietly changed here.
