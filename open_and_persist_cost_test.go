@@ -1,3 +1,10 @@
+//go:build !js
+
+// The helpers these tests use (serve, join, body, text, awaitFor) live in
+// collab_test.go, which is !js: there is no in-process server to dial from a
+// browser. Without the same constraint here the js/wasm lane fails to compile
+// -- `undefined: serve` -- and the lane is the only thing that says so, since a
+// native `go test` never reads this file for that configuration.
 package collab_test
 
 import (
