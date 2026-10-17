@@ -349,3 +349,90 @@ func (gone) Type() os.FileMode { return 0 }
 func (gone) Info() (os.FileInfo, error) {
 	return nil, errors.New("it is not there any more")
 }
+
+// emptyCold is an archive whose answer for a document it does not have is a
+// zero-length slice rather than nil -- a store's own refusal, a torn file, or
+// simply a different idea of "missing". It records every write it is given.
+type emptyCold struct {
+	loads  int
+	stored map[string][]byte
+}
+
+func (c *emptyCold) Load(context.Context, string) ([]byte, error) {
+	c.loads++
+	return []byte{}, nil
+}
+
+func (c *emptyCold) Save(_ context.Context, document string, snapshot []byte) error {
+	if c.stored == nil {
+		c.stored = map[string][]byte{}
+	}
+	c.stored[document] = snapshot
+	return nil
+}
+
+// countingHot is a hot store that says what it was asked to write.
+type countingHot struct {
+	*MemoryStore
+	writes []string
+}
+
+func (h *countingHot) Save(ctx context.Context, document string, snapshot []byte) error {
+	h.writes = append(h.writes, document)
+	return h.MemoryStore.Save(ctx, document, snapshot)
+}
+
+// ⛔ A zero-length answer from the ARCHIVE must not be brought back.
+//
+// tiered.go:126, `if len(cold) == 0 { return nil, nil }`, survived a mutation
+// sweep of the root package's remaining 32 refusals on 2026-10-17. Deleting it
+// falls through to the line that brings a document back -- so an archive which
+// answers "I do not have it" with an empty slice makes Tiered write an EMPTY
+// snapshot into the hot store, for a document nobody ever had. From then on
+// the hot store answers non-nil for it, the first branch of Load returns that,
+// and the document can never be opened: the archive is no longer consulted.
+//
+// The nil-versus-empty reasoning is spelled out two branches above, for the
+// hot store. The same distinction on the cold side was held by nothing.
+func TestAnEmptyAnswerFromTheArchiveIsNotBroughtBack(t *testing.T) {
+	ctx := context.Background()
+	hot := &countingHot{MemoryStore: NewMemoryStore()}
+	cold := &emptyCold{}
+	store := NewTiered(hot, cold)
+
+	got, err := store.Load(ctx, "never-existed")
+	if err != nil {
+		t.Fatalf("an archive that does not have the document returned an error: %v", err)
+	}
+	// The control: the archive WAS asked, so the nil below is about what it
+	// said and not about a hot store that answered first.
+	if cold.loads != 1 {
+		t.Fatalf("the archive was consulted %d times, want 1", cold.loads)
+	}
+	if got != nil {
+		t.Errorf("Load returned a %d-byte snapshot for a document nothing holds; nil is how a store says "+
+			"\"new document\", and anything else makes the server open and save an empty one", len(got))
+	}
+	if len(hot.writes) != 0 {
+		t.Errorf("an empty snapshot was written to the hot store for %v: every later Load would then "+
+			"answer non-nil for a document that does not exist, and the archive would never be asked again",
+			hot.writes)
+	}
+
+	// And the whole way round, as the control for the control: a real archived
+	// document IS brought back, so the test above is about emptiness rather
+	// than about Tiered never promoting anything.
+	full := NewTiered(&countingHot{MemoryStore: NewMemoryStore()}, NewMemoryStore())
+	if err := full.cold.Save(ctx, "archived", []byte("what somebody wrote")); err != nil {
+		t.Fatal(err)
+	}
+	switch back, err := full.Load(ctx, "archived"); {
+	case err != nil:
+		t.Fatal(err)
+	case !bytes.Equal(back, []byte("what somebody wrote")):
+		t.Fatalf("an archived document came back as %q", back)
+	}
+	if hot := full.hot.(*countingHot); len(hot.writes) != 1 {
+		t.Errorf("a real document was promoted %d times, want 1", len(hot.writes))
+	}
+}
