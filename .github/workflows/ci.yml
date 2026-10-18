@@ -489,6 +489,12 @@ jobs:
   # FuzzDecodeServer are the wire, FuzzHostileSession is a session that misbehaves,
   # and the three store targets are what comes back from a file, a database row or
   # a git blob.
+  #
+  # Seven now: FuzzDecodeEnvelope was added on 2026-10-18 for the browser bus,
+  # whose bytes come from another TAB rather than from a participant at all.
+  # The sentence above says "six" on purpose -- it is about the state the lane
+  # was in when it was written, and the count a reader should check is the
+  # matrix below, not a number in a comment that the next target makes wrong.
   fuzz:
     name: fuzz
     runs-on: ubuntu-latest
