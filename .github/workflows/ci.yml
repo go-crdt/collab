@@ -502,6 +502,14 @@ jobs:
           - FuzzUnpackSnapshot
           - FuzzFrameRoundTrip
           - FuzzMergeSnapshots
+          # ⛔ The BroadcastChannel bus, where a frame comes from another TAB of
+          # the same origin rather than from a server. A mutation sweep found
+          # that `if n <= 0` in decodeEnvelope was held by nothing, and
+          # deleting it PANICKED: binary.Uvarint returns a NEGATIVE count for
+          # an overflowing varint, and `rest[n:]` with it is `slice bounds out
+          # of range [-11:]`. A target nothing invokes is documented rather
+          # than deployed, so it joins this matrix with the others.
+          - FuzzDecodeEnvelope
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
