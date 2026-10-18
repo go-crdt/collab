@@ -187,3 +187,71 @@ func TestFlushingAnUnchangedDocumentWritesNothing(t *testing.T) {
 //	and the suite does not see it either. Named with the correction rather than
 //	with the first guess, because the first guess is what a reader would
 //	otherwise inherit.
+
+// ⛔ An edit that produced NOTHING is not published, and the saving is why.
+//
+// parts.go:103, `if batch.Text == nil && batch.List == nil && batch.Map ==
+// nil`, survived a mutation sweep of the root package's remaining 32 refusals
+// on 2026-10-17. It reads like a cost guard -- a frame nobody needs -- and it
+// is not: an empty batch reaches the server, the server marks the document
+// dirty, and the next tick writes the WHOLE snapshot. Measured below, with the
+// guard deleted: one no-op edit, one more save of everything.
+//
+// The inputs are not contrived. `Insert(pos, "")` is what a text widget does
+// for a keystroke that produced no text -- an IME composition that has not
+// resolved, a paste of an empty clipboard, a programmatic edit of a selection
+// that turned out to be empty -- and `Delete(pos, 0)` is the same for a
+// deletion. Every one of those would otherwise cost a full snapshot write.
+func TestAnEditThatProducedNothingIsNotPublished(t *testing.T) {
+	store := newTallyStore()
+	srv, conn := serve(t, collab.Config{Store: store})
+
+	c := join(t, conn, collab.ClientConfig{Document: "doc", Site: 1})
+	// Not named `text`: that is the helper this file's witness check calls,
+	// and a local of the same name shadows it.
+	doc := body(t, c)
+	if err := doc.Insert(0, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	// A second participant is the witness that the server has the edit; the
+	// editing client holds its own insertion whatever the server has.
+	witness := join(t, conn, collab.ClientConfig{Document: "doc", Site: 2})
+	awaitFor(t, witness, "the edit to reach the server", settleJS, func() bool {
+		return text(t, witness) == "hello"
+	})
+
+	ctx := context.Background()
+	if err := srv.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, _, saves, _ := store.counts()
+	// The control, first: a REAL edit was saved, so a zero below would
+	// otherwise mean the store is never written at all.
+	if saves == 0 {
+		t.Fatal("the flush after a real edit saved nothing, so this test cannot see a save it should not make")
+	}
+
+	// Now the edits that produce no operations. Neither is an error: asking to
+	// insert nothing is not a failure, and a client told otherwise would learn
+	// to ignore the error.
+	if err := doc.Insert(0, ""); err != nil {
+		t.Errorf("inserting nothing was reported as a failure: %v", err)
+	}
+	if err := doc.Delete(0, 0); err != nil {
+		t.Errorf("deleting nothing was reported as a failure: %v", err)
+	}
+	if err := srv.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, after, _ := store.counts()
+	if after != saves {
+		t.Errorf("two edits that produced no operations cost %d more snapshot write(s): an empty batch "+
+			"reaches the server, marks the document dirty, and the next tick writes everything", after-saves)
+	}
+	// And the text is what it was, which says the no-ops were no-ops rather
+	// than refused somewhere that also dropped a real edit.
+	if got := doc.String(); got != "hello" {
+		t.Errorf("the text is %q after two no-op edits", got)
+	}
+}
