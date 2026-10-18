@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -434,5 +435,156 @@ func TestAnEmptyAnswerFromTheArchiveIsNotBroughtBack(t *testing.T) {
 	}
 	if hot := full.hot.(*countingHot); len(hot.writes) != 1 {
 		t.Errorf("a real document was promoted %d times, want 1", len(hot.writes))
+	}
+}
+
+// ⛔ A CORRUPT HOT COPY MUST BE REPORTED, NOT READ AS "SOMEBODY ELSE WROTE IT".
+//
+// dirstore.go:322, the UnpackSnapshot error check in DirStore.Release,
+// survived a mutation sweep of dirstore.go, dircompress.go and durability.go
+// on 2026-10-17 -- 39 refusals, three survivors. Deleting it is not a quiet
+// loss of a message: `unpacked` is then nil, stillHolds compares nil against
+// what the archiver asked to release, and the answer is ErrChanged.
+//
+// ErrChanged is the one error Tiered.Archive treats as BENIGN. Its own comment
+// says why -- "somebody wrote it while it was being copied… releasing now
+// would delete the newer one" -- so it `continue`s, silently. A file whose
+// checksum does not match would therefore be skipped with no failure
+// reported, for as long as it stays quiet, and the only thing that knew it was
+// corrupt would have thrown the knowledge away.
+//
+// The guard's own comment states the rule it keeps: "Unreadable is not 'holds
+// what you expected', and it is certainly not a reason to remove it."
+//
+// Reached through Archive rather than through Release, because Archive is what
+// decides whether anybody hears about it: the second read is the one that is
+// corrupted, which is also the real shape of the hazard -- a file that was
+// fine when it was copied and is not when it is released.
+func TestACorruptHotCopyIsReportedRatherThanTakenForAChange(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	hot, err := NewDirStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cold := NewMemoryStore()
+	store := NewTiered(hot, cold)
+
+	if err := store.Save(ctx, "d", []byte("what somebody wrote")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The control FIRST: with nothing corrupted, this document archives and is
+	// counted. Without it, "one failure reported" below could be a Tiered that
+	// never archives anything.
+	switch moved, err := store.Archive(ctx, 0); {
+	case err != nil:
+		t.Fatalf("archiving an intact document: %v", err)
+	case moved != 1:
+		t.Fatalf("%d documents archived, want 1", moved)
+	}
+	if back, err := cold.Load(ctx, "d"); err != nil || string(back) != "what somebody wrote" {
+		t.Fatalf("the archive holds %q, %v", back, err)
+	}
+
+	// Now the same again, with the file corrupting itself between the read that
+	// copies it and the read that releases it.
+	if err := store.Save(ctx, "d2", []byte("the second one")); err != nil {
+		t.Fatal(err)
+	}
+	var reads int
+	realRead := readFile
+	readFile = func(path string) ([]byte, error) {
+		reads++
+		raw, err := realRead(path)
+		if err != nil || reads < 2 {
+			return raw, err
+		}
+		// Flip the last byte, which the checksum covers.
+		bad := append([]byte(nil), raw...)
+		bad[len(bad)-1] ^= 0xff
+		return bad, nil
+	}
+	t.Cleanup(func() { readFile = realRead })
+
+	removed := 0
+	realRemove := removeFile
+	removeFile = func(path string) error {
+		removed++
+		return realRemove(path)
+	}
+	t.Cleanup(func() { removeFile = realRemove })
+
+	moved, err := store.Archive(ctx, 0)
+	if err == nil {
+		t.Fatalf("a corrupt hot copy was archived silently: moved=%d", moved)
+	}
+	// ⛔ What is asserted is that the error is NOT the benign one and that it
+	// names the document — not its wording. The first version of this test
+	// demanded the words "corrupted" or "checksum", and failed on
+	//
+	//	collab: releasing "d2" after archiving it: collab: reading document
+	//	"d2": collab: reading a compressed document: unexpected EOF
+	//
+	// which is the truth: a flipped byte breaks the DECOMPRESSION before the
+	// checksum is ever compared, so insisting on the checksum's words would
+	// assert which layer happens to notice first.
+	if errors.Is(err, ErrChanged) {
+		t.Errorf("a corrupt document was reported as one that CHANGED, which Archive treats as benign: %v", err)
+	}
+	if !strings.Contains(err.Error(), "d2") {
+		t.Errorf("the failure does not say which document: %v", err)
+	}
+	if removed != 0 {
+		t.Errorf("the corrupt file was removed %d time(s): unreadable is not a reason to delete it", removed)
+	}
+	// And it is still there to be looked at.
+	if _, err := readDir(dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ⛔ A FILE THAT CANNOT BE READ IS NOT A TORN WRITE.
+//
+// dirstore.go:144, the read error check in DirStore.Load, also survived that
+// sweep, and the reason is that the two guards below it catch every case:
+// zero bytes read reaches "empty on disk, which is a torn write", and a
+// partial read reaches UnpackSnapshot and fails its checksum. The error is
+// reported either way.
+//
+// What is lost is which error. A permission problem, a failing disk or a file
+// held by something else would be reported as a TORN WRITE -- sending whoever
+// reads it to look at the last crash instead of at the mode bits, and the
+// message is the whole of what they have. So this holds the diagnosis rather
+// than the outcome, and says so.
+func TestAFileThatCannotBeReadIsNotReportedAsATornWrite(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := NewDirStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(ctx, "d", []byte("what somebody wrote")); err != nil {
+		t.Fatal(err)
+	}
+	// The control: it loads before anything is broken.
+	if got, err := store.Load(ctx, "d"); err != nil || string(got) != "what somebody wrote" {
+		t.Fatalf("Load = %q, %v", got, err)
+	}
+
+	realRead := readFile
+	readFile = func(string) ([]byte, error) { return nil, fs.ErrPermission }
+	t.Cleanup(func() { readFile = realRead })
+
+	_, err = store.Load(ctx, "d")
+	if err == nil {
+		t.Fatal("a file that could not be read loaded anyway")
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("the read failure was not carried through: %v", err)
+	}
+	if strings.Contains(err.Error(), "torn write") {
+		t.Errorf("a permission problem was reported as a torn write, which sends the reader to the "+
+			"wrong place entirely: %v", err)
 	}
 }

@@ -9,8 +9,10 @@ package collab_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-crdt/collab"
 )
@@ -255,3 +257,123 @@ func TestAnEditThatProducedNothingIsNotPublished(t *testing.T) {
 		t.Errorf("the text is %q after two no-op edits", got)
 	}
 }
+
+// ⛔ A PARTICIPANT ARRIVING WITH NOTHING TO SAY COSTS A WHOLE SNAPSHOT.
+//
+// client.go:518, publish's `len(batches) == 0`, survived the fourth chunk of
+// the root sweep. It is the same shape as parts.go:103 above and it is not an
+// edge case: pushMissing calls publish with what OpsSince gives, and its own
+// comment says what that is -- "for a participant that joined fresh this is
+// nothing". So without the guard EVERY join sends an empty operations frame,
+// the server marks the document dirty, and the next tick writes the entire
+// snapshot. Once per arrival, for a document nobody touched.
+//
+// It is not held by TestFlushingAnUnchangedDocumentWritesNothing above, which
+// is why the sweep found it: there the witness joins BEFORE the first flush,
+// so the dirty flag its empty push would set is absorbed by a flush that had
+// something to write anyway. The join has to come after a flush for the cost
+// to be visible, which is what this test does.
+func TestAParticipantArrivingWithNothingToSayCostsNothing(t *testing.T) {
+	store := newTallyStore()
+	srv, conn := serve(t, collab.Config{Store: store})
+
+	first := join(t, conn, collab.ClientConfig{Document: "doc", Site: 1})
+	if err := body(t, first).Insert(0, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	witness := join(t, conn, collab.ClientConfig{Document: "doc", Site: 2})
+	awaitFor(t, witness, "the edit to reach the server", settleJS, func() bool {
+		return text(t, witness) == "hello"
+	})
+
+	ctx := context.Background()
+	if err := srv.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, _, saves, _ := store.counts()
+	// The control: that flush DID write, so a zero below is about there being
+	// nothing left rather than about Flush never writing.
+	if saves == 0 {
+		t.Fatal("the first flush saved nothing, so this test cannot see a save it should not make")
+	}
+
+	// A third participant arrives. It holds nothing the server has not got, so
+	// it has nothing to push -- and nothing is what it should send.
+	late := join(t, conn, collab.ClientConfig{Document: "doc", Site: 3})
+	awaitFor(t, late, "the newcomer to be caught up", settleJS, func() bool {
+		return text(t, late) == "hello"
+	})
+	if err := srv.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, after, _ := store.counts()
+	if after != saves {
+		t.Errorf("a participant arriving with nothing to push cost %d snapshot write(s): an empty "+
+			"operations frame marks the document dirty, and every join pays for it", after-saves)
+	}
+}
+
+// ⛔ A document name is required at the DOOR, and the door is here.
+//
+// client.go:128, Join's `cfg.Document == ""`, survived the same sweep. Deleting
+// it does not make the join fail somewhere else: measured, Join SUCCEEDS and
+// the server opens a document whose name is the empty string. DirStore refuses
+// that name a second time -- `path` returns ErrNoDocument, and its comment says
+// it refuses "rather than let it name the directory itself, which is what the
+// empty name encodes to" -- but a MemoryStore does not, so what the deletion
+// costs depends on which store is behind the server.
+//
+// The assertion is the LOCALITY as much as the refusal: the transport here is
+// never served, so a Join that answers at all answered without a round trip.
+// Without the guard this test does not fail on an assertion, it waits for the
+// context -- which is the cost being described.
+func TestJoinRefusesAnEmptyDocumentNameWithoutAskingAnybody(t *testing.T) {
+	transport, _ := collab.Pipe() // deliberately not served
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	c, err := collab.Join(ctx, transport, collab.ClientConfig{Document: "", Site: 1})
+	took := time.Since(start)
+	if err == nil {
+		_ = c.Close()
+		t.Fatal("a join with no document name was accepted")
+	}
+	if took > time.Second {
+		t.Errorf("the refusal took %v: it was decided by the context or by a peer rather than here", took)
+	}
+
+	// The control: the same unserved transport with a NAME blocks, which is
+	// what says the test above measured the name and not the transport.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel2()
+	if _, err := collab.Join(ctx2, transport, collab.ClientConfig{Document: "doc", Site: 1}); err == nil {
+		t.Error("a join with a name succeeded against a transport nobody serves")
+	} else if !errors.Is(err, context.DeadlineExceeded) {
+		t.Logf("the named join failed with %v rather than a deadline, which is fine as long as it is not instant", err)
+	}
+}
+
+// The three remaining survivors of chunks four and five are named here rather
+// than pinned, and each was MEASURED rather than reasoned about -- the first
+// one was read wrong twice before the measurement settled it.
+//
+//	client.go:285, unreadable's `len(w.Snapshot) == 0`. The question is whether
+//	LoadComposite answers ErrUnknownFormat for an empty snapshot, because if it
+//	did, deleting this fast path would tell every client joining a NEW document
+//	to upgrade itself. Measured: empty and nil both give "crdt: malformed
+//	encoding", and errors.Is(err, ErrUnknownFormat) is false, so unreadable
+//	returns false either way. An equivalent mutant.
+//
+//	capability.go:216 and :227, the `len(said) == 0` fast paths in readsDigest
+//	and readsOurSnapshots. Both return false for a peer that said nothing.
+//	Without them, Capabilities.UnmarshalBinary is asked, and measured it
+//	answers "collab: unexpected message" for empty and for nil -- an error,
+//	which both functions already turn into false. No panic, same answer.
+//
+//	dirstore.go:90, NewDirStore's `dir == ""`. Measured: os.MkdirAll("") fails
+//	with "mkdir : no such file or directory", so the constructor still refuses.
+//	What is lost is a message that names the caller's mistake instead of one
+//	that reads like a missing parent directory. A diagnosis guard, and a
+//	cheaper one than the two above because nothing downstream depends on it.
