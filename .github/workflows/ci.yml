@@ -78,7 +78,7 @@ jobs:
       - name: Install govulncheck and the gate that judges it
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.17.1
+          go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.34.1
       - name: Scan, and judge the findings rather than the exit status
         run: |
           # govulncheck exits 0 over an advisory it decides this module does not

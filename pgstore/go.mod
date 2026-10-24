@@ -3,8 +3,8 @@ module github.com/go-crdt/collab/pgstore
 go 1.27.2
 
 require (
-	github.com/andybalholm/brotli v1.2.6
-	github.com/go-crdt/collab v0.77.2
+	github.com/andybalholm/brotli v1.2.7
+	github.com/go-crdt/collab v0.77.4
 	github.com/go-crdt/crdt v0.57.0
 	github.com/jackc/pgx/v5 v5.11.0
 )
