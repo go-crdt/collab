@@ -432,7 +432,9 @@ jobs:
   # rather than left to fail for the wrong reason.
   arch-qemu:
     name: arch ${{ matrix.goarch }} (qemu)
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest is moving to 26.04, where qemu-user-static is only a
+    # virtual package ("has no installation candidate"); 24.04 still ships it.
+    runs-on: ubuntu-24.04
     env:
       COLLAB_SKIP_WASM: "1"
     strategy:
