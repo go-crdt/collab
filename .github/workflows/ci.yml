@@ -113,7 +113,7 @@ jobs:
           go-version: 1.27.2
       - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '26'
       - run: go version
       - run: go vet ./...
       - run: go build ./...
@@ -294,7 +294,7 @@ jobs:
           go-version: 1.27.2
       - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '26'
       - run: GOOS=js GOARCH=wasm go build ./...
       - name: Three replicas, two runtimes
         run: go test -v -run 'TestWasmConverges|TestOverWebSocket' ./...
@@ -362,7 +362,7 @@ jobs:
           go-version: 1.27.2
       - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '26'
       # Pinned, and deliberately. The handshake depends on launch flags whose
       # effect Chrome has changed before, and a floating browser turns that into
       # a lane that breaks on a day nobody touched this repository. Moving the
@@ -424,7 +424,7 @@ jobs:
           go-version: 1.27.2
       - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '26'
       - run: go env GOARCH && go test ./...
 
   # Emulated architectures run everything except the WebAssembly test: Node under
