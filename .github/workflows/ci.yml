@@ -67,6 +67,11 @@ jobs:
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           "$(go env GOPATH)/bin/actionlint" -shellcheck="shellcheck -S error" .github/workflows/ci.yml
 
+  # ⛔ THIS JOB COVERS THE ROOT MODULE ONLY. `./...` does not descend into a
+  # nested module, so migrate, gitstore, pgstore and tools are judged by
+  # `nested-vulnerabilities` below. The two invocations are deliberately
+  # duplicated — a matrix here would rename this check and break the branch
+  # protection rule that names it — so a change to one belongs in both.
   vulnerabilities:
     name: known vulnerabilities
     runs-on: ubuntu-latest
@@ -98,6 +103,59 @@ jobs:
           # library findings are decided by that one version.
           govulncheck -format json ./... > findings.json
           vulngate -go go1.27.3 findings.json
+
+  # ⛔ THE GATE ABOVE COVERS THE ROOT MODULE ONLY, and that is how a nested one
+  # sat on a vulnerable dependency for a month with this lane green.
+  #
+  # `./...` does not descend into a nested module: migrate, gitstore, pgstore and
+  # tools each have their own go.mod, so each is a separate module graph. The
+  # TEST jobs below enumerate all four; the vulnerability gate enumerated none of
+  # them. Four doors, a lock on one.
+  #
+  # Measured 2026-11-07, by sweeping this repository with go-fleettools/vulnscan
+  # (which scans every module it finds, not just the root):
+  #
+  #   go-crdt/collab  CALLED  GO-2026-6888 (github.com/andybalholm/brotli)
+  #     in migrate: found v1.2.3, fixed in v1.2.7
+  #     migrate.go:71:30 migrate.rewrite -> fmt.Errorf -> brotli.decodeError.Error
+  #
+  # The root, gitstore and pgstore were all already on v1.2.7. Only migrate was
+  # left behind -- and there brotli is `// indirect`, so no dependency manager
+  # had a version string to propose either. Compiling a module proves it WORKS;
+  # it says nothing about whether its dependencies are current.
+  #
+  # ⛔ A SEPARATE JOB, so the existing check NAME is untouched: a branch
+  # protection rule names "known vulnerabilities", and a matrix on that job
+  # would rename it to "known vulnerabilities (.)" and silently stop matching.
+  # The price is that the invocation exists twice; the two must move together,
+  # and the job above carries the same note.
+  #
+  # ⛔ --go FROM THE TOOLCHAIN THAT RAN, not a literal: standard-library findings
+  # are decided by one version, and a literal drifts from the `go-version:` above
+  # without anything saying so. (The root job still hardcodes go1.27.3 and pins
+  # vulngate@v0.72.0; both are worth a separate change.)
+  nested-vulnerabilities:
+    name: known vulnerabilities (${{ matrix.mod }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mod: [migrate, gitstore, pgstore, tools]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.3
+      - run: go version
+      - name: Install govulncheck and the gate that judges it
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install github.com/go-fleettools/fleettools/cmd/vulngate@latest
+      - name: Scan this module, and judge the findings rather than the exit status
+        working-directory: ${{ matrix.mod }}
+        run: |
+          govulncheck -format json ./... > findings.json
+          vulngate --go "$(go env GOVERSION)" findings.json
 
   test:
     name: test (${{ matrix.os }})
