@@ -99,10 +99,28 @@ jobs:
           # WriteHeaders, WriteContinuation, String -- and govulncheck exited 0
           # over every one of them.
           #
-          # -go holds the scan to the toolchain this job pins, because standard
-          # library findings are decided by that one version.
-          govulncheck -format json ./... > findings.json
-          vulngate -go go1.27.3 findings.json
+          # ⛔ `|| true` IS LOAD-BEARING, and it was missing here while
+          # go-crdt/crdt's byte-near-identical gate has carried it all along.
+          # GitHub runs `run:` under `bash -e`, so a non-zero govulncheck aborts
+          # the step BEFORE the judge reads anything -- and govulncheck exits
+          # non-zero over findings it has decided this module does not call,
+          # which vulngate classes as a NOTICE. Without this the gate is
+          # stricter than it is documented to be, and red for a reason the judge
+          # would have waved through. Latent rather than observed: the root has
+          # had no finding to prove it with.
+          #
+          # ⛔ AND AN EMPTY FILE IS NOT A CLEAN SCAN. Also from crdt's copy: a
+          # govulncheck that wrote nothing at all must fail loudly rather than
+          # hand the judge a file it will read as "no findings".
+          #
+          # ⛔ --go FROM THE TOOLCHAIN THAT RAN, not the literal `go1.27.3` that
+          # was here: standard-library findings are decided by one version, and
+          # a literal drifts from this job's own `go-version:` with nothing to
+          # say so. Two dashes because vulngate moved to cobra and warns that
+          # the single-dash shim will not outlive the next major.
+          govulncheck -format json ./... > findings.json || true
+          test -s findings.json || { echo "::error::govulncheck wrote nothing at all"; exit 1; }
+          vulngate --go "$(go env GOVERSION)" findings.json
 
   # ⛔ THE GATE ABOVE COVERS THE ROOT MODULE ONLY, and that is how a nested one
   # sat on a vulnerable dependency for a month with this lane green.
@@ -132,8 +150,11 @@ jobs:
   #
   # ⛔ --go FROM THE TOOLCHAIN THAT RAN, not a literal: standard-library findings
   # are decided by one version, and a literal drifts from the `go-version:` above
-  # without anything saying so. (The root job still hardcodes go1.27.3 and pins
-  # vulngate@v0.72.0; both are worth a separate change.)
+  # without anything saying so. (The root job took the same treatment in the
+  # change that added this note's correction; what is left there is the pinned
+  # vulngate@v0.72.0, which Renovate's open #258 moves — a pin inside a `run:`
+  # block is read by no manager without the customManager this organisation's
+  # preset carries.)
   nested-vulnerabilities:
     name: known vulnerabilities (${{ matrix.mod }})
     runs-on: ubuntu-latest
@@ -154,7 +175,15 @@ jobs:
       - name: Scan this module, and judge the findings rather than the exit status
         working-directory: ${{ matrix.mod }}
         run: |
-          govulncheck -format json ./... > findings.json
+          # ⛔ Same three guards as the root job above, and I am the one who
+          # left them out when I added this job in #259: I copied the weaker of
+          # the two shapes this organisation already had, without noticing that
+          # go-crdt/crdt's gate carried `|| true` and the emptiness check and
+          # this one did not. `bash -e` aborts the step on a non-zero
+          # govulncheck -- including findings the judge would call a notice --
+          # and an empty file reads as "no findings".
+          govulncheck -format json ./... > findings.json || true
+          test -s findings.json || { echo "::error::govulncheck wrote nothing at all"; exit 1; }
           vulngate --go "$(go env GOVERSION)" findings.json
 
   test:
