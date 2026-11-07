@@ -276,6 +276,64 @@ func TestAnAttemptErrorTheCallerDoesNotCallPermanentKeepsRetrying(t *testing.T) 
 	})
 }
 
+// The error a failed Recv reports reaches the policy as itself, and not as the
+// ErrProtocol the next few lines would have produced without it.
+//
+// This closes the loop on how #247 was found. The check on Recv's error in
+// Client.attach survived a mutation sweep, and the reason it survived was that
+// deleting it only swapped one error for another on a path where the caller
+// threw the error away: the carrier closed either way, the loop retried either
+// way, and nothing could observe the difference. Now something can — the
+// policy — so the line is load-bearing and a sweep can say so.
+//
+// Measured with go-fleettools' mutate against the unmutated baseline, which is
+// the only thing that makes a verdict mean anything.
+func TestARecvThatFailedReachesThePolicyAsItself(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := NewServer(Config{Store: NewMemoryStore()})
+	defer func() { _ = srv.Close(context.Background()) }()
+
+	link := &awkward{srv: srv, ctx: ctx, failAt: "recv"}
+
+	var mu sync.Mutex
+	var asked []error
+	c, err := JoinWithRetry(ctx, link.dial, ClientConfig{Document: "d", Site: 1}, RetryPolicy{
+		Wait:    time.Millisecond,
+		Ceiling: 2 * time.Millisecond,
+		Permanent: func(err error) bool {
+			mu.Lock()
+			asked = append(asked, err)
+			mu.Unlock()
+			// This error and no other. ErrProtocol must not do.
+			return errors.Is(err, errNothingCameBack)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+
+	link.cut()
+
+	select {
+	case <-c.Done():
+	case <-time.After(15 * time.Second):
+		t.Fatal("the policy never saw the Recv error itself, only something else")
+	}
+	if !errors.Is(c.Err(), errNothingCameBack) {
+		t.Errorf("Err() is %v; the rejoin failed with %v", c.Err(), errNothingCameBack)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, err := range asked {
+		if errors.Is(err, ErrProtocol) {
+			t.Errorf("the policy was told ErrProtocol; a Recv that failed is not a peer talking nonsense")
+		}
+	}
+}
+
 // stopped has the last word over the error that ended the session, and no word
 // at all over a deliberate close.
 //
