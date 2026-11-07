@@ -454,6 +454,25 @@ func (c *Client) fail(err error) {
 	}
 }
 
+// stopped records why a supervised client gave up, and has the last word for
+// the same reason [Client.Close] does: a client between attempts already holds
+// the error that ended the session, so fail() is a no-op there, and a client
+// that stopped because [RetryPolicy.Permanent] refused a dial would go on
+// reporting the carrier that broke a minute earlier instead of the endpoint
+// that is never coming back.
+//
+// [ErrClosed] is the one thing it will not overwrite. A caller that closed the
+// client deliberately is promised that reason by [Client.Err], and a close
+// racing the moment the policy gives up must not lose to it.
+func (c *Client) stopped(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if errors.Is(c.err, ErrClosed) {
+		return
+	}
+	c.err = err
+}
+
 // Changes receives a value whenever the document or the participants changed.
 // It coalesces: a reader that is slow sees one wake-up, not a queue of them.
 func (c *Client) Changes() <-chan struct{} { return c.changes }

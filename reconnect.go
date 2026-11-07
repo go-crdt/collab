@@ -59,6 +59,11 @@ type RetryPolicy struct {
 	// stops the link by returning true — the error it was asked about is then
 	// what [Server.FollowWithRetry] returns.
 	//
+	// "Each attempt" includes an attempt that never got as far as a session:
+	// a dial that was refused, or a peer that would not accept the link. A
+	// supervised client from [JoinWithRetry] stops the same way and reports
+	// that error from [Client.Err].
+	//
 	// It exists because this package cannot answer the question honestly for
 	// everybody. The errors that are genuinely permanent are refused before the
 	// loop is ever entered, and everything that can then end an attempt came
