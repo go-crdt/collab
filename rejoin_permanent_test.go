@@ -28,6 +28,11 @@ type unreachable struct {
 	ctx    context.Context
 	gone   error
 	atOpen bool // fail in attach's open rather than in the dial
+	// onRefuse runs just before a refusal is returned, which is how a test
+	// arranges something to happen DURING an attempt rather than between two.
+	// Set it before the client is built; it is read on the supervisor's
+	// goroutine.
+	onRefuse func()
 
 	mu       sync.Mutex
 	conns    []carrierConn
@@ -43,6 +48,9 @@ func (v *unreachable) dial(context.Context) (Transport, error) {
 	}
 	v.mu.Unlock()
 	if refuse {
+		if v.onRefuse != nil {
+			v.onRefuse()
+		}
 		return nil, v.gone
 	}
 	return v, nil
@@ -274,6 +282,71 @@ func TestAnAttemptErrorTheCallerDoesNotCallPermanentKeepsRetrying(t *testing.T) 
 		}
 		return body.Insert(0, "back") == nil && c.Err() == nil
 	})
+}
+
+// A context that ended during an attempt is a shutdown, and the policy is not
+// asked about it.
+//
+// This is why the attempt loop answers cancellation at its top instead of
+// leaving it to the backoff, and reconnect.go's run() gives the reason at the
+// same point: "a link torn down on purpose has not failed, and the error the
+// attempt happened to return on its way out says less than the reason it was
+// told to stop". Without the check, the error a cancelled dial returns would be
+// handed to Permanent as though the peer had refused.
+//
+// It is the only way to reach that check — the context has to end after the
+// backoff's wait has already finished and before the next pass begins, which is
+// to say DURING the dial — so the fake cancels it itself rather than a second
+// goroutine racing to. A gate that is satisfied by a race is satisfied by
+// luck.
+func TestAContextThatEndedDuringAnAttemptIsAShutdownNotAFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := NewServer(Config{Store: NewMemoryStore()})
+	defer func() { _ = srv.Close(context.Background()) }()
+
+	interrupted := errors.New("the dial was interrupted")
+	link := &unreachable{srv: srv, ctx: ctx, gone: interrupted}
+	// The refusal cancels the context on its way out, so the loop arrives at
+	// the top of the next pass with the context already finished.
+	link.onRefuse = cancel
+
+	var mu sync.Mutex
+	var asked []error
+	c, err := JoinWithRetry(ctx, link.dial, ClientConfig{Document: "d", Site: 1}, RetryPolicy{
+		Wait:    time.Millisecond,
+		Ceiling: 2 * time.Millisecond,
+		Permanent: func(err error) bool {
+			mu.Lock()
+			asked = append(asked, err)
+			mu.Unlock()
+			return false
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+
+	link.vanish()
+
+	select {
+	case <-c.Done():
+	case <-time.After(15 * time.Second):
+		t.Fatal("the context ended during an attempt and the client did not stop")
+	}
+
+	// Err is not asserted here. fail() is first-writer-wins and the session's
+	// own error is already recorded, so a client torn down between attempts
+	// reports why the session ended — which is this loop's behaviour before
+	// this change and after it, and not what this test is about.
+	mu.Lock()
+	defer mu.Unlock()
+	for _, err := range asked {
+		if errors.Is(err, interrupted) {
+			t.Errorf("the policy was asked about %v, which was really a shutdown", err)
+		}
+	}
 }
 
 // The error a failed Recv reports reaches the policy as itself, and not as the
