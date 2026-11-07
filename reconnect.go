@@ -64,6 +64,14 @@ type RetryPolicy struct {
 	// supervised client from [JoinWithRetry] stops the same way and reports
 	// that error from [Client.Err].
 	//
+	// Which errors those are is worth a thought before matching broadly. An
+	// attempt can fail because a peer answered something that is not a welcome,
+	// and that is [ErrProtocol] — the peer's choice, not the deployment's. A
+	// predicate that gives up on it lets any peer, or anything able to inject a
+	// single frame, end a participant for good, where the most it could cost
+	// before was a reconnection. Match what is genuinely the deployment's: a
+	// credential that has been revoked, an endpoint that is gone.
+	//
 	// It exists because this package cannot answer the question honestly for
 	// everybody. The errors that are genuinely permanent are refused before the
 	// loop is ever entered, and everything that can then end an attempt came

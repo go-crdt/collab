@@ -380,6 +380,11 @@ collab.RetryPolicy{Permanent: func(err error) bool {
 Returning true stops the client, closes `Done`, and makes `Err` report the error
 it was asked about rather than the carrier that happened to break first.
 
+Match what is genuinely your deployment's. A peer that answers something which is
+not a welcome produces `ErrProtocol`, and that is the **peer's** choice — a
+predicate that gives up on it lets anything able to inject one frame end a
+participant for good, where the most it could cost otherwise is a reconnection.
+
 ## Status
 
 **100% statement coverage**, race-clean, six-arch CI, and the WebAssembly
