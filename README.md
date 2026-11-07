@@ -365,6 +365,26 @@ simultaneously, a backlog of 256 disconnected 99% of them. With `Join` that is a
 room full of documents that have stopped moving; with `JoinWithRetry` it is a
 pause.
 
+It retries for ever by default, which is right for an outage and wrong for an
+endpoint that is never coming back. `RetryPolicy.Permanent` is where the
+difference is decided, and it is asked about the error that ended **each
+attempt** — including an attempt that never got a session at all, so a refused
+dial or a rejoin the peer will not accept reaches it too:
+
+```go
+collab.RetryPolicy{Permanent: func(err error) bool {
+    return errors.Is(err, myapi.ErrCredentialRevoked)
+}}
+```
+
+Returning true stops the client, closes `Done`, and makes `Err` report the error
+it was asked about rather than the carrier that happened to break first.
+
+Match what is genuinely your deployment's. A peer that answers something which is
+not a welcome produces `ErrProtocol`, and that is the **peer's** choice — a
+predicate that gives up on it lets anything able to inject one frame end a
+participant for good, where the most it could cost otherwise is a reconnection.
+
 ## Status
 
 **100% statement coverage**, race-clean, six-arch CI, and the WebAssembly

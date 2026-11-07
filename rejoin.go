@@ -51,6 +51,15 @@ import (
 // [Client.Done] closes when this gives up for good — because the context ended,
 // because [Client.Close] was called, or because [RetryPolicy.Permanent] said so
 // — and not when a session ends.
+//
+// Permanent is asked about the error that ended each attempt, and that includes
+// an attempt that never got a session at all: a dial that was refused, or a
+// peer that would not accept the rejoin. Those are the errors an operator has
+// to be able to give up on, because they are the ones that do not mend — a
+// decommissioned endpoint, a revoked credential, a peer speaking a version this
+// build cannot read. When the policy stops a client that way, [Client.Err]
+// reports the error it was asked about rather than the carrier that broke
+// first.
 func JoinWithRetry(ctx context.Context, dial Dialer, cfg ClientConfig, policy RetryPolicy) (*Client, error) {
 	if dial == nil {
 		return nil, errors.New("collab: JoinWithRetry needs a dialler")
@@ -109,51 +118,95 @@ func (c *Client) stayJoined(ctx context.Context, dial Dialer, policy RetryPolicy
 		// The session ended. Whether that is the end of the participant depends
 		// on why, and on whether anybody asked for it.
 		err := c.Err()
-		switch {
-		case errors.Is(err, ErrClosed):
-			return
-		case policy.Permanent != nil && policy.Permanent(err):
+		if errors.Is(err, ErrClosed) {
 			return
 		}
 
 		c.markDown(true)
-		if err := back.down(ctx, err); err != nil {
-			c.fail(ctx.Err())
-			return
-		}
 
-		transport, err := dial(ctx)
-		if err != nil {
-			continue
-		}
-		conn, held, err := c.attach(ctx, transport)
-		if err != nil {
-			continue
-		}
+		// One pass of this loop is one attempt to put a session back, and err is
+		// why the last attempt ended: the session itself the first time round,
+		// and after that the dial or the rejoin that could not replace it.
+		//
+		// Carrying it is the whole of the difference. A failed attempt used to
+		// go back to the top of the outer loop with its error dropped on the
+		// floor, and because the channel it then waited on was the closed one
+		// from the session that had already ended, every later attempt re-read
+		// the same dead session error. Two things followed from that, and both
+		// were defects:
+		//
+		// [RetryPolicy.Permanent] is documented to be "asked about the error
+		// that ended each attempt", which is what [Server.FollowWithRetry] does
+		// — and here it was never asked about an attempt at all, only ever
+		// about the session. A peer that has been decommissioned, a credential
+		// that has been revoked, or a server speaking a version this build
+		// cannot read was therefore retried for ever, with no way for an
+		// operator to stop it: the policy was the only brake and it was never
+		// shown the error that needed it.
+		//
+		// [RetryPolicy.Notify] was told about that dead session every time too,
+		// with a rising Attempt count, while the thing actually failing was the
+		// dial — an operator reading it was looking at the wrong error from the
+		// second attempt onwards.
+		for {
+			// Cancellation first, and before the policy is consulted, for the
+			// reason [reconnectingLink.run] gives at the same point: a client
+			// torn down on purpose has not failed, and the error an attempt
+			// happened to return on its way out says less than the reason it
+			// was told to stop. The outer loop asks this too, about a session
+			// that ended; this asks it about an attempt that was interrupted.
+			if ctx.Err() != nil {
+				c.fail(ctx.Err())
+				return
+			}
+			if policy.Permanent != nil && policy.Permanent(err) {
+				// Why it gave up, not why the session ended: those are the same
+				// error on the first pass and different ones after it, and the
+				// second is what the caller needs. See [Client.stopped].
+				c.stopped(err)
+				return
+			}
+			if back.down(ctx, err) != nil {
+				c.fail(ctx.Err())
+				return
+			}
 
-		// The carrier is taken first and the push happens after, and the order
-		// is the whole of it. Pushing before this client counts as up leaves a
-		// window where an edit is applied locally, swallowed by transmit
-		// because there is no carrier yet, and missed by a push that has
-		// already read the replica — which is an edit nobody ever sees again.
-		// After, the worst case is that an operation is sent twice, and the
-		// second one is a no-op.
-		c.reset(conn)
-		// The error is not carried, and cannot be: the push goes out through
-		// this client's own send path, which for a supervised client keeps an
-		// operation it could not send rather than failing it. A carrier that
-		// breaks under the push therefore breaks the session a moment later,
-		// which is where it is answered — and the operations are still here to
-		// go out on the next one.
-		_ = c.pushMissing(held)
-		// Up, and only here: a peer that accepts a session and drops it in the
-		// same breath would otherwise reset the backoff every time, which is a
-		// hot loop written by somebody who thought they had written one. See
-		// [Server.FollowWithRetry], where the same mistake was avoided for the
-		// same reason.
-		back.up()
-		session = make(chan struct{})
-		go c.receive(conn, session)
+			transport, dialErr := dial(ctx)
+			if dialErr != nil {
+				err = dialErr
+				continue
+			}
+			conn, held, attachErr := c.attach(ctx, transport)
+			if attachErr != nil {
+				err = attachErr
+				continue
+			}
+
+			// The carrier is taken first and the push happens after, and the
+			// order is the whole of it. Pushing before this client counts as up
+			// leaves a window where an edit is applied locally, swallowed by
+			// transmit because there is no carrier yet, and missed by a push
+			// that has already read the replica — which is an edit nobody ever
+			// sees again. After, the worst case is that an operation is sent
+			// twice, and the second one is a no-op.
+			c.reset(conn)
+			// The error is not carried, and cannot be: the push goes out
+			// through this client's own send path, which for a supervised
+			// client keeps an operation it could not send rather than failing
+			// it. A carrier that breaks under the push therefore breaks the
+			// session a moment later, which is where it is answered — and the
+			// operations are still here to go out on the next one.
+			_ = c.pushMissing(held)
+			// Up, and only here: a peer that accepts a session and drops it in
+			// the same breath would otherwise reset the backoff every time,
+			// which is a hot loop written by somebody who thought they had
+			// written one. See [Server.FollowWithRetry], where the same mistake
+			// was avoided for the same reason.
+			back.up()
+			session = make(chan struct{})
+			go c.receive(conn, session)
+			break
+		}
 	}
 }
 
