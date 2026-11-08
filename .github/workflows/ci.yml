@@ -461,7 +461,30 @@ jobs:
           npm install --no-audit --no-fund --silent puppeteer-core@24
           npx --yes @puppeteer/browsers install chrome@149.0.7827.22 > chrome.txt
           cat chrome.txt
-          echo "CHROME=$(awk '{print $NF}' chrome.txt)" >> "$GITHUB_ENV"
+          # ⛔ This install can exit 0 and write NOTHING. Measured on node 26.13.0
+          # in #256, where it did exactly that in four seconds, printing nothing on
+          # stdout and nothing on stderr -- so `bash -e` had no exit status to act
+          # on. awk then exported an empty CHROME and the lane died in the NEXT
+          # step with a bare `exit 127`, which names neither the browser nor the
+          # install.
+          #
+          # The rest of this lane already refuses an empty answer -- "no browser
+          # tests found; this lane has stopped asking anything" -- and refuses a
+          # discovered test that did not run. It has to refuse here for the same
+          # reason: the one question it was not asking was about its own tools.
+          test -s chrome.txt || {
+            echo "::error::@puppeteer/browsers install wrote no path (it exited 0 with empty output)"
+            exit 1
+          }
+          chrome=$(awk '{print $NF}' chrome.txt)
+          # And a path is not a browser. If the last field stops being the install
+          # directory -- the format has no promise attached -- this says so here
+          # rather than as a 127 further down.
+          [ -x "$chrome" ] || {
+            echo "::error::the path @puppeteer/browsers printed is not executable: $chrome"
+            exit 1
+          }
+          echo "CHROME=$chrome" >> "$GITHUB_ENV"
           echo "COLLAB_BROWSER_NODE_PATH=$RUNNER_TEMP/node_modules" >> "$GITHUB_ENV"
       # Discovered rather than named. This lane named one test and there were
       # two: TestTwoTabsElectOneHostWithNoWindow needs exactly what this job
