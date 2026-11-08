@@ -437,6 +437,15 @@ func (a *awkward) cut() {
 	}
 }
 
+// errNothingCameBack is a sentinel rather than a fresh error on every call, so
+// that a policy can be asked about this error and no other. That is what tells
+// a Recv that failed apart from the ErrProtocol the loop produces when a peer
+// answers something that is not a welcome — and those two are exactly what the
+// mutation survivor at the Recv error check could not be told apart by, for as
+// long as the caller discarded both. See
+// TestARecvThatFailedReachesThePolicyAsItself.
+var errNothingCameBack = errors.New("nothing came back")
+
 // bad is a carrier that misbehaves in one named way.
 type bad struct {
 	at    string
@@ -458,7 +467,7 @@ func (b *bad) Send(byte, any) error {
 func (b *bad) Recv() (byte, any, error) {
 	switch b.at {
 	case "recv":
-		return 0, nil, errors.New("nothing came back")
+		return 0, nil, errNothingCameBack
 	case "welcome":
 		return kindOperation, opsMsg{}, nil
 	case "absorb":
