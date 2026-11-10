@@ -341,7 +341,14 @@ func (p *Peer) gatherICE(ctx context.Context) error {
 	case <-done:
 		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+		// Through stalled, as [Peer.DataChannel] and awaitOpen already do. A bare
+		// "context deadline exceeded" from here is the least useful thing this
+		// transport can say, and gathering is where it is most expensive to say
+		// it: go-crdt/collab#267 is a consumer that spent ten weeks on a stall
+		// whose one-line account -- "gathering gathering", a browser that
+		// collected addresses and never reported completion -- this call had in
+		// hand and threw away.
+		return p.stalled(ctx.Err())
 	}
 }
 
