@@ -76,7 +76,15 @@ const fakeWebRTC = `
         this.localDescription = { type: desc.type, sdp: desc.sdp + "a=pcid:" + id + "\r\n" };
         this.connectionState = "connecting";
         this.iceConnectionState = "checking";
-        if (!globalThis.__collabFake.stallICE) {
+        if (globalThis.__collabFake.stallICE) {
+          // What the stall in go-crdt/collab#267 actually looked like: the browser
+          // moves to "gathering", collects its addresses, and never reports
+          // completion. Leaving the state at "new" modelled a connection that
+          // never started -- a different fault, and the one state stalled() would
+          // not have had to name. It also means the gathering listener is now
+          // reached by a transition that is NOT complete, which nothing exercised.
+          setTimeout(() => { this.iceGatheringState = "gathering"; this._emit("icegatheringstatechange", {}); }, 0);
+        } else {
           setTimeout(() => { this.iceGatheringState = "complete"; this._emit("icegatheringstatechange", {}); }, 0);
         }
         return Promise.resolve();
@@ -533,6 +541,45 @@ func TestGatherICEHonoursTheContext(t *testing.T) {
 	defer cancel()
 	if _, err := p.Offer(ctx, "collab"); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("a stalled gathering should time out, got %v", err)
+	}
+}
+
+// And it says WHERE it stopped, which is the half that was missing.
+//
+// go-crdt/collab#267 is a consumer that carried this stall as a CI flake from
+// 2026-08-30: a browser that logged "gathering=gathering" and both a host and a
+// server-reflexive candidate, and never "complete". Ten weeks, and the sentence
+// that names it -- "gathering gathering" -- was available to this call the whole
+// time. [Peer.DataChannel] and awaitOpen already returned their expiry through
+// stalled; gatherICE returned a bare ctx.Err(), and a bare deadline says only
+// that nothing happened.
+//
+// The three states are asserted rather than the whole message, because what
+// matters is that the caller is told them, not the sentence they are wrapped in.
+func TestAStalledGatheringSaysWhereItStopped(t *testing.T) {
+	installFake(t)
+	setFake("stallICE", true)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err = p.Offer(ctx, "collab")
+	if err == nil {
+		t.Fatal("a stalled gathering should fail")
+	}
+	// Still the context's error underneath: naming the state must not cost a
+	// caller the ability to tell a timeout from a refusal.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("errors.Is(DeadlineExceeded) must still hold, got %v", err)
+	}
+	for _, want := range []string{"gathering gathering", "connection ", "ice "} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error should name %q; it says %q", want, err)
+		}
 	}
 }
 
