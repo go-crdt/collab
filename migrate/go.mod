@@ -1,6 +1,6 @@
 module github.com/go-crdt/collab/migrate
 
-go 1.27.2
+go 1.27.4
 
 // Pinned deliberately, and the pin is the whole point: crdt v0.42.0 stopped
 // reading text format 6, which every collab store written before collab v0.37.0
