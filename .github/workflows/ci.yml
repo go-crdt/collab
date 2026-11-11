@@ -542,7 +542,24 @@ jobs:
   # rather than left to fail for the wrong reason.
   arch-qemu:
     name: arch ${{ matrix.goarch }} (qemu)
-    runs-on: ubuntu-latest
+    # ⛔ PINNED, and this is the only job here that is. `ubuntu-latest` took
+    # THREE values in four days — 26.04 on 2026-10-25, 24.04 on 11-08, 26.04
+    # again on 11-11 — and this lane is the only one that needs apt, to install
+    # the emulators. On 11-11 the fresh 26.04 image's archive never answered:
+    # three `timeout 240` expiries over twenty minutes here, and
+    # "Temporary failure resolving 'security.ubuntu.com'" on go-tex/engine in the
+    # same window. Two symptoms, one image, two repositories.
+    #
+    # A lane whose base changes under it is not a lane. This one proves that the
+    # package runs on four emulated architectures, which is a claim about Go and
+    # not about Ubuntu, so it is pinned to an image that is known to carry the
+    # packages it installs.
+    #
+    # ⚠ What that costs, said rather than discovered later: this lane stops being
+    # the place where a new runner image is first met. The other eleven jobs
+    # still ride `ubuntu-latest` and will meet it first, which is where meeting
+    # it is cheap — they install nothing.
+    runs-on: ubuntu-24.04
     env:
       COLLAB_SKIP_WASM: "1"
     strategy:
