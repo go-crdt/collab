@@ -69,9 +69,15 @@ const fakeWebRTC = `
       },
       createAnswer() {
         if (globalThis.__collabFake.rejectAnswer) return Promise.reject(new Error("createAnswer refused"));
+        if (globalThis.__collabFake.stallAnswer) return new Promise(() => {});
         return Promise.resolve({ type: "answer", sdp: "v=0\r\n" });
       },
       setLocalDescription(desc) {
+        // A promise that NEVER settles, which is what makes landing in a chosen
+        // wait deterministic. Racing a short deadline against one that does
+        // settle is a flake, and a flake that manufactures the right sentence is
+        // worth less than no test.
+        if (globalThis.__collabFake.stallSetLocal) return new Promise(() => {});
         // Stamp the registry id into the sdp so an answerer can find the offerer.
         this.localDescription = { type: desc.type, sdp: desc.sdp + "a=pcid:" + id + "\r\n" };
         this.connectionState = "connecting";
@@ -580,6 +586,135 @@ func TestAStalledGatheringSaysWhereItStopped(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the error should name %q; it says %q", want, err)
 		}
+	}
+}
+
+// And so do the four steps before the gathering.
+//
+// #268 named the state where the offer path ENDS and left the beginning of it
+// bare. That is not a smaller version of the same fix: it is the same defect one
+// step up, in the fix for it. The consumer bounded its call and landed in
+// createOffer — the first of the five waits — and got back exactly the bare
+// deadline the fix was meant to retire (go-tex/go-tex.github.io#250 reported it).
+//
+// A context cancelled before the call is the deterministic way in: it ends the
+// first await and never reaches the second. Aiming an expiry at a later step is
+// a timing race, and an assertion that flakes into producing the right sentence
+// is worth less than no assertion at all.
+func TestACancelledExchangeSaysWhereItStopped(t *testing.T) {
+	installFake(t)
+	offer, err := offerer2Offer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ⛔ No channel delivery, because this test is not about one. Accepting the
+	// offer makes the fake schedule the datachannel timer, and that timer fires
+	// into a peer this test has already closed -- which printed "call to
+	// released function" beside a PASS. The knob exists; the subject is the
+	// cancelled exchange, so the timer has no business here. (The hazard itself
+	// is real and outlives this test: see the issue filed alongside.)
+	setFake("noChannel", true)
+	cancelled := func() context.Context {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}
+
+	for _, tc := range []struct {
+		name string
+		call func(*Peer) error
+	}{
+		{"an offer, cancelled before createOffer", func(p *Peer) error {
+			_, err := p.Offer(cancelled(), "collab")
+			return err
+		}},
+		{"an answer, cancelled before setRemoteDescription", func(p *Peer) error {
+			_, err := p.Answer(cancelled(), offer)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := NewPeer(PeerConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = p.Close() }()
+
+			err = tc.call(p)
+			// The context's error has to survive the wrapping, or a caller can no
+			// longer tell giving up from being refused.
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("errors.Is(Canceled) must hold, got %v", err)
+			}
+			for _, want := range []string{"connection ", "ice ", "gathering "} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the error should name %q; it says %q", want, err)
+				}
+			}
+		})
+	}
+}
+
+// And so does each of the remaining waits, one door at a time.
+//
+// The test above reaches only the FIRST wait of each path, which a mutation
+// sweep says plainly: routing createAnswer back to a bare await survived it.
+// Five waits honour the context in Offer and Answer; proving the helper at two
+// of them is not proving the five sites are wired to it.
+//
+// Each case stalls ONE operation with a promise that never settles, so a short
+// deadline lands in that wait and no other. Deterministic by construction: the
+// alternative, racing a deadline against an operation that does settle, is the
+// flake the consumer and I both declined to write.
+func TestAStalledOperationSaysWhereItStopped(t *testing.T) {
+	installFake(t)
+	// Taken before any knob is set: the helper runs a whole offer of its own.
+	offer, err := offerer2Offer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setFake("noChannel", true)
+
+	for _, tc := range []struct {
+		name string
+		knob string
+		call func(*Peer, context.Context) error
+	}{
+		{"an offer stalled in setLocalDescription", "stallSetLocal", func(p *Peer, ctx context.Context) error {
+			_, err := p.Offer(ctx, "collab")
+			return err
+		}},
+		{"an answer stalled in createAnswer", "stallAnswer", func(p *Peer, ctx context.Context) error {
+			_, err := p.Answer(ctx, offer)
+			return err
+		}},
+		{"an answer stalled in setLocalDescription", "stallSetLocal", func(p *Peer, ctx context.Context) error {
+			_, err := p.Answer(ctx, offer)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setFake(tc.knob, true)
+			defer setFake(tc.knob, false)
+
+			p, err := NewPeer(PeerConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = p.Close() }()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			err = tc.call(p, ctx)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("errors.Is(DeadlineExceeded) must hold, got %v", err)
+			}
+			for _, want := range []string{"connection ", "ice ", "gathering "} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the error should name %q; it says %q", want, err)
+				}
+			}
+		})
 	}
 }
 

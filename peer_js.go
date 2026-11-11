@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -144,11 +145,11 @@ func (p *Peer) Offer(ctx context.Context, label string) (string, error) {
 	p.ch = ch
 	p.mu.Unlock()
 
-	offer, err := await(ctx, p.pc.Call("createOffer"))
+	offer, err := p.awaited(ctx, p.pc.Call("createOffer"))
 	if err != nil {
 		return "", err
 	}
-	if _, err := await(ctx, p.pc.Call("setLocalDescription", offer)); err != nil {
+	if _, err := p.awaited(ctx, p.pc.Call("setLocalDescription", offer)); err != nil {
 		return "", err
 	}
 	if err := p.gatherICE(ctx); err != nil {
@@ -202,14 +203,14 @@ func (p *Peer) Answer(ctx context.Context, remoteOffer string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := await(ctx, p.pc.Call("setRemoteDescription", describe(sig))); err != nil {
+	if _, err := p.awaited(ctx, p.pc.Call("setRemoteDescription", describe(sig))); err != nil {
 		return "", err
 	}
-	answer, err := await(ctx, p.pc.Call("createAnswer"))
+	answer, err := p.awaited(ctx, p.pc.Call("createAnswer"))
 	if err != nil {
 		return "", err
 	}
-	if _, err := await(ctx, p.pc.Call("setLocalDescription", answer)); err != nil {
+	if _, err := p.awaited(ctx, p.pc.Call("setLocalDescription", answer)); err != nil {
 		return "", err
 	}
 	if err := p.gatherICE(ctx); err != nil {
@@ -312,6 +313,31 @@ func (p *Peer) stalled(err error) error {
 	}
 	return fmt.Errorf("%w (connection %s, ice %s, gathering %s)", err,
 		state("connectionState"), state("iceConnectionState"), state("iceGatheringState"))
+}
+
+// awaited is await with the connection's state attached, and only when the wait
+// ended on the context.
+//
+// Only then, because a browser that REFUSED an operation has already said what
+// was wrong and the states would be noise beside an answer. A caller who gave up
+// has been told nothing at all, which is the whole of what stalled is for.
+//
+// ⛔ It exists because gatherICE was not the only place. #268 named the state at
+// the END of the offer path and left the four steps before it bare, and the
+// consumer that bounded its call landed in the first of them — createOffer —
+// and got back exactly the bare deadline that fix was meant to retire. One
+// contract, five implementations, one of them keeping it: the same shape twice
+// in the same file, the second time in a fix for the first.
+func (p *Peer) awaited(ctx context.Context, promise js.Value) (js.Value, error) {
+	v, err := await(ctx, promise)
+	// await returns ctx.Err() verbatim on that branch, and ctx.Err() is nil
+	// while the context is live — so this names the state in exactly the case it
+	// belongs to, including the race where the promise rejected and the context
+	// ended together, which errors.Is sorts out on its own.
+	if err != nil && errors.Is(err, ctx.Err()) {
+		return v, p.stalled(err)
+	}
+	return v, err
 }
 
 // gatherICE waits for non-trickle ICE to finish, so the description handed back
