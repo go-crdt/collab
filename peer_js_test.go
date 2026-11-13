@@ -622,13 +622,14 @@ func TestACancelledExchangeSaysWhereItStopped(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
+		op   string
 		call func(*Peer) error
 	}{
-		{"an offer, cancelled before createOffer", func(p *Peer) error {
+		{"an offer, cancelled before createOffer", "createOffer", func(p *Peer) error {
 			_, err := p.Offer(cancelled(), "collab")
 			return err
 		}},
-		{"an answer, cancelled before setRemoteDescription", func(p *Peer) error {
+		{"an answer, cancelled before setRemoteDescription", "setRemoteDescription", func(p *Peer) error {
 			_, err := p.Answer(cancelled(), offer)
 			return err
 		}},
@@ -646,7 +647,7 @@ func TestACancelledExchangeSaysWhereItStopped(t *testing.T) {
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("errors.Is(Canceled) must hold, got %v", err)
 			}
-			for _, want := range []string{"connection ", "ice ", "gathering "} {
+			for _, want := range []string{tc.op, "connection ", "ice ", "gathering "} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("the error should name %q; it says %q", want, err)
 				}
@@ -675,20 +676,26 @@ func TestAStalledOperationSaysWhereItStopped(t *testing.T) {
 	}
 	setFake("noChannel", true)
 
+	// ⛔ op is the point of the table, not decoration. stalled() reports the
+	// connection, ice and gathering states, which are the same three words at
+	// every site: asserting only those, the second row and the third would pass
+	// each other's assertion and nothing here would notice a wait wired to the
+	// wrong name. The operation is what tells site 2 from site 5.
 	for _, tc := range []struct {
 		name string
 		knob string
+		op   string
 		call func(*Peer, context.Context) error
 	}{
-		{"an offer stalled in setLocalDescription", "stallSetLocal", func(p *Peer, ctx context.Context) error {
+		{"an offer stalled in setLocalDescription", "stallSetLocal", "setLocalDescription(offer)", func(p *Peer, ctx context.Context) error {
 			_, err := p.Offer(ctx, "collab")
 			return err
 		}},
-		{"an answer stalled in createAnswer", "stallAnswer", func(p *Peer, ctx context.Context) error {
+		{"an answer stalled in createAnswer", "stallAnswer", "createAnswer", func(p *Peer, ctx context.Context) error {
 			_, err := p.Answer(ctx, offer)
 			return err
 		}},
-		{"an answer stalled in setLocalDescription", "stallSetLocal", func(p *Peer, ctx context.Context) error {
+		{"an answer stalled in setLocalDescription", "stallSetLocal", "setLocalDescription(answer)", func(p *Peer, ctx context.Context) error {
 			_, err := p.Answer(ctx, offer)
 			return err
 		}},
@@ -709,7 +716,7 @@ func TestAStalledOperationSaysWhereItStopped(t *testing.T) {
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("errors.Is(DeadlineExceeded) must hold, got %v", err)
 			}
-			for _, want := range []string{"connection ", "ice ", "gathering "} {
+			for _, want := range []string{tc.op, "connection ", "ice ", "gathering "} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("the error should name %q; it says %q", want, err)
 				}
