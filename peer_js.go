@@ -97,6 +97,15 @@ type Peer struct {
 	// incoming carries the answerer's data channel, which it does not make but
 	// is handed through ondatachannel once the offer names one.
 	incoming chan js.Value
+	// quit is closed by Close, so a wait ends when the peer does.
+	//
+	// ⛔ WITHOUT IT, CLOSE DID NOT INTERRUPT ANYTHING. Checking p.closed after
+	// a wait only helps once the wait is over, and a gathering wait ends on one
+	// browser event or on the budget — so Close on a stalled connection left a
+	// goroutine parked for up to ICEGatherBudget and returned as if it had
+	// ended it. Found by a test written to prove the state check, which hung
+	// instead: the assertion could not be made without this.
+	quit chan struct{}
 }
 
 // NewPeer creates a Peer over a fresh RTCPeerConnection. It fails only where
@@ -110,6 +119,7 @@ func NewPeer(cfg PeerConfig) (*Peer, error) {
 	p := &Peer{
 		pc:       ctor.New(iceConfiguration(cfg)),
 		incoming: make(chan js.Value, 1),
+		quit:     make(chan struct{}),
 	}
 	// The answerer's channel arrives here. A buffer of one means the callback
 	// never blocks the page's thread waiting for DataChannel to be called.
@@ -370,18 +380,23 @@ func (p *Peer) awaited(ctx context.Context, what string, promise js.Value) (js.V
 // gathering, and no measurement here splits the two; this is set above the
 // slowest healthy run observed so that expiry means "stuck", which is the only
 // thing it is allowed to mean.
+const ICEGatherBudget = 30 * time.Second
+
+// iceGatherBudget is what the wait actually reads, so a test can shorten it.
 //
-// It is a var so a test can shorten it. A const would leave the expiry path
-// reachable only by a test willing to wait half a minute, which is a test
-// nobody runs — and the branch was in fact uncovered until this became settable.
-var ICEGatherBudget = 30 * time.Second
+// ⛔ AN EXPORTED VAR WAS THE WRONG PRICE, and a review priced it: `const x =
+// collab.ICEGatherBudget` stops compiling, which is an API break for a
+// coverage problem, and an exported mutable global read from the wait is a data
+// race that js/wasm has no detector to catch. The documented default stays a
+// const; the shortening happens in-package, where it costs nobody anything.
+var iceGatherBudget = ICEGatherBudget
 
 // gatherICE waits for non-trickle ICE to finish, so the description handed back
 // carries every address in it and no second message is needed. A connection
 // whose gathering is already complete is not waited on.
 func (p *Peer) gatherICE(ctx context.Context) error {
 	if p.pc.Get("iceGatheringState").String() == "complete" {
-		return nil
+		return p.gathered()
 	}
 	done := make(chan struct{})
 	var once sync.Once
@@ -437,7 +452,7 @@ func (p *Peer) gatherICE(ctx context.Context) error {
 	// Re-read after wiring the listener, to catch a transition that happened in
 	// between and would otherwise never wake the wait.
 	if p.pc.Get("iceGatheringState").String() == "complete" {
-		return nil
+		return p.gathered()
 	}
 
 	// ⛔ A DEFAULT BOUND, because the caller's context is not obliged to carry
@@ -447,13 +462,15 @@ func (p *Peer) gatherICE(ctx context.Context) error {
 	wait := ctx
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
-		wait, cancel = context.WithTimeout(ctx, ICEGatherBudget)
+		wait, cancel = context.WithTimeout(ctx, iceGatherBudget)
 		defer cancel()
 	}
 
 	select {
 	case <-done:
-		return p.stillOpen()
+		return p.gathered()
+	case <-p.quit:
+		return ErrClosed
 	case <-wait.Done():
 		// ⛔ A CANCELLATION IS NOT A TIMEOUT. The caller withdrew, so there is
 		// nobody to hand a usable offer to; proceeding would be answering a
@@ -480,7 +497,7 @@ func (p *Peer) gatherICE(ctx context.Context) error {
 			return p.stalled(fmt.Errorf("ICE gathering: %w", ctx.Err()))
 		}
 		return p.stalled(fmt.Errorf("ICE gathering: reported no completion and carried no address within %s: %w",
-			ICEGatherBudget, context.DeadlineExceeded))
+			iceGatherBudget, context.DeadlineExceeded))
 	}
 }
 
@@ -510,6 +527,28 @@ func (p *Peer) hasCandidate() bool {
 		}
 	}
 	return false
+}
+
+// gathered is the whole contract of a SUCCESSFUL gather: the connection is
+// still open, and the description carries an address.
+//
+// ⛔⛔ IT IS ASKED ON EVERY EXIT, because a review found it asked on ONE. The
+// usability question was put only to the expiry branch, so a browser with no
+// usable interface that REPORTED completion — or fired onicecandidate(null)
+// with nothing gathered — walked out through the other three and handed back a
+// blob with no address in it. That is the same silent dead offer the expiry
+// branch had just been fixed to refuse, surviving on the paths nobody looked
+// at: an invariant enforced at one of four doors is not an invariant.
+func (p *Peer) gathered() error {
+	if err := p.stillOpen(); err != nil {
+		return err
+	}
+	if p.hasCandidate() {
+		return nil
+	}
+	// Completion is not the problem here, so the sentence must not blame it:
+	// gathering ENDED and produced nothing to connect with.
+	return p.stalled(fmt.Errorf("%w: ICE gathering: finished and carried no address", ErrTransport))
 }
 
 // stillOpen refuses to hand back a description for a connection that was closed
@@ -582,6 +621,10 @@ func (p *Peer) Close() error {
 	wires := p.wires
 	p.funcs, p.wires = nil, nil
 	p.mu.Unlock()
+
+	// Wake every wait before anything is taken apart, so none of them is still
+	// reading a connection that is being closed underneath it.
+	close(p.quit)
 
 	// ⛔ UNWIRE BEFORE RELEASING, and before closing the connection: an event
 	// already in the browser's task queue will still reach a listener that is

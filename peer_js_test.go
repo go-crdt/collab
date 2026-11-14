@@ -109,6 +109,14 @@ const fakeWebRTC = `
           sdp += "a=candidate:1 1 udp 1 127.0.0.1 1 typ host\r\n";
           sdp += "a=candidate:2 1 udp 1 203.0.113.1 1 typ srflx\r\n";
         }
+        // ⛔ A REAL AGENT WRITES THE MARKER INTO THE DESCRIPTION, and leaving it
+        // out made the sdp test unwitnessed: loosening the prefix to
+        // Contains("candidate") survived, because no line here could be
+        // mistaken for one. "a=end-of-candidates" contains the word and is not
+        // an address, which is exactly the confusion the prefix exists against.
+        if (globalThis.__collabFake.markerOnly) {
+          sdp += "a=end-of-candidates\r\n";
+        }
         this.localDescription = { type: desc.type, sdp };
         this.connectionState = "connecting";
         this.iceConnectionState = "checking";
@@ -696,6 +704,63 @@ func TestAStalledGatheringSaysWhereItStopped(t *testing.T) {
 	}
 }
 
+// ⛔⛔ THE DEFECT A REVIEW FOUND IN THE FIX FOR THE DEFECT: the usability
+// question was asked on ONE of four exits. A browser with no usable interface
+// that REPORTS completion walked out through the other three and handed back a
+// blob with no address in it — the same silent dead offer the expiry branch had
+// just been taught to refuse, surviving on the paths nobody looked at.
+//
+// Here gathering completes normally and carries nothing, so the only thing that
+// can refuse it is the question being asked on the completion path too.
+func TestGatheringThatCompletesWithNoAddressIsRefused(t *testing.T) {
+	installFake(t)
+	setFake("noCandidates", true)
+	defer setFake("noCandidates", false)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	offer, err := p.Offer(ctx, "collab")
+	if err == nil {
+		t.Fatalf("completion with no address is not an offer; got %q", offer)
+	}
+	// ⛔ And the sentence must not blame the completion, which happened: the
+	// earlier wording ("reported no completion") would be a false account here.
+	if !strings.Contains(err.Error(), "finished and carried no address") {
+		t.Errorf("it should say what was wrong; it says %q", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("nothing timed out, so it must not read as a timeout: %v", err)
+	}
+}
+
+// ⛔ The residual window the quit channel cannot close, asserted on the
+// predicate itself. Once Close wakes the wait, the interesting interleaving is
+// the other one: the select has already chosen its exit and Close lands before
+// the state is read. No test can schedule that, and a guard nothing can judge
+// is a guard that rots — so the guard is asserted directly instead, which is
+// also what makes `closed := p.closed` -> `closed := false` fail.
+func TestGatheredRefusesAClosedPeer(t *testing.T) {
+	installFake(t)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.gathered(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("a closed peer has nothing to hand back; got %v", err)
+	}
+	if err := p.stillOpen(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("stillOpen must say so too; got %v", err)
+	}
+}
+
 // ⛔⛔ AN END-OF-CANDIDATES MARKER IS NOT AN ADDRESS. The first version of this
 // fix counted candidate EVENTS, and per MDN a candidate whose "candidate"
 // string is empty ends a generation and is forwarded to the peer like any other
@@ -735,9 +800,9 @@ func TestWithNoCallerDeadlineTheBudgetBoundsTheWaitAndNamesItself(t *testing.T) 
 	setFake("noCandidates", true)
 	defer setFake("noCandidates", false)
 
-	restore := ICEGatherBudget
-	ICEGatherBudget = 120 * time.Millisecond
-	defer func() { ICEGatherBudget = restore }()
+	restore := iceGatherBudget
+	iceGatherBudget = 120 * time.Millisecond
+	defer func() { iceGatherBudget = restore }()
 
 	p, err := NewPeer(PeerConfig{})
 	if err != nil {
@@ -765,30 +830,55 @@ func TestWithNoCallerDeadlineTheBudgetBoundsTheWaitAndNamesItself(t *testing.T) 
 
 // ⛔ Close during the wait: the offer used to come back as a blob for a dead
 // connection, because the wait returned nil and nothing re-read the state.
+//
+// ⛔⛔ DETERMINISTIC, because the first version of this test could not fail for
+// its own subject. It accepted "an error of the right kind OR a non-empty
+// offer" — and a non-empty offer for a closed peer, the one outcome it forbids,
+// satisfied the second branch. A review proved it by disabling stillOpen
+// entirely: the suite stayed green. So the close is now made to land INSIDE the
+// wait, and ErrClosed is required.
 func TestAPeerClosedDuringGatheringDoesNotHandBackAnOffer(t *testing.T) {
 	installFake(t)
-	setFake("endOnNull", true)
-	defer setFake("endOnNull", false)
+	// The gathering never ends by itself, so Offer is parked in the select and
+	// the close cannot arrive before it or after it has returned.
+	setFake("stallICE", true)
+	setFake("noChannel", true)
+	defer setFake("noChannel", false)
 	p, err := NewPeer(PeerConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The channel delivery would race the close; this test is about the wait.
-	setFake("noChannel", true)
-	defer setFake("noChannel", false)
 
-	go func() { _ = p.Close() }()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	// Either the close won the race and this says so, or the offer was made
-	// before it: both are correct, and handing back an offer for a CLOSED peer
-	// is the one outcome that is not.
-	offer, err := p.Offer(ctx, "collab")
-	if err == nil && offer == "" {
-		t.Error("an offer that is neither an error nor a description is the case this is about")
+	type result struct {
+		offer string
+		err   error
 	}
-	if err != nil && !errors.Is(err, ErrClosed) && !errors.Is(err, context.Canceled) {
-		t.Errorf("a closed peer should say so; it said %v", err)
+	out := make(chan result, 1)
+	go func() {
+		offer, err := p.Offer(context.Background(), "collab")
+		out <- result{offer, err}
+	}()
+
+	// Wait until the gathering listener is wired, which is the last thing Offer
+	// does before parking: once it is on, the wait is entered.
+	deadline := time.Now().Add(2 * time.Second)
+	for js.Global().Call("__collabLive").Int() < 3 {
+		if time.Now().After(deadline) {
+			t.Fatal("Offer never reached the gathering wait")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case r := <-out:
+		if !errors.Is(r.err, ErrClosed) {
+			t.Fatalf("a peer closed during the wait must say so; got offer %q err %v", r.offer, r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Offer never returned after Close")
 	}
 }
 
@@ -965,8 +1055,11 @@ func TestACancelledGatheringDoesNotProceedAlthoughItGathered(t *testing.T) {
 	if _, err = p.Offer(ctx, "collab"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("a cancelled gathering must not proceed; got %v", err)
 	}
-	if !strings.Contains(err.Error(), "gathering ") {
-		t.Errorf("and it should still say where it stopped; it says %q", err)
+	// ⛔ WITH THE COLON. "gathering " alone is satisfied by stalled's own
+	// "gathering <state>)" suffix, which predates this change — a review found
+	// that this assertion passed whether or not the operation was named.
+	if !strings.Contains(err.Error(), "ICE gathering:") {
+		t.Errorf("and it should name the operation; it says %q", err)
 	}
 }
 

@@ -201,8 +201,12 @@ it wrote while away. After that, operations and presence flow both ways.
   *cancelled* is never handed an offer it withdrew the question for. The witness
   is the SDP, not a count of candidate events: an end-of-candidates marker is
   not an address, and candidates delivered before any listener exists are
-  invisible to a counter but present in the description. Every one of those
-  outcomes is a test, and each is mutation-checked.
+  invisible to a counter but present in the description. ⛔ The same question is
+  asked on **every** exit, so a browser with no usable interface that *reports*
+  completion is refused too rather than yielding a blob with no address in it —
+  an invariant enforced at one of four doors is not an invariant. And `Close`
+  ends a wait in progress instead of leaving it parked until the budget. Every
+  one of those outcomes is a test, and each is mutation-checked.
 
 ## What a binding needs
 
