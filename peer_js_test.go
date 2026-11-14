@@ -147,6 +147,14 @@ const fakeWebRTC = `
             }
           }, 0);
         }
+        // ⛔ SYNCHRONOUSLY, which is the only way to reach gatherICE's FIRST
+        // door. Every other knob flips the state on a macrotask, and a
+        // macrotask cannot run before Go enters gatherICE — so a mutation that
+        // removed the entry door's check survived, unexecuted by the suite.
+        if (globalThis.__collabFake.completeAtOnce) {
+          this.iceGatheringState = "complete";
+          return Promise.resolve();
+        }
         if (globalThis.__collabFake.stallICE || globalThis.__collabFake.endOnNull || globalThis.__collabFake.markerOnly) {
           // What the stall in go-crdt/collab#267 actually looked like: the browser
           // moves to "gathering", collects its addresses, and never reports
@@ -736,6 +744,154 @@ func TestGatheringThatCompletesWithNoAddressIsRefused(t *testing.T) {
 	if errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("nothing timed out, so it must not read as a timeout: %v", err)
 	}
+}
+
+// ⛔ A listener wired AFTER Close would never be unwired: Close has taken its
+// snapshot and nil'd the slices, so nothing is left to remove it — no panic,
+// because its func is not released either, just a permanent wiring and a
+// closure kept alive for as long as the page. The race that reaches it (a Close
+// landing as gatherICE starts) cannot be scheduled, so the guard is asserted on
+// the primitives instead of hoped for.
+func TestWiringAfterCloseIsRefused(t *testing.T) {
+	installFake(t)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before := js.Global().Call("__collabLive").Int()
+	fn := js.FuncOf(func(js.Value, []js.Value) any { return nil })
+	p.listen(p.pc, "icecandidate", fn)
+	p.track(fn)
+	if after := js.Global().Call("__collabLive").Int(); after != before {
+		t.Errorf("a listener was wired after Close: %d -> %d", before, after)
+	}
+}
+
+// ⛔⛔ CLOSE ENDS ALL THREE WAITS, not the one that was measured. A review
+// found that teaching Close to end the GATHERING wait left DataChannel and
+// awaitOpen selecting on the context alone — and with a context that carries no
+// deadline, Close parks those goroutines FOR EVER: it takes the listeners off
+// and releases the callbacks, so nothing will ever write to the channel they
+// are waiting on. Fixing one wait of three and filing the rest is the precise
+// shape of #271, which is the defect this branch exists to retire, so the two
+// tests below are the ones that keep it retired.
+//
+// Both use context.Background() deliberately: with a deadline the wait would
+// end on its own and prove nothing about Close.
+func TestCloseEndsTheWaitForAnIncomingChannel(t *testing.T) {
+	installFake(t)
+	// noChannel: the answerer's channel is never delivered, so DataChannel
+	// parks on p.incoming with nothing coming.
+	setFake("noChannel", true)
+	defer setFake("noChannel", false)
+	offer, err := offerer2Offer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := p.Answer(ctx, offer); err != nil {
+		t.Fatalf("answer: %v", err)
+	}
+
+	out := make(chan error, 1)
+	go func() { _, err := p.DataChannel(context.Background()); out <- err }()
+	time.Sleep(50 * time.Millisecond) // let it reach the select
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-out:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("a closed peer must end the wait with ErrClosed; got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close left the wait for an incoming channel parked")
+	}
+}
+
+func TestCloseEndsTheWaitForAChannelToOpen(t *testing.T) {
+	installFake(t)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A bare channel that never opens by itself, so awaitOpen parks.
+	ch := js.Global().Call("eval", makeChannel).Invoke("connecting")
+
+	out := make(chan error, 1)
+	go func() { _, err := p.awaitOpen(context.Background(), ch); out <- err }()
+	time.Sleep(50 * time.Millisecond)
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-out:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("a closed peer must end the wait with ErrClosed; got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close left the wait for a channel to open parked")
+	}
+}
+
+// ⛔⛔ gatherICE's FIRST door, which the suite never executed. A mutation that
+// turned the entry check's `return p.gathered()` back into `return nil`
+// survived: every other knob flips the gathering state on a macrotask, and a
+// macrotask cannot run before Go has entered the function, so that door was
+// only ever walked past. completeAtOnce flips it inside setLocalDescription.
+//
+// The two outcomes are asserted together, because the door has to tell them
+// apart: already-complete WITH an address is the fast healthy path and must
+// stay fast, and already-complete with NONE is the dead offer.
+func TestTheAlreadyCompleteDoorAsksForAnAddressToo(t *testing.T) {
+	installFake(t)
+	setFake("completeAtOnce", true)
+	defer setFake("completeAtOnce", false)
+	setFake("noChannel", true)
+	defer setFake("noChannel", false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	t.Run("with an address it is the fast path", func(t *testing.T) {
+		p, err := NewPeer(PeerConfig{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = p.Close() }()
+		offer, err := p.Offer(ctx, "collab")
+		if err != nil {
+			t.Fatalf("a complete gathering with an address is an offer: %v", err)
+		}
+		if offer == "" {
+			t.Error("and the offer must carry the description")
+		}
+	})
+
+	t.Run("with none it is refused at the door", func(t *testing.T) {
+		setFake("noCandidates", true)
+		defer setFake("noCandidates", false)
+		p, err := NewPeer(PeerConfig{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = p.Close() }()
+		offer, err := p.Offer(ctx, "collab")
+		if err == nil {
+			t.Fatalf("complete with no address is not an offer; got %q", offer)
+		}
+		if !strings.Contains(err.Error(), "finished and carried no address") {
+			t.Errorf("it should say what was wrong; it says %q", err)
+		}
+	})
 }
 
 // ⛔ The residual window the quit channel cannot close, asserted on the

@@ -254,6 +254,16 @@ func (p *Peer) DataChannel(ctx context.Context) (js.Value, error) {
 			p.mu.Lock()
 			p.ch = ch
 			p.mu.Unlock()
+		// ⛔⛔ THE SAME WAIT, THE SAME CLOSE, AND #271 ALL OVER AGAIN IF IT IS
+		// LEFT OUT. A review found that making Close end the GATHERING wait
+		// left this one and awaitOpen selecting on the context alone: with
+		// context.Background() a concurrent Close parks the goroutine FOR EVER,
+		// because Close takes the listeners off and releases the callbacks, so
+		// nothing will ever write to the channel it is waiting on. Fixing one
+		// of three waits and filing the rest is the exact shape of the defect
+		// this branch exists to retire.
+		case <-p.quit:
+			return js.Value{}, ErrClosed
 		case <-ctx.Done():
 			return js.Value{}, p.stalled(ctx.Err())
 		}
@@ -294,6 +304,12 @@ func (p *Peer) awaitOpen(ctx context.Context, ch js.Value) (js.Value, error) {
 			return js.Value{}, err
 		}
 		return ch, nil
+	// The third of the three waits: Close releases the callbacks that would
+	// write to settled, so without this a Close on an unopened channel parks
+	// this goroutine for as long as the caller's context lasts -- for ever,
+	// when that context has no deadline.
+	case <-p.quit:
+		return js.Value{}, ErrClosed
 	case <-ctx.Done():
 		return js.Value{}, p.stalled(ctx.Err())
 	}
@@ -449,11 +465,15 @@ func (p *Peer) gatherICE(ctx context.Context) error {
 	p.listen(p.pc, "icecandidate", cand)
 	p.track(cand)
 
-	// Re-read after wiring the listener, to catch a transition that happened in
-	// between and would otherwise never wake the wait.
-	if p.pc.Get("iceGatheringState").String() == "complete" {
-		return p.gathered()
-	}
+	// ⛔ THERE IS NO RE-READ HERE, AND THE ONE THAT WAS HERE COULD NOT FIRE. It
+	// said it caught "a transition that happened in between" — which describes
+	// a threaded runtime. Between the read at the top and this point there is
+	// only Go code, and no browser task can run while Go runs: the state cannot
+	// change under it, so the branch was unreachable for a Peer used as this
+	// package documents. A guard nothing can reach is a guard that rots, and
+	// keeping it would have meant carrying a fourth copy of the usability rule
+	// for a case that cannot happen. Removed on a review's measurement rather
+	// than kept on the comment's word.
 
 	// ⛔ A DEFAULT BOUND, because the caller's context is not obliged to carry
 	// one and an unbounded wait on a browser event is how #267 cost a consumer
@@ -472,6 +492,17 @@ func (p *Peer) gatherICE(ctx context.Context) error {
 	case <-p.quit:
 		return ErrClosed
 	case <-wait.Done():
+		// ⛔⛔ CLOSED FIRST, and stated as an ORDER rather than left to a
+		// nesting. This branch used to ask hasCandidate first and stillOpen
+		// only inside it, so a peer CLOSED during the wait whose description
+		// carried no address fell past both and was reported as a timeout. The
+		// interleaving is ordinary -- wait.Done() and quit can both be ready
+		// and Go picks between them -- and it is the one case no test can
+		// schedule, which is exactly why the precedence is written here
+		// instead of inferred from where the calls sit.
+		if err := p.stillOpen(); err != nil {
+			return err
+		}
 		// ⛔ A CANCELLATION IS NOT A TIMEOUT. The caller withdrew, so there is
 		// nobody to hand a usable offer to; proceeding would be answering a
 		// question that was taken back.
@@ -483,8 +514,13 @@ func (p *Peer) gatherICE(ctx context.Context) error {
 		// was healthy and the offer was usable -- and only "complete" never
 		// came. Failing there threw away a working connection over a missing
 		// event.
+		//
+		// ⛔ The same question as every other exit, asked of the same predicate:
+		// a second spelling of "is this offer usable" is how #271 happened.
+		// Only the FAILING sentence differs here, because nothing timed out on
+		// the other exits.
 		if p.hasCandidate() {
-			return p.stillOpen()
+			return nil
 		}
 		// And a gathering that produced NO address is a different outcome, which
 		// keeps the stalled error: there is nothing to proceed with.
@@ -579,8 +615,18 @@ func (p *Peer) localDescription() string {
 // panics the moment it does.
 func (p *Peer) track(fns ...js.Func) {
 	p.mu.Lock()
-	p.funcs = append(p.funcs, fns...)
+	closed := p.closed
+	if !closed {
+		p.funcs = append(p.funcs, fns...)
+	}
 	p.mu.Unlock()
+	// Same window as listen: after Close there is nobody left to release these,
+	// so they are released here rather than kept alive by a slice nothing reads.
+	if closed {
+		for _, fn := range fns {
+			fn.Release()
+		}
+	}
 }
 
 // wired is one event listener: what it is on, what it listens for, and the
@@ -602,10 +648,28 @@ type wired struct {
 // PASS — a panic in a callback cannot fail the test that caused it, so the
 // hazard was visible and unattributable for as long as it existed.
 func (p *Peer) listen(target js.Value, event string, fn js.Func) {
-	target.Call("addEventListener", event, fn)
 	p.mu.Lock()
-	p.wires = append(p.wires, wired{target: target, event: event, fn: fn})
+	closed := p.closed
+	if !closed {
+		p.wires = append(p.wires, wired{target: target, event: event, fn: fn})
+	}
 	p.mu.Unlock()
+	// ⛔ A LISTENER WIRED AFTER CLOSE WOULD NEVER BE UNWIRED. Close takes its
+	// snapshot and nils the slices, so a Close racing the start of gatherICE or
+	// awaitOpen left listeners registered on the connection with nothing left
+	// to remove them: no panic, because their funcs are not released either,
+	// just a permanent wiring and a closure kept alive for as long as the page.
+	// Found by a review on the fix for the panic, which is the same window seen
+	// from the other side.
+	//
+	// ⚠ It does NOT release here. Every caller in this file pairs listen with
+	// track, which owns the release; releasing in both would release twice, and
+	// resting on Release being idempotent is a worse bargain than naming one
+	// owner.
+	if closed {
+		return
+	}
+	target.Call("addEventListener", event, fn)
 }
 
 // Close ends the connection and gives every callback back. It is safe to call
