@@ -817,6 +817,31 @@ func TestCloseEndsTheWaitForAnIncomingChannel(t *testing.T) {
 	}
 }
 
+// ⛔⛔ THE DOOR THAT LOOKS LIKE A FAST PATH IS STILL A DOOR. awaitOpen's two
+// `return ch, nil` paths leave without reaching any select, so p.quit cannot
+// cover them: an already-open channel was handed back for a CLOSED peer, and
+// the caller got a session that died later as a transport error instead of
+// ErrClosed. Found by a review OF the round that made every other exit ask —
+// which is how a door gets missed: an early return does not read as an exit.
+func TestAwaitOpenRefusesAClosedPeerEvenOnAnOpenChannel(t *testing.T) {
+	installFake(t)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Already open, so the function would return at its first line.
+	ch := js.Global().Call("eval", makeChannel).Invoke("open")
+	if _, err := p.awaitOpen(context.Background(), ch); err != nil {
+		t.Fatalf("while the peer is open this is the ordinary case: %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.awaitOpen(context.Background(), ch); !errors.Is(err, ErrClosed) {
+		t.Fatalf("a closed peer must not be handed a live channel; got %v", err)
+	}
+}
+
 func TestCloseEndsTheWaitForAChannelToOpen(t *testing.T) {
 	installFake(t)
 	p, err := NewPeer(PeerConfig{})
@@ -861,7 +886,15 @@ func TestTheAlreadyCompleteDoorAsksForAnAddressToo(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	t.Run("with an address it is the fast path", func(t *testing.T) {
+	// ⛔ NOT "the fast path", which the first name claimed. A real browser
+	// resolves setLocalDescription before gathering completes, and only a task
+	// can carry the completion — so "complete" at this instant is a state no
+	// browser presents, and the real healthy run leaves through `done`. The
+	// knob proves the door's BEHAVIOUR, not that the door is reachable; the
+	// door is kept because it is cheap and Safari's gathering states are not
+	// trustworthy. Said plainly, because this branch removed another guard for
+	// being unreachable and keeping this one needs the difference stated.
+	t.Run("with an address it is handed back", func(t *testing.T) {
 		p, err := NewPeer(PeerConfig{})
 		if err != nil {
 			t.Fatal(err)

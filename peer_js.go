@@ -275,6 +275,16 @@ func (p *Peer) DataChannel(ctx context.Context) (js.Value, error) {
 // closes or errors first. A channel already open fires no further open event, so
 // its state is read before anything is waited for.
 func (p *Peer) awaitOpen(ctx context.Context, ch js.Value) (js.Value, error) {
+	// ⛔ ASKED BEFORE THE EARLY RETURNS, which no select can cover. Both of
+	// this function's `return ch, nil` paths leave without reaching the wait,
+	// so p.quit cannot help them: an already-open channel was handed back for a
+	// CLOSED peer, and the caller got a session that died later as a transport
+	// error instead of ErrClosed. Pre-existing, found by a review of the branch
+	// that made every OTHER exit ask — which is how a door gets missed: the ones
+	// that look like fast paths are not read as exits at all.
+	if err := p.stillOpen(); err != nil {
+		return js.Value{}, err
+	}
 	if ch.Get("readyState").String() == "open" {
 		return ch, nil
 	}
@@ -648,12 +658,19 @@ type wired struct {
 // PASS — a panic in a callback cannot fail the test that caused it, so the
 // hazard was visible and unattributable for as long as it existed.
 func (p *Peer) listen(target js.Value, event string, fn js.Func) {
+	// ⛔ RECORDED AND WIRED UNDER ONE LOCK. Doing it in two critical sections
+	// left a window — narrow, and on a cooperative scheduler probably not
+	// reachable — where a Close landing between them wires a listener Close has
+	// already finished removing, and track then releases its func: #270 again,
+	// with the callback released, which is worse than the leak this guard was
+	// added for. Holding the mutex across the Call costs nothing, since no
+	// browser task can run while Go holds it anyway.
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	closed := p.closed
 	if !closed {
 		p.wires = append(p.wires, wired{target: target, event: event, fn: fn})
 	}
-	p.mu.Unlock()
 	// ⛔ A LISTENER WIRED AFTER CLOSE WOULD NEVER BE UNWIRED. Close takes its
 	// snapshot and nils the slices, so a Close racing the start of gatherICE or
 	// awaitOpen left listeners registered on the connection with nothing left
@@ -662,10 +679,19 @@ func (p *Peer) listen(target js.Value, event string, fn js.Func) {
 	// Found by a review on the fix for the panic, which is the same window seen
 	// from the other side.
 	//
-	// ⚠ It does NOT release here. Every caller in this file pairs listen with
-	// track, which owns the release; releasing in both would release twice, and
-	// resting on Release being idempotent is a worse bargain than naming one
-	// owner.
+	// ⚠ It does NOT release here, because track owns the release and releasing
+	// in both would release twice — resting on Release being idempotent is a
+	// worse bargain than naming one owner.
+	//
+	// ⛔ AND THE OWNER IS NOT UNIFORM, which the first version of this comment
+	// got wrong. It said "every caller in this file pairs listen with track",
+	// and NewPeer's `listen(p.pc, "datachannel", p.onData)` does not: that one
+	// is released because Close prepends p.onData by hand. It cannot bite today
+	// — NewPeer's peer is not closed before it is returned, so the guard below
+	// never fires there — but the sentence LICENSED dropping that hand-prepend
+	// on the strength of "track owns the release", which would have left the
+	// data-channel callback released by nothing. A review caught the sentence,
+	// not the code.
 	if closed {
 		return
 	}
