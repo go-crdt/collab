@@ -193,13 +193,16 @@ it wrote while away. After that, operations and presence flow both ways.
   to deliver: a consumer carried that stall as a CI flake for ten weeks, with
   both a host and a reflexive candidate gathered and only the announcement
   missing. The wait now also ends on the canonical `onicecandidate(null)`, and
-  when neither arrives it is bounded by `ICEGatherBudget` (ten seconds, and only
-  when the caller's own context carries no deadline). ⛔ **On expiry it proceeds
-  with the candidates it has** — that offer is usable, and failing threw away a
-  working connection over a missing event — while a gathering that produced
-  **nothing** keeps the error, and a caller that *cancelled* is never handed an
-  offer it withdrew the question for. Every one of those four outcomes is a
-  test, and each is mutation-checked.
+  when neither arrives it is bounded by `ICEGatherBudget` (thirty seconds, and
+  only when the caller's own context carries no deadline). ⛔ **On expiry it
+  proceeds if the description carries an address** — that offer is usable, and
+  failing threw away a working connection over a missing event — while a
+  gathering that produced **none** keeps the error, and a caller that
+  *cancelled* is never handed an offer it withdrew the question for. The witness
+  is the SDP, not a count of candidate events: an end-of-candidates marker is
+  not an address, and candidates delivered before any listener exists are
+  invisible to a counter but present in the description. Every one of those
+  outcomes is a test, and each is mutation-checked.
 
 ## What a binding needs
 

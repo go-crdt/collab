@@ -223,10 +223,14 @@ func (c *jsConn) release() {
 	// every two-browser test: a panic inside a callback cannot fail the test
 	// that caused it, so the hazard was both visible and unattributable.
 	//
-	// ⚠ Guarded, because release is reachable with no socket behind it: a
-	// connection that failed before one existed, and the double-release test
-	// that builds a jsConn by hand. Value.Call on undefined panics, so this
-	// unwiring would have turned a no-op into a crash.
+	// ⚠ Guarded, and the reason is narrower than it first looks: the only
+	// caller that reaches here with no socket is the double-release test, which
+	// builds a jsConn by hand. A connection that failed before one existed does
+	// NOT reach it — Close calls c.ws.Call("close") unguarded one step earlier,
+	// and the constructor throws rather than yielding a zero socket. Said
+	// precisely because the first version of this comment claimed the wider
+	// case, and a guard justified by a scenario that cannot happen is a guard
+	// nobody can judge.
 	if c.ws.Truthy() {
 		for event, fn := range map[string]js.Func{
 			"open": c.onOpen, "message": c.onMessage, "error": c.onError, "close": c.onClose,

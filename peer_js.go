@@ -354,22 +354,31 @@ func (p *Peer) awaited(ctx context.Context, what string, promise js.Value) (js.V
 	return v, err
 }
 
+// ICEGatherBudget is how long [Peer.Offer] and [Peer.Answer] wait for a browser
+// to report that ICE gathering finished, when the caller's context carries no
+// deadline of its own. A caller that set a deadline has already said what it
+// will wait, and that answer is used instead of this one.
+//
+// ⛔ It is a bound on ONE browser event, not on the handshake, and the wait is
+// not lost when it expires: if the description gathered an address by then the
+// offer goes out with it (go-crdt/collab#267).
+//
+// ⚠ THIRTY SECONDS, and the earlier number was wrong in a way worth recording.
+// It said "ten seconds, the healthy runs' 8-13 s window plus nothing" — and
+// 10 < 13, so a healthy-but-slow gathering would have expired and shipped a
+// partial address set. The 8-13 s is the consumer's whole handshake, not its
+// gathering, and no measurement here splits the two; this is set above the
+// slowest healthy run observed so that expiry means "stuck", which is the only
+// thing it is allowed to mean.
+//
+// It is a var so a test can shorten it. A const would leave the expiry path
+// reachable only by a test willing to wait half a minute, which is a test
+// nobody runs — and the branch was in fact uncovered until this became settable.
+var ICEGatherBudget = 30 * time.Second
+
 // gatherICE waits for non-trickle ICE to finish, so the description handed back
 // carries every address in it and no second message is needed. A connection
 // whose gathering is already complete is not waited on.
-// ICEGatherBudget is how long [Peer.Offer] and [Peer.Answer] wait for a browser
-// to report that ICE gathering finished, when the caller's context carries no
-// deadline of its own.
-//
-// ⛔ It is a bound on ONE browser event, not on the handshake. When it expires
-// with candidates already collected the offer goes out with those: the stall it
-// exists for (go-crdt/collab#267) gathered a host and a reflexive candidate and
-// only failed to say "complete", so the connection was there to be made. Ten
-// seconds is the healthy runs' 8-13 s window plus nothing: a browser that has
-// not produced a single candidate by then is not slow, it is stuck, and the
-// error says so rather than waiting longer.
-const ICEGatherBudget = 10 * time.Second
-
 func (p *Peer) gatherICE(ctx context.Context) error {
 	if p.pc.Get("iceGatheringState").String() == "complete" {
 		return nil
@@ -377,9 +386,6 @@ func (p *Peer) gatherICE(ctx context.Context) error {
 	done := make(chan struct{})
 	var once sync.Once
 	finish := func() { once.Do(func() { close(done) }) }
-
-	var mu sync.Mutex
-	gathered := 0
 
 	fn := js.FuncOf(func(js.Value, []js.Value) any {
 		if p.pc.Get("iceGatheringState").String() == "complete" {
@@ -396,20 +402,33 @@ func (p *Peer) gatherICE(ctx context.Context) error {
 	// event the browser is not obliged to deliver promptly was the single exit
 	// of this wait; two independent ones cost a listener.
 	//
-	// It also counts what was collected, which is what makes the expiry below a
-	// decision rather than a guess.
+	// ⛔⛔ IT ONLY ENDS THE WAIT. IT DOES NOT COUNT. The first version counted
+	// candidate events to decide whether the offer was usable, and an
+	// independent review found two defects in that, both one-liners and both
+	// WORSE than the bug being fixed:
+	//
+	//  1. a candidate whose `candidate` string is EMPTY is an end-of-candidates
+	//     marker for a generation, not an address (MDN, RTCPeerConnection
+	//     icecandidate event: null ends the whole gathering, "" ends a
+	//     generation and is forwarded to the peer like a candidate). Counting
+	//     it meant a connection with no address at all reached expiry with a
+	//     count of one and handed back a DEAD offer, silently, where the old
+	//     code had at least returned a clear error.
+	//  2. gathering starts inside setLocalDescription, which has already
+	//     resolved by the time this listener is wired. A browser that delivered
+	//     its one candidate early and then stalled is invisible to a counter,
+	//     and the offer is thrown away: #267 again, from the other side.
+	//
+	// A counter cannot be re-read. The description can, so the question "is
+	// there an address in this offer" is asked of the SDP at the moment it
+	// matters -- see hasCandidate.
 	cand := js.FuncOf(func(_ js.Value, args []js.Value) any {
 		if len(args) == 0 {
 			return nil
 		}
-		c := args[0].Get("candidate")
-		if c.IsNull() || c.IsUndefined() {
+		if c := args[0].Get("candidate"); c.IsNull() || c.IsUndefined() {
 			finish()
-			return nil
 		}
-		mu.Lock()
-		gathered++
-		mu.Unlock()
 		return nil
 	})
 	p.listen(p.pc, "icecandidate", cand)
@@ -434,39 +453,79 @@ func (p *Peer) gatherICE(ctx context.Context) error {
 
 	select {
 	case <-done:
-		return nil
+		return p.stillOpen()
 	case <-wait.Done():
-		mu.Lock()
-		n := gathered
-		mu.Unlock()
 		// ⛔ A CANCELLATION IS NOT A TIMEOUT. The caller withdrew, so there is
 		// nobody to hand a usable offer to; proceeding would be answering a
 		// question that was taken back.
 		if errors.Is(ctx.Err(), context.Canceled) {
-			return p.stalled(ctx.Err())
+			return p.stalled(fmt.Errorf("ICE gathering: %w", ctx.Err()))
 		}
-		// ⭐ Proceed with what was gathered. In the measured stall a `host` and
-		// an `srflx` candidate had both arrived -- the network half was healthy
-		// and the offer was usable -- and only `gathering=complete` never came.
-		// Failing there threw away a working connection over a missing event.
-		if n > 0 {
-			return nil
+		// ⭐ Proceed with what the DESCRIPTION carries. In the measured stall a
+		// host and a reflexive candidate had both arrived -- the network half
+		// was healthy and the offer was usable -- and only "complete" never
+		// came. Failing there threw away a working connection over a missing
+		// event.
+		if p.hasCandidate() {
+			return p.stillOpen()
 		}
-		// And a gathering that produced NOTHING is a different outcome, which
-		// keeps the stalled error: there is no offer to proceed with.
+		// And a gathering that produced NO address is a different outcome, which
+		// keeps the stalled error: there is nothing to proceed with.
+		//
+		// Through stalled, as [Peer.DataChannel] and awaitOpen already do, and
+		// naming the operation as awaited does: a bare "context deadline
+		// exceeded" is the least useful thing this transport can say, and
+		// gathering is where it is most expensive to say it.
 		if ctx.Err() != nil {
-			return p.stalled(ctx.Err())
+			return p.stalled(fmt.Errorf("ICE gathering: %w", ctx.Err()))
 		}
-		// Through stalled, as [Peer.DataChannel] and awaitOpen already do. A bare
-		// "context deadline exceeded" from here is the least useful thing this
-		// transport can say, and gathering is where it is most expensive to say
-		// it: go-crdt/collab#267 is a consumer that spent ten weeks on a stall
-		// whose one-line account -- "gathering gathering", a browser that
-		// collected addresses and never reported completion -- this call had in
-		// hand and threw away.
-		return p.stalled(fmt.Errorf("ICE gathering reported no completion and produced no candidate within %s: %w",
+		return p.stalled(fmt.Errorf("ICE gathering: reported no completion and carried no address within %s: %w",
 			ICEGatherBudget, context.DeadlineExceeded))
 	}
+}
+
+// hasCandidate reports whether the local description carries at least one ICE
+// address, which is the only question that decides whether an offer is worth
+// handing back.
+//
+// ⛔ THE SDP, NOT A COUNTER, and the difference is a race. Gathering begins
+// inside setLocalDescription, so candidates can be delivered before any
+// listener of ours exists; a count of events then says zero for a connection
+// that has an address, and #267's stall is thrown away from the other side.
+// The description is cumulative and can be read at the moment the answer is
+// needed. It also cannot mistake an end-of-candidates marker for an address:
+// a marker is "a=end-of-candidates", never "a=candidate".
+func (p *Peer) hasCandidate() bool {
+	desc := p.pc.Get("localDescription")
+	if !desc.Truthy() {
+		return false
+	}
+	sdp := desc.Get("sdp")
+	if sdp.Type() != js.TypeString {
+		return false
+	}
+	for _, line := range strings.Split(sdp.String(), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "a=candidate:") {
+			return true
+		}
+	}
+	return false
+}
+
+// stillOpen refuses to hand back a description for a connection that was closed
+// while the wait was running.
+//
+// ⛔ Close during gathering used to end with a blob for a dead connection: the
+// wait returned nil, the caller read localDescription, and nothing said the
+// peer was gone. An offer nobody can answer is worse than an error.
+func (p *Peer) stillOpen() error {
+	p.mu.Lock()
+	closed := p.closed
+	p.mu.Unlock()
+	if closed {
+		return ErrClosed
+	}
+	return nil
 }
 
 // localDescription reads the gathered description off the connection and renders
