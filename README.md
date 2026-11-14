@@ -188,6 +188,18 @@ it wrote while away. After that, operations and presence flow both ways.
 - **Documents outlive sessions.** The last participant out writes the document;
   `Server.Flush` writes it without waiting. A write that fails is retried rather
   than forgotten.
+- **No browser event can hang a handshake.** `Peer.Offer` used to wait for
+  `icegatheringstatechange` to report `complete`, which a browser is not obliged
+  to deliver: a consumer carried that stall as a CI flake for ten weeks, with
+  both a host and a reflexive candidate gathered and only the announcement
+  missing. The wait now also ends on the canonical `onicecandidate(null)`, and
+  when neither arrives it is bounded by `ICEGatherBudget` (ten seconds, and only
+  when the caller's own context carries no deadline). ⛔ **On expiry it proceeds
+  with the candidates it has** — that offer is usable, and failing threw away a
+  working connection over a missing event — while a gathering that produced
+  **nothing** keeps the error, and a caller that *cancelled* is never handed an
+  offer it withdrew the question for. Every one of those four outcomes is a
+  test, and each is mutation-checked.
 
 ## What a binding needs
 
