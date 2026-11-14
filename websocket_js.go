@@ -216,6 +216,28 @@ func (c *jsConn) release() {
 	c.released = true
 	c.mu.Unlock()
 	c.finish()
+	// ⛔ UNWIRE BEFORE RELEASING (go-crdt/collab#270). Release gives the closure
+	// back to the Go runtime while the listener stays registered, so an event
+	// already queued in the browser's task queue calls freed work and panics
+	// with "call to released function". The suite printed that beside a PASS on
+	// every two-browser test: a panic inside a callback cannot fail the test
+	// that caused it, so the hazard was both visible and unattributable.
+	//
+	// ⚠ Guarded, and the reason is narrower than it first looks: the only
+	// caller that reaches here with no socket is the double-release test, which
+	// builds a jsConn by hand. A connection that failed before one existed does
+	// NOT reach it — Close calls c.ws.Call("close") unguarded one step earlier,
+	// and the constructor throws rather than yielding a zero socket. Said
+	// precisely because the first version of this comment claimed the wider
+	// case, and a guard justified by a scenario that cannot happen is a guard
+	// nobody can judge.
+	if c.ws.Truthy() {
+		for event, fn := range map[string]js.Func{
+			"open": c.onOpen, "message": c.onMessage, "error": c.onError, "close": c.onClose,
+		} {
+			c.ws.Call("removeEventListener", event, fn)
+		}
+	}
 	for _, f := range []js.Func{c.onOpen, c.onMessage, c.onError, c.onClose} {
 		f.Release()
 	}

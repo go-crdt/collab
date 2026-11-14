@@ -188,6 +188,25 @@ it wrote while away. After that, operations and presence flow both ways.
 - **Documents outlive sessions.** The last participant out writes the document;
   `Server.Flush` writes it without waiting. A write that fails is retried rather
   than forgotten.
+- **No browser event can hang a handshake.** `Peer.Offer` used to wait for
+  `icegatheringstatechange` to report `complete`, which a browser is not obliged
+  to deliver: a consumer carried that stall as a CI flake for ten weeks, with
+  both a host and a reflexive candidate gathered and only the announcement
+  missing. The wait now also ends on the canonical `onicecandidate(null)`, and
+  when neither arrives it is bounded by `ICEGatherBudget` (thirty seconds, and
+  only when the caller's own context carries no deadline). ⛔ **On expiry it
+  proceeds if the description carries an address** — that offer is usable, and
+  failing threw away a working connection over a missing event — while a
+  gathering that produced **none** keeps the error, and a caller that
+  *cancelled* is never handed an offer it withdrew the question for. The witness
+  is the SDP, not a count of candidate events: an end-of-candidates marker is
+  not an address, and candidates delivered before any listener exists are
+  invisible to a counter but present in the description. ⛔ The same question is
+  asked on **every** exit, so a browser with no usable interface that *reports*
+  completion is refused too rather than yielding a blob with no address in it —
+  an invariant enforced at one of four doors is not an invariant. And `Close`
+  ends a wait in progress instead of leaving it parked until the budget. Every
+  one of those outcomes is a test, and each is mutation-checked.
 
 ## What a binding needs
 

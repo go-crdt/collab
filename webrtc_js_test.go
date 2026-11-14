@@ -28,7 +28,14 @@ const linkedChannels = `
       binaryType: "blob",
       peer: null,
       addEventListener(event, fn) { (listeners[event] ||= []).push(fn); },
-      fire(event, arg) { for (const fn of listeners[event] || []) fn(arg); },
+      // The release path now takes listeners off before giving the callbacks
+      // back (go-crdt/collab#270), so the fake has to be able to forget one.
+      removeEventListener(event, fn) {
+        const l = listeners[event] || []; const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1);
+      },
+      // So a test can ask the BROWSER what is still wired (go-crdt/collab#270).
+      _events() { return listeners; },
+      fire(event, arg) { for (const fn of [...(listeners[event] || [])]) fn(arg); },
       send(data) {
         const copy = data.slice();
         // Asynchronously, as a real channel delivers: a page that took a
@@ -137,4 +144,46 @@ func TestTwoBrowsersShareADocumentOverADataChannel(t *testing.T) {
 		}
 	}
 	t.Logf("two browsers, no server, converged on %q", body.String())
+}
+
+// ⛔⛔ THE WEBSOCKET/DATA-CHANNEL HALF OF go-crdt/collab#270, which had no
+// witness until a review mutated the guard away and the suite stayed GREEN.
+// jsConn.release gives four callbacks back to the Go runtime; a listener left
+// registered then calls freed work on the next queued event and panics with
+// "call to released function" — which this suite PRINTED beside a PASS on both
+// two-browser tests. A panic in a callback cannot fail the test that caused it,
+// so the property is asked of the browser instead: after Close, nothing may
+// still be wired to a released callback.
+func TestClosingADataChannelConnUnwiresItsListeners(t *testing.T) {
+	pair := js.Global().Call("eval", linkedChannels)
+	ch := pair.Get("a")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := DataChannel(ch).open(ctx)
+	if err != nil {
+		t.Fatalf("opening over the channel: %v", err)
+	}
+
+	live := func() int {
+		evs := ch.Call("_events")
+		n := 0
+		for _, k := range []string{"open", "message", "error", "close"} {
+			if v := evs.Get(k); v.Truthy() {
+				n += v.Length()
+			}
+		}
+		return n
+	}
+	// The control: the four must be ON first, or a zero afterwards would mean
+	// the walk found nothing to look at rather than that Close did its work.
+	if n := live(); n < 4 {
+		t.Fatalf("only %d of the 4 listeners were wired; this test would pass blind", n)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("closing: %v", err)
+	}
+	if n := live(); n != 0 {
+		t.Errorf("Close released the callbacks and left %d listener(s) wired to them", n)
+	}
 }

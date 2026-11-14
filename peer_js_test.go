@@ -33,14 +33,23 @@ const fakeWebRTC = `
 (function () {
   globalThis.__collabFake = globalThis.__collabFake || {};
   const registry = {};
+  const channels = [];
   let nextId = 0;
 
   function channel(label) {
     const listeners = {};
-    return {
+    const ch = {
       label, readyState: "connecting", binaryType: "blob", peer: null,
       addEventListener(event, fn) { (listeners[event] ||= []).push(fn); },
-      fire(event, arg) { for (const fn of listeners[event] || []) fn(arg); },
+      // ⛔ The fake must be able to FORGET a listener, because Close now takes
+      // them off before releasing the callbacks (go-crdt/collab#270). A fake
+      // with no removeEventListener would make the test green by having no
+      // such method to call -- the opposite of what is being checked.
+      removeEventListener(event, fn) {
+        const l = listeners[event] || []; const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1);
+      },
+      _events() { return listeners; },
+      fire(event, arg) { for (const fn of [...(listeners[event] || [])]) fn(arg); },
       open() { this.readyState = "open"; this.fire("open", {}); },
       send(data) {
         const copy = data.slice();
@@ -51,6 +60,8 @@ const fakeWebRTC = `
         if (this.peer) this.peer.fire("close", {});
       },
     };
+    channels.push(ch);
+    return ch;
   }
 
   const ctor = function (config) {
@@ -61,7 +72,15 @@ const fakeWebRTC = `
       localDescription: null, remoteDescription: null,
       _channel: null,
       addEventListener(event, fn) { (evs[event] ||= []).push(fn); },
-      _emit(event, arg) { for (const fn of evs[event] || []) fn(arg); },
+      removeEventListener(event, fn) {
+        const l = evs[event] || []; const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1);
+      },
+      _events() { return evs; },
+      // ⛔ A COPY, because a listener removed DURING an emit must not shift the
+      // list under the loop: Close unwires from inside a callback's own turn in
+      // the real thing too, and skipping the next listener would be a defect
+      // nothing here would show.
+      _emit(event, arg) { for (const fn of [...(evs[event] || [])]) fn(arg); },
       createDataChannel(label) { this._channel = channel(label); return this._channel; },
       createOffer() {
         if (globalThis.__collabFake.rejectOffer) return Promise.reject(new Error("createOffer refused"));
@@ -79,10 +98,64 @@ const fakeWebRTC = `
         // worth less than no test.
         if (globalThis.__collabFake.stallSetLocal) return new Promise(() => {});
         // Stamp the registry id into the sdp so an answerer can find the offerer.
-        this.localDescription = { type: desc.type, sdp: desc.sdp + "a=pcid:" + id + "\r\n" };
+        let sdp = desc.sdp + "a=pcid:" + id + "\r\n";
+        // ⛔ THE ADDRESSES GO IN THE DESCRIPTION, because that is what the code
+        // now reads to decide whether an offer is worth handing back. A fake
+        // that emitted candidate EVENTS and left the sdp bare would make the
+        // decision untestable -- and markerOnly is the case an independent
+        // review found: an end-of-candidates marker arrives, no address ever
+        // does, and the sdp must stay bare so the refusal is reachable.
+        if (!globalThis.__collabFake.noCandidates && !globalThis.__collabFake.markerOnly) {
+          sdp += "a=candidate:1 1 udp 1 127.0.0.1 1 typ host\r\n";
+          sdp += "a=candidate:2 1 udp 1 203.0.113.1 1 typ srflx\r\n";
+        }
+        // ⛔ A REAL AGENT WRITES THE MARKER INTO THE DESCRIPTION, and leaving it
+        // out made the sdp test unwitnessed: loosening the prefix to
+        // Contains("candidate") survived, because no line here could be
+        // mistaken for one. "a=end-of-candidates" contains the word and is not
+        // an address, which is exactly the confusion the prefix exists against.
+        if (globalThis.__collabFake.markerOnly) {
+          sdp += "a=end-of-candidates\r\n";
+        }
+        this.localDescription = { type: desc.type, sdp };
         this.connectionState = "connecting";
         this.iceConnectionState = "checking";
-        if (globalThis.__collabFake.stallICE) {
+        // ⛔ CANDIDATES, because the stall this models gathered them. The
+        // transcript in go-crdt/collab#267 shows "typ=host" and "typ=srflx"
+        // both arriving and only "gathering=complete" missing, so a fake that
+        // emits no candidate cannot tell "stuck with a usable offer" from
+        // "stuck with nothing" -- which is the whole of the decision under
+        // test. noCandidates models the second, which is a different outcome.
+        if (globalThis.__collabFake.markerOnly) {
+          // An end-of-candidates marker for one generation: per MDN its
+          // "candidate" string is EMPTY, it is forwarded to the peer like a
+          // candidate, and it is NOT an address. Only a null candidate ends the
+          // whole gathering. Counting this as an address handed back a dead
+          // offer; the sdp above stays bare, so nothing can.
+          setTimeout(() => { this._emit("icecandidate", { candidate: { candidate: "" } }); }, 0);
+        } else if (!globalThis.__collabFake.noCandidates) {
+          setTimeout(() => {
+            this._emit("icecandidate", { candidate: { candidate: "candidate:1 1 udp 1 127.0.0.1 1 typ host" } });
+            this._emit("icecandidate", { candidate: { candidate: "candidate:2 1 udp 1 203.0.113.1 1 typ srflx" } });
+            // The canonical end-of-gathering signal, withheld by the stall
+            // knobs exactly as the browser withheld it.
+            // stallICE withholds BOTH endings, which is the measured stall.
+            // endOnNull withholds only "complete", which is the case the
+            // second signal exists to rescue.
+            if (!globalThis.__collabFake.stallICE) {
+              this._emit("icecandidate", { candidate: null });
+            }
+          }, 0);
+        }
+        // ⛔ SYNCHRONOUSLY, which is the only way to reach gatherICE's FIRST
+        // door. Every other knob flips the state on a macrotask, and a
+        // macrotask cannot run before Go enters gatherICE — so a mutation that
+        // removed the entry door's check survived, unexecuted by the suite.
+        if (globalThis.__collabFake.completeAtOnce) {
+          this.iceGatheringState = "complete";
+          return Promise.resolve();
+        }
+        if (globalThis.__collabFake.stallICE || globalThis.__collabFake.endOnNull || globalThis.__collabFake.markerOnly) {
           // What the stall in go-crdt/collab#267 actually looked like: the browser
           // moves to "gathering", collects its addresses, and never reports
           // completion. Leaving the state at "new" modelled a connection that
@@ -112,6 +185,40 @@ const fakeWebRTC = `
     return pc;
   };
   ctor.__fake = true;
+  // ⛔ THE WITNESS FOR go-crdt/collab#270. A callback called after Release
+  // panics, and a panic inside a callback cannot fail the test that caused it:
+  // the suite printed "call to released function" beside a PASS for as long as
+  // the hazard existed. So the property is asserted on the BROWSER's side
+  // instead -- after Close, nothing may still be wired to a released callback.
+  // ⛔⛔ IT COUNTS THE CHANNELS TOO. The first version walked only the
+  // RTCPeerConnection registry, and a review's mutation proved the gap: putting
+  // the data channel's three listeners back on raw addEventListener left the
+  // suite GREEN. Those are the listeners whose panic was printed beside a PASS
+  // in the first place, so the witness was blind to its own subject.
+  globalThis.__collabLive = function () {
+    let n = 0;
+    const count = (evs) => { for (const e of Object.keys(evs)) n += evs[e].length; };
+    for (const id of Object.keys(registry)) {
+      const pc = registry[id];
+      count(pc._events());
+      if (pc._channel) count(pc._channel._events());
+    }
+    return n;
+  };
+  // ⛔ CHANNELS ONLY, counted separately. A single total hid the subject: the
+  // connection's own listeners dominate it, so a witness that adds them up
+  // passes while every CHANNEL listener is left wired -- which is the set whose
+  // panic was printed beside a PASS. A count has to be of the thing in question.
+  // Every channel the factory makes is registered, not only the one a pc holds:
+  // the answering side's channel is handed over by event and belongs to no pc.
+  globalThis.__collabLiveChannels = function () {
+    let n = 0;
+    for (const ch of channels) {
+      const evs = ch._events();
+      for (const e of Object.keys(evs)) n += evs[e].length;
+    }
+    return n;
+  };
   globalThis.RTCPeerConnection = ctor;
 })()
 `
@@ -534,9 +641,17 @@ func TestOfferHonoursACancelledContext(t *testing.T) {
 // When ICE never finishes gathering, the wait ends on the context rather than
 // hanging: the one message this design sends must not depend on a peer that
 // stopped answering.
+//
+// ⛔ WITH NOTHING GATHERED, which is now what makes it an error. A browser that
+// collected candidates and only failed to announce completion has a usable
+// offer, and go-crdt/collab#267 is ten weeks of CI failures spent throwing one
+// away; that case is TestAGatheringThatNeverCompletesProceedsWithWhatItGathered.
+// This one is the connection that produced nothing at all.
 func TestGatherICEHonoursTheContext(t *testing.T) {
 	installFake(t)
 	setFake("stallICE", true)
+	setFake("noCandidates", true)
+	defer setFake("noCandidates", false)
 	p, err := NewPeer(PeerConfig{})
 	if err != nil {
 		t.Fatal(err)
@@ -562,9 +677,17 @@ func TestGatherICEHonoursTheContext(t *testing.T) {
 //
 // The three states are asserted rather than the whole message, because what
 // matters is that the caller is told them, not the sentence they are wrapped in.
+// ⛔ AND THE STALL IS NOW THE ONE WHERE NOTHING WAS GATHERED. The measured
+// stall collected a host and a reflexive candidate and only failed to say
+// "complete", so the offer was usable and failing threw away a working
+// connection over a missing event — see the test below, which is the other
+// half of this one. A gathering that produced NO candidate has no offer to
+// proceed with, and that is what keeps the stalled error.
 func TestAStalledGatheringSaysWhereItStopped(t *testing.T) {
 	installFake(t)
 	setFake("stallICE", true)
+	setFake("noCandidates", true)
+	defer setFake("noCandidates", false)
 	p, err := NewPeer(PeerConfig{})
 	if err != nil {
 		t.Fatal(err)
@@ -575,7 +698,7 @@ func TestAStalledGatheringSaysWhereItStopped(t *testing.T) {
 	defer cancel()
 	_, err = p.Offer(ctx, "collab")
 	if err == nil {
-		t.Fatal("a stalled gathering should fail")
+		t.Fatal("a gathering that produced nothing should fail")
 	}
 	// Still the context's error underneath: naming the state must not cost a
 	// caller the ability to tell a timeout from a refusal.
@@ -586,6 +709,574 @@ func TestAStalledGatheringSaysWhereItStopped(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the error should name %q; it says %q", want, err)
 		}
+	}
+}
+
+// ⛔⛔ THE DEFECT A REVIEW FOUND IN THE FIX FOR THE DEFECT: the usability
+// question was asked on ONE of four exits. A browser with no usable interface
+// that REPORTS completion walked out through the other three and handed back a
+// blob with no address in it — the same silent dead offer the expiry branch had
+// just been taught to refuse, surviving on the paths nobody looked at.
+//
+// Here gathering completes normally and carries nothing, so the only thing that
+// can refuse it is the question being asked on the completion path too.
+func TestGatheringThatCompletesWithNoAddressIsRefused(t *testing.T) {
+	installFake(t)
+	setFake("noCandidates", true)
+	defer setFake("noCandidates", false)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	offer, err := p.Offer(ctx, "collab")
+	if err == nil {
+		t.Fatalf("completion with no address is not an offer; got %q", offer)
+	}
+	// ⛔ And the sentence must not blame the completion, which happened: the
+	// earlier wording ("reported no completion") would be a false account here.
+	if !strings.Contains(err.Error(), "finished and carried no address") {
+		t.Errorf("it should say what was wrong; it says %q", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("nothing timed out, so it must not read as a timeout: %v", err)
+	}
+}
+
+// ⛔ A listener wired AFTER Close would never be unwired: Close has taken its
+// snapshot and nil'd the slices, so nothing is left to remove it — no panic,
+// because its func is not released either, just a permanent wiring and a
+// closure kept alive for as long as the page. The race that reaches it (a Close
+// landing as gatherICE starts) cannot be scheduled, so the guard is asserted on
+// the primitives instead of hoped for.
+func TestWiringAfterCloseIsRefused(t *testing.T) {
+	installFake(t)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before := js.Global().Call("__collabLive").Int()
+	fn := js.FuncOf(func(js.Value, []js.Value) any { return nil })
+	p.listen(p.pc, "icecandidate", fn)
+	p.track(fn)
+	if after := js.Global().Call("__collabLive").Int(); after != before {
+		t.Errorf("a listener was wired after Close: %d -> %d", before, after)
+	}
+}
+
+// ⛔⛔ CLOSE ENDS ALL THREE WAITS, not the one that was measured. A review
+// found that teaching Close to end the GATHERING wait left DataChannel and
+// awaitOpen selecting on the context alone — and with a context that carries no
+// deadline, Close parks those goroutines FOR EVER: it takes the listeners off
+// and releases the callbacks, so nothing will ever write to the channel they
+// are waiting on. Fixing one wait of three and filing the rest is the precise
+// shape of #271, which is the defect this branch exists to retire, so the two
+// tests below are the ones that keep it retired.
+//
+// Both use context.Background() deliberately: with a deadline the wait would
+// end on its own and prove nothing about Close.
+func TestCloseEndsTheWaitForAnIncomingChannel(t *testing.T) {
+	installFake(t)
+	// noChannel: the answerer's channel is never delivered, so DataChannel
+	// parks on p.incoming with nothing coming.
+	setFake("noChannel", true)
+	defer setFake("noChannel", false)
+	offer, err := offerer2Offer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := p.Answer(ctx, offer); err != nil {
+		t.Fatalf("answer: %v", err)
+	}
+
+	out := make(chan error, 1)
+	go func() { _, err := p.DataChannel(context.Background()); out <- err }()
+	time.Sleep(50 * time.Millisecond) // let it reach the select
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-out:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("a closed peer must end the wait with ErrClosed; got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close left the wait for an incoming channel parked")
+	}
+}
+
+// ⛔⛔ THE DOOR THAT LOOKS LIKE A FAST PATH IS STILL A DOOR. awaitOpen's two
+// `return ch, nil` paths leave without reaching any select, so p.quit cannot
+// cover them: an already-open channel was handed back for a CLOSED peer, and
+// the caller got a session that died later as a transport error instead of
+// ErrClosed. Found by a review OF the round that made every other exit ask —
+// which is how a door gets missed: an early return does not read as an exit.
+func TestAwaitOpenRefusesAClosedPeerEvenOnAnOpenChannel(t *testing.T) {
+	installFake(t)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Already open, so the function would return at its first line.
+	ch := js.Global().Call("eval", makeChannel).Invoke("open")
+	if _, err := p.awaitOpen(context.Background(), ch); err != nil {
+		t.Fatalf("while the peer is open this is the ordinary case: %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.awaitOpen(context.Background(), ch); !errors.Is(err, ErrClosed) {
+		t.Fatalf("a closed peer must not be handed a live channel; got %v", err)
+	}
+}
+
+func TestCloseEndsTheWaitForAChannelToOpen(t *testing.T) {
+	installFake(t)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A bare channel that never opens by itself, so awaitOpen parks.
+	ch := js.Global().Call("eval", makeChannel).Invoke("connecting")
+
+	out := make(chan error, 1)
+	go func() { _, err := p.awaitOpen(context.Background(), ch); out <- err }()
+	time.Sleep(50 * time.Millisecond)
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-out:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("a closed peer must end the wait with ErrClosed; got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close left the wait for a channel to open parked")
+	}
+}
+
+// ⛔⛔ gatherICE's FIRST door, which the suite never executed. A mutation that
+// turned the entry check's `return p.gathered()` back into `return nil`
+// survived: every other knob flips the gathering state on a macrotask, and a
+// macrotask cannot run before Go has entered the function, so that door was
+// only ever walked past. completeAtOnce flips it inside setLocalDescription.
+//
+// The two outcomes are asserted together, because the door has to tell them
+// apart: already-complete WITH an address is the fast healthy path and must
+// stay fast, and already-complete with NONE is the dead offer.
+func TestTheAlreadyCompleteDoorAsksForAnAddressToo(t *testing.T) {
+	installFake(t)
+	setFake("completeAtOnce", true)
+	defer setFake("completeAtOnce", false)
+	setFake("noChannel", true)
+	defer setFake("noChannel", false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// ⛔ NOT "the fast path", which the first name claimed. A real browser
+	// resolves setLocalDescription before gathering completes, and only a task
+	// can carry the completion — so "complete" at this instant is a state no
+	// browser presents, and the real healthy run leaves through `done`. The
+	// knob proves the door's BEHAVIOUR, not that the door is reachable; the
+	// door is kept because it is cheap and Safari's gathering states are not
+	// trustworthy. Said plainly, because this branch removed another guard for
+	// being unreachable and keeping this one needs the difference stated.
+	t.Run("with an address it is handed back", func(t *testing.T) {
+		p, err := NewPeer(PeerConfig{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = p.Close() }()
+		offer, err := p.Offer(ctx, "collab")
+		if err != nil {
+			t.Fatalf("a complete gathering with an address is an offer: %v", err)
+		}
+		if offer == "" {
+			t.Error("and the offer must carry the description")
+		}
+	})
+
+	t.Run("with none it is refused at the door", func(t *testing.T) {
+		setFake("noCandidates", true)
+		defer setFake("noCandidates", false)
+		p, err := NewPeer(PeerConfig{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = p.Close() }()
+		offer, err := p.Offer(ctx, "collab")
+		if err == nil {
+			t.Fatalf("complete with no address is not an offer; got %q", offer)
+		}
+		if !strings.Contains(err.Error(), "finished and carried no address") {
+			t.Errorf("it should say what was wrong; it says %q", err)
+		}
+	})
+}
+
+// ⛔ The residual window the quit channel cannot close, asserted on the
+// predicate itself. Once Close wakes the wait, the interesting interleaving is
+// the other one: the select has already chosen its exit and Close lands before
+// the state is read. No test can schedule that, and a guard nothing can judge
+// is a guard that rots — so the guard is asserted directly instead, which is
+// also what makes `closed := p.closed` -> `closed := false` fail.
+func TestGatheredRefusesAClosedPeer(t *testing.T) {
+	installFake(t)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.gathered(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("a closed peer has nothing to hand back; got %v", err)
+	}
+	if err := p.stillOpen(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("stillOpen must say so too; got %v", err)
+	}
+}
+
+// ⛔⛔ AN END-OF-CANDIDATES MARKER IS NOT AN ADDRESS. The first version of this
+// fix counted candidate EVENTS, and per MDN a candidate whose "candidate"
+// string is empty ends a generation and is forwarded to the peer like any other
+// — it is a notification, not an address. Counting it meant a connection that
+// gathered nothing reached expiry with a count of one and handed back a DEAD
+// offer in silence, where the code before the fix had returned a clear error.
+// Found by an independent review, not by this suite.
+func TestAnEndOfCandidatesMarkerIsNotAnAddress(t *testing.T) {
+	installFake(t)
+	setFake("markerOnly", true)
+	defer setFake("markerOnly", false)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	offer, err := p.Offer(ctx, "collab")
+	if err == nil {
+		t.Fatalf("a marker is not an address, so there is no offer to hand back; got %q", offer)
+	}
+	if !strings.Contains(err.Error(), "ICE gathering") {
+		t.Errorf("the error should name the operation; it says %q", err)
+	}
+}
+
+// ⛔ The budget's own expiry path, which no test could reach while the budget
+// was a const: a run with NO caller deadline waits ICEGatherBudget, and half a
+// minute is a test nobody runs. Shortening it is the whole reason the budget is
+// a var — and mutating `if ctx.Err() != nil` to `if true` used to survive,
+// because this branch was never executed.
+func TestWithNoCallerDeadlineTheBudgetBoundsTheWaitAndNamesItself(t *testing.T) {
+	installFake(t)
+	setFake("stallICE", true)
+	setFake("noCandidates", true)
+	defer setFake("noCandidates", false)
+
+	restore := iceGatherBudget
+	iceGatherBudget = 120 * time.Millisecond
+	defer func() { iceGatherBudget = restore }()
+
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+
+	// ⛔ context.Background() on purpose: no deadline, so only the budget can
+	// end this. With the budget removed the test hangs rather than failing,
+	// which is why the deadline below is the harness's and not the caller's.
+	start := time.Now()
+	_, err = p.Offer(context.Background(), "collab")
+	if err == nil {
+		t.Fatal("nothing was gathered, so it must refuse")
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("it waited %v, so the budget did not bound it", took)
+	}
+	for _, want := range []string{"ICE gathering", "120ms", "carried no address"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error should name %q; it says %q", want, err)
+		}
+	}
+}
+
+// ⛔ Close during the wait: the offer used to come back as a blob for a dead
+// connection, because the wait returned nil and nothing re-read the state.
+//
+// ⛔⛔ DETERMINISTIC, because the first version of this test could not fail for
+// its own subject. It accepted "an error of the right kind OR a non-empty
+// offer" — and a non-empty offer for a closed peer, the one outcome it forbids,
+// satisfied the second branch. A review proved it by disabling stillOpen
+// entirely: the suite stayed green. So the close is now made to land INSIDE the
+// wait, and ErrClosed is required.
+func TestAPeerClosedDuringGatheringDoesNotHandBackAnOffer(t *testing.T) {
+	installFake(t)
+	// The gathering never ends by itself, so Offer is parked in the select and
+	// the close cannot arrive before it or after it has returned.
+	setFake("stallICE", true)
+	setFake("noChannel", true)
+	defer setFake("noChannel", false)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		offer string
+		err   error
+	}
+	out := make(chan result, 1)
+	go func() {
+		offer, err := p.Offer(context.Background(), "collab")
+		out <- result{offer, err}
+	}()
+
+	// Wait until the gathering listener is wired, which is the last thing Offer
+	// does before parking: once it is on, the wait is entered.
+	deadline := time.Now().Add(2 * time.Second)
+	for js.Global().Call("__collabLive").Int() < 3 {
+		if time.Now().After(deadline) {
+			t.Fatal("Offer never reached the gathering wait")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case r := <-out:
+		if !errors.Is(r.err, ErrClosed) {
+			t.Fatalf("a peer closed during the wait must say so; got offer %q err %v", r.offer, r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Offer never returned after Close")
+	}
+}
+
+// ⛔⛔ go-crdt/collab#270, asserted on the BROWSER's side because it cannot be
+// asserted on ours. Close gives every callback back to the Go runtime; a
+// listener left registered then calls freed work on the next queued event and
+// panics with "call to released function" — which the suite PRINTED beside a
+// PASS, because a panic inside a callback cannot fail the test that caused it.
+// So the property under test is "nothing is still wired", which the fake can
+// answer and a panic cannot.
+func TestCloseLeavesNothingWiredToAReleasedCallback(t *testing.T) {
+	installFake(t)
+	setFake("noChannel", true)
+	defer setFake("noChannel", false)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := p.Offer(ctx, "collab"); err != nil {
+		t.Fatalf("the offer should go out: %v", err)
+	}
+	// The control: the listeners this is about must EXIST first, or a zero
+	// afterwards would mean the walk found nothing to look at.
+	if live := js.Global().Call("__collabLive").Int(); live == 0 {
+		t.Fatal("no listener was wired at all; this test would pass for the wrong reason")
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if live := js.Global().Call("__collabLive").Int(); live != 0 {
+		t.Errorf("Close released the callbacks and left %d listener(s) wired to them", live)
+	}
+}
+
+// ⛔⛔ AND THE SAME, FOR THE DATA CHANNEL'S LISTENERS — which are the ones whose
+// panic was actually printed beside a PASS. A review mutated `p.listen(ch, …)`
+// back to a raw `addEventListener` and the suite stayed GREEN: the witness
+// above walks the connection, and a whole handshake is needed before a channel
+// has listeners at all. So this runs one.
+func TestCloseLeavesNoChannelListenerWiredToAReleasedCallback(t *testing.T) {
+	installFake(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	host, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	guest, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	offer, err := host.Offer(ctx, "collab")
+	if err != nil {
+		t.Fatalf("offer: %v", err)
+	}
+	answer, err := guest.Answer(ctx, offer)
+	if err != nil {
+		t.Fatalf("answer: %v", err)
+	}
+	if err := host.AcceptAnswer(answer); err != nil {
+		t.Fatalf("accept answer: %v", err)
+	}
+	// DataChannel is what wires open/error/close on the channel itself.
+	if _, err := host.DataChannel(ctx); err != nil {
+		t.Fatalf("host channel: %v", err)
+	}
+	if _, err := guest.DataChannel(ctx); err != nil {
+		t.Fatalf("guest channel: %v", err)
+	}
+
+	if err := host.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := guest.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if live := js.Global().Call("__collabLive").Int(); live != 0 {
+		t.Errorf("after both Closes, %d listener(s) are still wired to released callbacks", live)
+	}
+}
+
+// ⛔⛔ AND THE CHANNEL'S OWN THREE, which the handshake above never wires: by
+// the time DataChannel runs, the fake's channel is already open and awaitOpen
+// returns before wiring anything. That is why a review's mutation — putting
+// those listeners back on a raw addEventListener — left the suite GREEN: there
+// was nothing to leave behind. The witness has to be where the listeners are,
+// so this drives awaitOpen on a channel that is still connecting and counts on
+// the channel object itself.
+func TestCloseUnwiresTheChannelsOwnListeners(t *testing.T) {
+	installFake(t)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := js.Global().Call("eval", makeChannel).Invoke("connecting")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _, _ = p.awaitOpen(ctx, ch); close(done) }()
+
+	// The control: wait until the three are actually on, or a zero afterwards
+	// would say nothing. A bare channel never opens by itself, so this settles.
+	live := func() int {
+		evs := ch.Call("_events")
+		n := 0
+		for _, k := range []string{"open", "error", "close"} {
+			if v := evs.Get(k); v.Truthy() {
+				n += v.Length()
+			}
+		}
+		return n
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for live() < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of the channel's 3 listeners were wired", live())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+	<-done
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if n := live(); n != 0 {
+		t.Errorf("Close released the channel's callbacks and left %d of them wired", n)
+	}
+}
+
+// ⭐ THE OTHER HALF, and the point of go-crdt/collab#267: a browser that
+// gathered addresses and never reported completion had a usable offer in hand.
+// The consumer's transcript at the stall logged "typ=host" and "typ=srflx" —
+// enough for a connection — and ten weeks of CI failures came from treating a
+// missing event as a missing offer.
+func TestAGatheringThatNeverCompletesProceedsWithWhatItGathered(t *testing.T) {
+	installFake(t)
+	setFake("stallICE", true)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	offer, err := p.Offer(ctx, "collab")
+	if err != nil {
+		t.Fatalf("candidates were gathered, so the offer should go out: %v", err)
+	}
+	if offer == "" {
+		t.Error("the offer must carry what was collected, not an empty string")
+	}
+}
+
+// ⛔ A CANCELLATION IS NOT A TIMEOUT. The caller withdrew, so there is nobody to
+// hand a usable offer to, and proceeding would answer a question that was taken
+// back. Same fake, same candidates, opposite outcome — which is what makes the
+// test above about the DECISION rather than about the knob.
+func TestACancelledGatheringDoesNotProceedAlthoughItGathered(t *testing.T) {
+	installFake(t)
+	setFake("stallICE", true)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	if _, err = p.Offer(ctx, "collab"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled gathering must not proceed; got %v", err)
+	}
+	// ⛔ WITH THE COLON. "gathering " alone is satisfied by stalled's own
+	// "gathering <state>)" suffix, which predates this change — a review found
+	// that this assertion passed whether or not the operation was named.
+	if !strings.Contains(err.Error(), "ICE gathering:") {
+		t.Errorf("and it should name the operation; it says %q", err)
+	}
+}
+
+// ⭐ The second signal, which costs one listener and ends the wait without the
+// budget: onicecandidate(null) is the canonical end of gathering, and the
+// consumer's healthy transcripts log it on every passing run. Here "complete"
+// never arrives and the null candidate does.
+func TestTheNullCandidateEndsTheWaitWithoutTheBudget(t *testing.T) {
+	installFake(t)
+	setFake("endOnNull", true)
+	defer setFake("endOnNull", false)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+
+	// ⛔ The deadline is the ASSERTION, not a safety net: it is far below
+	// ICEGatherBudget, so this can only pass by ending on the null candidate.
+	// If that listener is removed the wait runs to the budget and this is red.
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err = p.Offer(ctx, "collab"); err != nil {
+		t.Fatalf("the null candidate should have ended the wait: %v", err)
+	}
+	if took := time.Since(start); took > 300*time.Millisecond {
+		t.Errorf("it waited %v, so it did not end on the null candidate", took)
 	}
 }
 
@@ -795,7 +1486,13 @@ const makeChannel = `
   return {
     readyState: state,
     addEventListener(event, fn) { (listeners[event] ||= []).push(fn); },
-    fire(event) { this.readyState = event === "open" ? "open" : "closed"; for (const fn of listeners[event] || []) fn({}); },
+    removeEventListener(event, fn) {
+      const l = listeners[event] || []; const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1);
+    },
+    // So a test can ask the BROWSER what is still wired, which is the only
+    // side that can answer it (go-crdt/collab#270).
+    _events() { return listeners; },
+    fire(event) { this.readyState = event === "open" ? "open" : "closed"; for (const fn of [...(listeners[event] || [])]) fn({}); },
   };
 })
 `
