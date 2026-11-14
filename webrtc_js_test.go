@@ -28,7 +28,12 @@ const linkedChannels = `
       binaryType: "blob",
       peer: null,
       addEventListener(event, fn) { (listeners[event] ||= []).push(fn); },
-      fire(event, arg) { for (const fn of listeners[event] || []) fn(arg); },
+      // The release path now takes listeners off before giving the callbacks
+      // back (go-crdt/collab#270), so the fake has to be able to forget one.
+      removeEventListener(event, fn) {
+        const l = listeners[event] || []; const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1);
+      },
+      fire(event, arg) { for (const fn of [...(listeners[event] || [])]) fn(arg); },
       send(data) {
         const copy = data.slice();
         // Asynchronously, as a real channel delivers: a page that took a

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"syscall/js"
+	"time"
 )
 
 // The step before [DataChannel]: getting two browsers to the point where a data
@@ -90,6 +91,7 @@ type Peer struct {
 	ch     js.Value
 	closed bool
 	funcs  []js.Func // callbacks released together on Close
+	wires  []wired   // listeners taken off BEFORE those callbacks are released
 
 	onData js.Func
 	// incoming carries the answerer's data channel, which it does not make but
@@ -118,7 +120,7 @@ func NewPeer(cfg PeerConfig) (*Peer, error) {
 		}
 		return nil
 	})
-	p.pc.Call("addEventListener", "datachannel", p.onData)
+	p.listen(p.pc, "datachannel", p.onData)
 	return p, nil
 }
 
@@ -267,7 +269,7 @@ func (p *Peer) awaitOpen(ctx context.Context, ch js.Value) (js.Value, error) {
 	})
 	onClose := js.FuncOf(func(js.Value, []js.Value) any { finish(ErrClosed); return nil })
 	for event, fn := range map[string]js.Func{"open": onOpen, "error": onError, "close": onClose} {
-		ch.Call("addEventListener", event, fn)
+		p.listen(ch, event, fn)
 	}
 	p.track(onOpen, onError, onClose)
 
@@ -355,30 +357,106 @@ func (p *Peer) awaited(ctx context.Context, what string, promise js.Value) (js.V
 // gatherICE waits for non-trickle ICE to finish, so the description handed back
 // carries every address in it and no second message is needed. A connection
 // whose gathering is already complete is not waited on.
+// ICEGatherBudget is how long [Peer.Offer] and [Peer.Answer] wait for a browser
+// to report that ICE gathering finished, when the caller's context carries no
+// deadline of its own.
+//
+// ⛔ It is a bound on ONE browser event, not on the handshake. When it expires
+// with candidates already collected the offer goes out with those: the stall it
+// exists for (go-crdt/collab#267) gathered a host and a reflexive candidate and
+// only failed to say "complete", so the connection was there to be made. Ten
+// seconds is the healthy runs' 8-13 s window plus nothing: a browser that has
+// not produced a single candidate by then is not slow, it is stuck, and the
+// error says so rather than waiting longer.
+const ICEGatherBudget = 10 * time.Second
+
 func (p *Peer) gatherICE(ctx context.Context) error {
 	if p.pc.Get("iceGatheringState").String() == "complete" {
 		return nil
 	}
 	done := make(chan struct{})
 	var once sync.Once
+	finish := func() { once.Do(func() { close(done) }) }
+
+	var mu sync.Mutex
+	gathered := 0
+
 	fn := js.FuncOf(func(js.Value, []js.Value) any {
 		if p.pc.Get("iceGatheringState").String() == "complete" {
-			once.Do(func() { close(done) })
+			finish()
 		}
 		return nil
 	})
-	p.pc.Call("addEventListener", "icegatheringstatechange", fn)
+	p.listen(p.pc, "icegatheringstatechange", fn)
 	p.track(fn)
+
+	// ⛔ THE SECOND SIGNAL, and the cheap half of #267. `onicecandidate` with a
+	// null candidate is the canonical end-of-gathering event, and the consumer's
+	// healthy transcripts log `(end-of-candidates)` on every passing run. One
+	// event the browser is not obliged to deliver promptly was the single exit
+	// of this wait; two independent ones cost a listener.
+	//
+	// It also counts what was collected, which is what makes the expiry below a
+	// decision rather than a guess.
+	cand := js.FuncOf(func(_ js.Value, args []js.Value) any {
+		if len(args) == 0 {
+			return nil
+		}
+		c := args[0].Get("candidate")
+		if c.IsNull() || c.IsUndefined() {
+			finish()
+			return nil
+		}
+		mu.Lock()
+		gathered++
+		mu.Unlock()
+		return nil
+	})
+	p.listen(p.pc, "icecandidate", cand)
+	p.track(cand)
 
 	// Re-read after wiring the listener, to catch a transition that happened in
 	// between and would otherwise never wake the wait.
 	if p.pc.Get("iceGatheringState").String() == "complete" {
 		return nil
 	}
+
+	// ⛔ A DEFAULT BOUND, because the caller's context is not obliged to carry
+	// one and an unbounded wait on a browser event is how #267 cost a consumer
+	// ten weeks. A caller that HAS set a deadline has already said what it will
+	// wait, and that answer is respected rather than shortened.
+	wait := ctx
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		wait, cancel = context.WithTimeout(ctx, ICEGatherBudget)
+		defer cancel()
+	}
+
 	select {
 	case <-done:
 		return nil
-	case <-ctx.Done():
+	case <-wait.Done():
+		mu.Lock()
+		n := gathered
+		mu.Unlock()
+		// ⛔ A CANCELLATION IS NOT A TIMEOUT. The caller withdrew, so there is
+		// nobody to hand a usable offer to; proceeding would be answering a
+		// question that was taken back.
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return p.stalled(ctx.Err())
+		}
+		// ⭐ Proceed with what was gathered. In the measured stall a `host` and
+		// an `srflx` candidate had both arrived -- the network half was healthy
+		// and the offer was usable -- and only `gathering=complete` never came.
+		// Failing there threw away a working connection over a missing event.
+		if n > 0 {
+			return nil
+		}
+		// And a gathering that produced NOTHING is a different outcome, which
+		// keeps the stalled error: there is no offer to proceed with.
+		if ctx.Err() != nil {
+			return p.stalled(ctx.Err())
+		}
 		// Through stalled, as [Peer.DataChannel] and awaitOpen already do. A bare
 		// "context deadline exceeded" from here is the least useful thing this
 		// transport can say, and gathering is where it is most expensive to say
@@ -386,7 +464,8 @@ func (p *Peer) gatherICE(ctx context.Context) error {
 		// whose one-line account -- "gathering gathering", a browser that
 		// collected addresses and never reported completion -- this call had in
 		// hand and threw away.
-		return p.stalled(ctx.Err())
+		return p.stalled(fmt.Errorf("ICE gathering reported no completion and produced no candidate within %s: %w",
+			ICEGatherBudget, context.DeadlineExceeded))
 	}
 }
 
@@ -406,6 +485,31 @@ func (p *Peer) track(fns ...js.Func) {
 	p.mu.Unlock()
 }
 
+// wired is one event listener: what it is on, what it listens for, and the
+// callback. Close needs all three, because giving a callback back without
+// unwiring it leaves the browser holding a pointer to freed work.
+type wired struct {
+	target js.Value
+	event  string
+	fn     js.Func
+}
+
+// listen wires fn to event on target AND keeps the wiring, so Close can take it
+// off before releasing the callback.
+//
+// ⛔ WHY THE TRIPLE, not just the func (go-crdt/collab#270). Release gives a
+// callback back to the Go runtime; the listener stays registered, so an event
+// already queued in the browser's task queue calls it afterwards and panics
+// with "call to released function". The suite printed exactly that beside a
+// PASS — a panic in a callback cannot fail the test that caused it, so the
+// hazard was visible and unattributable for as long as it existed.
+func (p *Peer) listen(target js.Value, event string, fn js.Func) {
+	target.Call("addEventListener", event, fn)
+	p.mu.Lock()
+	p.wires = append(p.wires, wired{target: target, event: event, fn: fn})
+	p.mu.Unlock()
+}
+
 // Close ends the connection and gives every callback back. It is safe to call
 // more than once, and safe to call on a handshake that never finished.
 func (p *Peer) Close() error {
@@ -416,9 +520,17 @@ func (p *Peer) Close() error {
 	}
 	p.closed = true
 	funcs := append([]js.Func{p.onData}, p.funcs...)
-	p.funcs = nil
+	wires := p.wires
+	p.funcs, p.wires = nil, nil
 	p.mu.Unlock()
 
+	// ⛔ UNWIRE BEFORE RELEASING, and before closing the connection: an event
+	// already in the browser's task queue will still reach a listener that is
+	// registered, and calling a released callback panics. Taking the listeners
+	// off first is the only ordering where the browser cannot reach freed work.
+	for _, w := range wires {
+		w.target.Call("removeEventListener", w.event, w.fn)
+	}
 	p.pc.Call("close")
 	for _, f := range funcs {
 		f.Release()

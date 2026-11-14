@@ -40,6 +40,13 @@ const fakeWebRTC = `
     return {
       label, readyState: "connecting", binaryType: "blob", peer: null,
       addEventListener(event, fn) { (listeners[event] ||= []).push(fn); },
+      // ⛔ The fake must be able to FORGET a listener, because Close now takes
+      // them off before releasing the callbacks (go-crdt/collab#270). A fake
+      // with no removeEventListener would make the test green by having no
+      // such method to call -- the opposite of what is being checked.
+      removeEventListener(event, fn) {
+        const l = listeners[event] || []; const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1);
+      },
       fire(event, arg) { for (const fn of listeners[event] || []) fn(arg); },
       open() { this.readyState = "open"; this.fire("open", {}); },
       send(data) {
@@ -61,7 +68,15 @@ const fakeWebRTC = `
       localDescription: null, remoteDescription: null,
       _channel: null,
       addEventListener(event, fn) { (evs[event] ||= []).push(fn); },
-      _emit(event, arg) { for (const fn of evs[event] || []) fn(arg); },
+      removeEventListener(event, fn) {
+        const l = evs[event] || []; const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1);
+      },
+      _events() { return evs; },
+      // ⛔ A COPY, because a listener removed DURING an emit must not shift the
+      // list under the loop: Close unwires from inside a callback's own turn in
+      // the real thing too, and skipping the next listener would be a defect
+      // nothing here would show.
+      _emit(event, arg) { for (const fn of [...(evs[event] || [])]) fn(arg); },
       createDataChannel(label) { this._channel = channel(label); return this._channel; },
       createOffer() {
         if (globalThis.__collabFake.rejectOffer) return Promise.reject(new Error("createOffer refused"));
@@ -82,7 +97,27 @@ const fakeWebRTC = `
         this.localDescription = { type: desc.type, sdp: desc.sdp + "a=pcid:" + id + "\r\n" };
         this.connectionState = "connecting";
         this.iceConnectionState = "checking";
-        if (globalThis.__collabFake.stallICE) {
+        // ⛔ CANDIDATES, because the stall this models gathered them. The
+        // transcript in go-crdt/collab#267 shows "typ=host" and "typ=srflx"
+        // both arriving and only "gathering=complete" missing, so a fake that
+        // emits no candidate cannot tell "stuck with a usable offer" from
+        // "stuck with nothing" -- which is the whole of the decision under
+        // test. noCandidates models the second, which is a different outcome.
+        if (!globalThis.__collabFake.noCandidates) {
+          setTimeout(() => {
+            this._emit("icecandidate", { candidate: { candidate: "candidate:1 1 udp 1 127.0.0.1 1 typ host" } });
+            this._emit("icecandidate", { candidate: { candidate: "candidate:2 1 udp 1 203.0.113.1 1 typ srflx" } });
+            // The canonical end-of-gathering signal, withheld by the stall
+            // knobs exactly as the browser withheld it.
+            // stallICE withholds BOTH endings, which is the measured stall.
+            // endOnNull withholds only "complete", which is the case the
+            // second signal exists to rescue.
+            if (!globalThis.__collabFake.stallICE) {
+              this._emit("icecandidate", { candidate: null });
+            }
+          }, 0);
+        }
+        if (globalThis.__collabFake.stallICE || globalThis.__collabFake.endOnNull) {
           // What the stall in go-crdt/collab#267 actually looked like: the browser
           // moves to "gathering", collects its addresses, and never reports
           // completion. Leaving the state at "new" modelled a connection that
@@ -112,6 +147,19 @@ const fakeWebRTC = `
     return pc;
   };
   ctor.__fake = true;
+  // ⛔ THE WITNESS FOR go-crdt/collab#270. A callback called after Release
+  // panics, and a panic inside a callback cannot fail the test that caused it:
+  // the suite printed "call to released function" beside a PASS for as long as
+  // the hazard existed. So the property is asserted on the BROWSER's side
+  // instead -- after Close, nothing may still be wired to a released callback.
+  globalThis.__collabLive = function () {
+    let n = 0;
+    for (const id of Object.keys(registry)) {
+      const evs = registry[id]._events();
+      for (const e of Object.keys(evs)) n += evs[e].length;
+    }
+    return n;
+  };
   globalThis.RTCPeerConnection = ctor;
 })()
 `
@@ -534,9 +582,17 @@ func TestOfferHonoursACancelledContext(t *testing.T) {
 // When ICE never finishes gathering, the wait ends on the context rather than
 // hanging: the one message this design sends must not depend on a peer that
 // stopped answering.
+//
+// ⛔ WITH NOTHING GATHERED, which is now what makes it an error. A browser that
+// collected candidates and only failed to announce completion has a usable
+// offer, and go-crdt/collab#267 is ten weeks of CI failures spent throwing one
+// away; that case is TestAGatheringThatNeverCompletesProceedsWithWhatItGathered.
+// This one is the connection that produced nothing at all.
 func TestGatherICEHonoursTheContext(t *testing.T) {
 	installFake(t)
 	setFake("stallICE", true)
+	setFake("noCandidates", true)
+	defer setFake("noCandidates", false)
 	p, err := NewPeer(PeerConfig{})
 	if err != nil {
 		t.Fatal(err)
@@ -562,9 +618,17 @@ func TestGatherICEHonoursTheContext(t *testing.T) {
 //
 // The three states are asserted rather than the whole message, because what
 // matters is that the caller is told them, not the sentence they are wrapped in.
+// ⛔ AND THE STALL IS NOW THE ONE WHERE NOTHING WAS GATHERED. The measured
+// stall collected a host and a reflexive candidate and only failed to say
+// "complete", so the offer was usable and failing threw away a working
+// connection over a missing event — see the test below, which is the other
+// half of this one. A gathering that produced NO candidate has no offer to
+// proceed with, and that is what keeps the stalled error.
 func TestAStalledGatheringSaysWhereItStopped(t *testing.T) {
 	installFake(t)
 	setFake("stallICE", true)
+	setFake("noCandidates", true)
+	defer setFake("noCandidates", false)
 	p, err := NewPeer(PeerConfig{})
 	if err != nil {
 		t.Fatal(err)
@@ -575,7 +639,7 @@ func TestAStalledGatheringSaysWhereItStopped(t *testing.T) {
 	defer cancel()
 	_, err = p.Offer(ctx, "collab")
 	if err == nil {
-		t.Fatal("a stalled gathering should fail")
+		t.Fatal("a gathering that produced nothing should fail")
 	}
 	// Still the context's error underneath: naming the state must not cost a
 	// caller the ability to tell a timeout from a refusal.
@@ -586,6 +650,115 @@ func TestAStalledGatheringSaysWhereItStopped(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the error should name %q; it says %q", want, err)
 		}
+	}
+}
+
+// ⛔⛔ go-crdt/collab#270, asserted on the BROWSER's side because it cannot be
+// asserted on ours. Close gives every callback back to the Go runtime; a
+// listener left registered then calls freed work on the next queued event and
+// panics with "call to released function" — which the suite PRINTED beside a
+// PASS, because a panic inside a callback cannot fail the test that caused it.
+// So the property under test is "nothing is still wired", which the fake can
+// answer and a panic cannot.
+func TestCloseLeavesNothingWiredToAReleasedCallback(t *testing.T) {
+	installFake(t)
+	setFake("noChannel", true)
+	defer setFake("noChannel", false)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := p.Offer(ctx, "collab"); err != nil {
+		t.Fatalf("the offer should go out: %v", err)
+	}
+	// The control: the listeners this is about must EXIST first, or a zero
+	// afterwards would mean the walk found nothing to look at.
+	if live := js.Global().Call("__collabLive").Int(); live == 0 {
+		t.Fatal("no listener was wired at all; this test would pass for the wrong reason")
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if live := js.Global().Call("__collabLive").Int(); live != 0 {
+		t.Errorf("Close released the callbacks and left %d listener(s) wired to them", live)
+	}
+}
+
+// ⭐ THE OTHER HALF, and the point of go-crdt/collab#267: a browser that
+// gathered addresses and never reported completion had a usable offer in hand.
+// The consumer's transcript at the stall logged "typ=host" and "typ=srflx" —
+// enough for a connection — and ten weeks of CI failures came from treating a
+// missing event as a missing offer.
+func TestAGatheringThatNeverCompletesProceedsWithWhatItGathered(t *testing.T) {
+	installFake(t)
+	setFake("stallICE", true)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	offer, err := p.Offer(ctx, "collab")
+	if err != nil {
+		t.Fatalf("candidates were gathered, so the offer should go out: %v", err)
+	}
+	if offer == "" {
+		t.Error("the offer must carry what was collected, not an empty string")
+	}
+}
+
+// ⛔ A CANCELLATION IS NOT A TIMEOUT. The caller withdrew, so there is nobody to
+// hand a usable offer to, and proceeding would answer a question that was taken
+// back. Same fake, same candidates, opposite outcome — which is what makes the
+// test above about the DECISION rather than about the knob.
+func TestACancelledGatheringDoesNotProceedAlthoughItGathered(t *testing.T) {
+	installFake(t)
+	setFake("stallICE", true)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	if _, err = p.Offer(ctx, "collab"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled gathering must not proceed; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "gathering ") {
+		t.Errorf("and it should still say where it stopped; it says %q", err)
+	}
+}
+
+// ⭐ The second signal, which costs one listener and ends the wait without the
+// budget: onicecandidate(null) is the canonical end of gathering, and the
+// consumer's healthy transcripts log it on every passing run. Here "complete"
+// never arrives and the null candidate does.
+func TestTheNullCandidateEndsTheWaitWithoutTheBudget(t *testing.T) {
+	installFake(t)
+	setFake("endOnNull", true)
+	defer setFake("endOnNull", false)
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+
+	// ⛔ The deadline is the ASSERTION, not a safety net: it is far below
+	// ICEGatherBudget, so this can only pass by ending on the null candidate.
+	// If that listener is removed the wait runs to the budget and this is red.
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err = p.Offer(ctx, "collab"); err != nil {
+		t.Fatalf("the null candidate should have ended the wait: %v", err)
+	}
+	if took := time.Since(start); took > 300*time.Millisecond {
+		t.Errorf("it waited %v, so it did not end on the null candidate", took)
 	}
 }
 
@@ -795,7 +968,10 @@ const makeChannel = `
   return {
     readyState: state,
     addEventListener(event, fn) { (listeners[event] ||= []).push(fn); },
-    fire(event) { this.readyState = event === "open" ? "open" : "closed"; for (const fn of listeners[event] || []) fn({}); },
+    removeEventListener(event, fn) {
+      const l = listeners[event] || []; const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1);
+    },
+    fire(event) { this.readyState = event === "open" ? "open" : "closed"; for (const fn of [...(listeners[event] || [])]) fn({}); },
   };
 })
 `
