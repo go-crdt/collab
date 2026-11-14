@@ -1,12 +1,12 @@
-github.com/andybalholm/brotli v1.2.8 h1:H9F6r7RNwzSRsx/lytpIYkbjNFMt2yNBwsJ2+0gpx78=
-github.com/andybalholm/brotli v1.2.8/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
+github.com/andybalholm/brotli v1.3.0 h1:IdkhjSe/+34U+fP7FSR2Q6Poj1hnHUa2GoWmzXJd6qY=
+github.com/andybalholm/brotli v1.3.0/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
 github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/go-crdt/collab v0.78.0 h1:EZl8x7py7xzmJzIVF24/yODm47AsJSNaYxs4lrrJIoU=
-github.com/go-crdt/collab v0.78.0/go.mod h1:a9rmNNMIVNDUqiNEfJRJh52+te2ZPyfHekJGayipDes=
+github.com/go-crdt/collab v0.79.1 h1:z/V9uUwDmHVFjHfQktzoeh2Rh4as2cP4Mb8loPmC504=
+github.com/go-crdt/collab v0.79.1/go.mod h1:+O/sx1Tt5AZ9i9jAqQ+D/+lz7jt5J16Qx073hEJM7Hs=
 github.com/go-crdt/crdt v0.57.0 h1:sNLDTVCEnSb20gm77BUuYav8dzj5krmly/z9O7eRMCo=
 github.com/go-crdt/crdt v0.57.0/go.mod h1:zdVTTDLGV5JYAoTJDqCivcAT+/B5gGebDsVd8QNZpVs=
 github.com/golang/protobuf v1.5.4 h1:i7eJL8qZTpSEXOPTxNKhASYpMn+8e5Q6AdndVa1dWek=
@@ -19,8 +19,8 @@ github.com/jackc/pgpassfile v1.0.0 h1:/6Hmqy13Ss2zCq62VdNG8tM1wchn8zjSGOBJ6icpsI
 github.com/jackc/pgpassfile v1.0.0/go.mod h1:CEx0iS5ambNFdcRtxPj5JhEz+xB6uRky5eyVu/W2HEg=
 github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 h1:iCEnooe7UlwOQYpKFhBabPMi4aNAfoODPEFNiAnClxo=
 github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761/go.mod h1:5TJZWKEWniPve33vlWYSoGYefn3gLQRzjfDlhSJ9ZKM=
-github.com/jackc/pgx/v5 v5.12.0 h1:hWwax8YiGT0YiN50U1oIDn5kgR7KC2tG3rmavwpPkxY=
-github.com/jackc/pgx/v5 v5.12.0/go.mod h1:u2Fi6no03HCSBYE+ZVdLxbwdu3xyi2vU+K/YNJioSds=
+github.com/jackc/pgx/v5 v5.13.0 h1:Hl08k64maU0nrRyVUEbwCnK6/gT0EhMrtAqBHz9/gA4=
+github.com/jackc/pgx/v5 v5.13.0/go.mod h1:u2Fi6no03HCSBYE+ZVdLxbwdu3xyi2vU+K/YNJioSds=
 github.com/jackc/puddle/v2 v2.2.3 h1:f8HoREISb3l5eO9coPgK7U3hKLhWGokOFVcThl5jrao=
 github.com/jackc/puddle/v2 v2.2.3/go.mod h1:vriiEXHvEE654aYKXXjOvZM39qJ0q+azkZFrfEOc3H4=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
