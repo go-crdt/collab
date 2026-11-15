@@ -212,19 +212,26 @@ it wrote while away. After that, operations and presence flow both ways.
   one of them.** A stalled handshake used to report the connection, ICE and
   gathering states — the same three words at every site — so the error said
   that something had stopped and not *what*. Each wait now carries its
-  operation — **eleven of them, counted**: the six promises `createOffer`,
-  `setLocalDescription(offer)`, `setRemoteDescription(offer)`, `createAnswer`,
-  `setLocalDescription(answer)`, `setRemoteDescription(answer)`; the two peer
-  selects `datachannel` and `channel open`; the gathering wait; and the two
-  carriers' own, `websocket open` and `data channel open`.
-  ⛔⛔ **This sentence is here because THREE earlier versions of it were too
+  operation — **eleven of the twelve, counted**: the six promises
+  `createOffer`, `setLocalDescription(offer)`, `setRemoteDescription(offer)`,
+  `createAnswer`, `setLocalDescription(answer)`, `setRemoteDescription(answer)`;
+  the two peer selects `datachannel` and `channel open`; the gathering wait;
+  and the two carriers' own, `websocket open` and `data channel open`.
+  ⚠ **The twelfth is the Web Locks election (`electByLock`), and it is an open
+  defect rather than an unnamed wait**: giving up there returns "this browser
+  has no Web Locks", so abandoning is indistinguishable from the API being
+  absent, and it releases its callback while the lock request is still
+  outstanding — #270's class, in a function #274 did not reach. Filed as
+  **#276**, not fixed here, because it is a lifecycle defect in the election
+  and not a missing name.
+  ⛔⛔ **This sentence is here because FOUR earlier versions of it were too
   wide, and writing it out is what proved that each time.** A review counted
-  the package's waits against the claim and found a gap in all three rounds:
-  the sixth promise wait, then the seventh and eighth (selects, which the
-  static check could not see), then the tenth and eleventh — in other files of
-  this package, saying nothing at all, not even the three state words. ⭐ Each
-  refutation was somebody counting a number written down here; a code reading
-  follows the paths the reader thinks of. It claimed every wait was
+  the package's waits against the claim and found a gap in every round: the
+  sixth promise wait, then the seventh and eighth (selects, which the static
+  check could not see), then the tenth and eleventh in other files, then the
+  twelfth in a file about elections rather than transport. ⭐ Each refutation
+  was somebody counting a number written down here; a code reading follows the
+  paths the reader thinks of, and four readings had passed over these. It claimed every wait was
   named and none unbounded. `await`'s select had exactly two cases — the
   promise and the caller's context — and no `Close`, so a `Close` during any of
   the six *promise* waits left the goroutine parked, for ever when the caller

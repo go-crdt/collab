@@ -56,21 +56,31 @@ func TestTheWebSocketOpenWaitNamesItself(t *testing.T) {
 // A data channel the page never opens. The fixture is deliberately minimal:
 // readyState "connecting" and listeners that are recorded and never fired, so
 // the only ready case at the select is the cancelled context.
+// ⛔⛔ IT COUNTS WHAT WAS ADDED AND WHAT WAS REMOVED, not what is left. The
+// first version of this fixture recorded only the current listeners and the
+// test asserted the count afterwards, with a comment claiming "the control is
+// that they were ON". There was no control: a review renamed the event keys in
+// webrtc_js.go so that NOTHING was wired, and the test stayed green —
+// `mutate … THE SUITE SURVIVED IT`. Zero-left and never-added are the same
+// number, which is the whole failure mode this file is about, written into the
+// test demonstrating it.
 const neverOpeningChannel = `(() => {
   const listeners = {};
+  let added = 0, removed = 0;
   return {
     readyState: "connecting",
     binaryType: "blob",
     bufferedAmount: 0,
-    addEventListener(event, fn) { (listeners[event] = listeners[event] || []).push(fn); },
+    addEventListener(event, fn) { added++; (listeners[event] = listeners[event] || []).push(fn); },
     removeEventListener(event, fn) {
       const l = listeners[event] || [];
       const i = l.indexOf(fn);
-      if (i >= 0) l.splice(i, 1);
+      if (i >= 0) { l.splice(i, 1); removed++; }
     },
     send() {},
     close() { this.readyState = "closed"; },
-    _events() { return listeners; },
+    _added() { return added; },
+    _removed() { return removed; },
   };
 })()`
 
@@ -93,17 +103,15 @@ func TestTheDataChannelOpenWaitNamesItself(t *testing.T) {
 	if !strings.Contains(err.Error(), "data channel open") {
 		t.Errorf("the error must name which wait stalled; it says %q", err)
 	}
-	// ⛔ And the listeners are off again: a refused open must not leave four
-	// callbacks wired to a channel nobody holds. The control is that they were
-	// ON, or a zero here would mean the walk found nothing to look at.
-	evs := ch.Call("_events")
-	n := 0
-	for _, k := range []string{"open", "message", "error", "close"} {
-		if v := evs.Get(k); v.Truthy() {
-			n += v.Length()
-		}
+	// ⛔ A refused open must not leave callbacks wired to a channel nobody
+	// holds — and the ADDED count is the control, asserted first. Without it,
+	// "nothing is wired now" is satisfied just as well by "nothing was ever
+	// wired", which is exactly what a mutation of the event names produced
+	// while this test stayed green.
+	if added := ch.Call("_added").Int(); added != 4 {
+		t.Fatalf("%d listener(s) were wired, want 4: this test would otherwise pass blind", added)
 	}
-	if n != 0 {
-		t.Errorf("%d listener(s) are still wired after a refused open", n)
+	if removed := ch.Call("_removed").Int(); removed != 4 {
+		t.Errorf("%d listener(s) were removed after a refused open, want 4", removed)
 	}
 }
