@@ -148,7 +148,7 @@ jobs:
       - name: Install govulncheck and the gate that judges it
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.121.0
+          go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.127.0
       - name: Scan, and judge the findings rather than the exit status
         run: |
           # govulncheck exits 0 over an advisory it decides this module does not
@@ -215,11 +215,22 @@ jobs:
   #
   # ⛔ --go FROM THE TOOLCHAIN THAT RAN, not a literal: standard-library findings
   # are decided by one version, and a literal drifts from the `go-version:` above
-  # without anything saying so. (The root job took the same treatment in the
-  # change that added this note's correction; what is left there is the pinned
-  # vulngate@v0.72.0, which Renovate's open #258 moves — a pin inside a `run:`
-  # block is read by no manager without the customManager this organisation's
-  # preset carries.)
+  # without anything saying so. The root job took the same treatment.
+  #
+  # ⛔⛔ THIS PARAGRAPH USED TO END WITH TWO FACTS THAT HAD BOTH GONE FALSE, and
+  # keeping the record is cheaper than pretending nobody was wrong: it said
+  # "what is left there is the pinned vulngate@v0.72.0, which Renovate's open
+  # #258 moves". The root pin was v0.121.0 by then, and #258 merged on
+  # 2026-11-08 — a week before anybody read the sentence again. A comment is a
+  # DATED claim like any other, and this one aged in two places at once.
+  #
+  # ⛔ AND THE TWO LANES JUDGED THE SAME REPOSITORY WITH DIFFERENT JUDGES. This
+  # one installed vulngate@latest while the root job pinned v0.121.0, so the
+  # nested modules were judged by whatever the registry answered that minute
+  # and the root module by a version four releases behind it. A judge and its
+  # subject have to count alike; two judges of one repository certainly do.
+  # Both are v0.127.0 now, and both in the `go install <module>@vN` spelling
+  # this organisation's customManager is the only thing that reads.
   nested-vulnerabilities:
     name: known vulnerabilities (${{ matrix.mod }})
     runs-on: ubuntu-latest
@@ -236,7 +247,7 @@ jobs:
       - name: Install govulncheck and the gate that judges it
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          go install github.com/go-fleettools/fleettools/cmd/vulngate@latest
+          go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.127.0
       - name: Scan this module, and judge the findings rather than the exit status
         working-directory: ${{ matrix.mod }}
         run: |
