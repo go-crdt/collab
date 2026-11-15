@@ -162,12 +162,20 @@ func TestStalledLeavesANilErrorAlone(t *testing.T) {
 //	held by TestReleasingAConnectionTwiceIsANoOp, which is the part that could
 //	stop being true under us.
 //
-//	bcast_js.go:220, after openWith. The one still unheld, and for a measured
-//	reason rather than for want of trying: OpenBroadcastSession SUCCEEDS on a
-//	context that is already over, because a tab alone in a room becomes its host
-//	immediately and the election never waits for anything. Making openWith fail
-//	needs a fixture that can break the election itself, and the BroadcastChannel
-//	fake has no knob at all.
+//	bcast_js.go:220, after openWith. ⛔⛔ THIS ENTRY SAID "the one still unheld,
+//	and for a measured reason": that OpenBroadcastSession SUCCEEDS on a context
+//	that is already over, so no fixture could make openWith fail. It is FALSE
+//	now, and the change that falsified it was #277 — openWith returns ctx.Err()
+//	when the lock election is abandoned instead of falling through to the window
+//	election. A finished context produces `context canceled`, and the guard is
+//	held by TestAFinishedContextRefusesTheWholeSession in
+//	bcast_refusals_js_test.go.
+//
+//	⚠ Worth keeping as a record rather than editing away: a measurement written
+//	into a comment is true the day it is taken and nothing re-runs it. Two
+//	comments in this package carried this one, in different files, and the
+//	commit that changed the behaviour went looking for neither. A review found
+//	both by re-measuring the claim.
 //
 // Two neighbours were in this list and are not any more, both reached without
 // much. peer_js.go:209, after createAnswer, is held by
