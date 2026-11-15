@@ -169,6 +169,14 @@ const fakeWebRTC = `
         return Promise.resolve();
       },
       setRemoteDescription(desc) {
+        if (globalThis.__collabFake.stallRemote) {
+          // Counted BEFORE the promise is returned, so a test can tell that the
+          // call was made and the wait entered. Polling for the wait itself is
+          // not possible here: a stalled promise registers its handlers and
+          // leaves nothing else observable.
+          globalThis.__collabFake.remoteCalls = (globalThis.__collabFake.remoteCalls || 0) + 1;
+          return new Promise(() => {});
+        }
         this.remoteDescription = desc;
         const m = /a=pcid:(\d+)/.exec(desc.sdp || "");
         if (desc.type === "offer" && m && !globalThis.__collabFake.noChannel) {
@@ -195,6 +203,9 @@ const fakeWebRTC = `
   // the data channel's three listeners back on raw addEventListener left the
   // suite GREEN. Those are the listeners whose panic was printed beside a PASS
   // in the first place, so the witness was blind to its own subject.
+  globalThis.__collabRemoteCalls = function () {
+    return globalThis.__collabFake.remoteCalls || 0;
+  };
   globalThis.__collabLive = function () {
     let n = 0;
     const count = (evs) => { for (const e of Object.keys(evs)) n += evs[e].length; };
@@ -978,6 +989,226 @@ func TestAnEndOfCandidatesMarkerIsNotAnAddress(t *testing.T) {
 	}
 }
 
+// ⛔⛔ THE SIXTH WAIT, which #271 missed and which had NEITHER of the two things
+// its five siblings have: it did not name the operation it was waiting on, and
+// it was not bounded at all.
+//
+// `AcceptAnswer` takes no context — it accepts a pasted blob — so the previous
+// `await(context.Background(), …)` left the promise as the only way out: a
+// browser that never settled setRemoteDescription parked the caller forever.
+// That is the #267 family, in the one function that cannot be given a deadline
+// by its caller.
+//
+// ⛔ It was found by `viaonly` (go-fleettools#250) run against this package,
+// not by reading: the comment above the call explains why the CONTEXT is
+// Background, which is true and was never a reason to be unbounded, and that
+// sentence is exactly what made the gap read as deliberate to two reviews.
+//
+// The test hangs rather than failing if the bound is removed, which is why the
+// elapsed time is asserted: a test that hangs is a measurement, and here it is
+// the only one available.
+func TestAcceptAnswerIsBoundedAndNamesTheOperation(t *testing.T) {
+	installFake(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	host, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = host.Close() }()
+	guest, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = guest.Close() }()
+
+	offer, err := host.Offer(ctx, "collab")
+	if err != nil {
+		t.Fatalf("offer: %v", err)
+	}
+	answer, err := guest.Answer(ctx, offer)
+	if err != nil {
+		t.Fatalf("answer: %v", err)
+	}
+
+	// Only now, so that the handshake above is a real one: the stall belongs to
+	// the one call under test and to no other.
+	restore := settleBudget
+	settleBudget = 120 * time.Millisecond
+	defer func() { settleBudget = restore }()
+	setFake("stallRemote", true)
+	defer setFake("stallRemote", false)
+
+	start := time.Now()
+	err = host.AcceptAnswer(answer)
+	if err == nil {
+		t.Fatal("the browser never settled, so it must refuse")
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("it waited %v, so the budget did not bound it", took)
+	}
+	// ⛔ The operation is the point. stalled() reports the same three state
+	// words at every site, so asserting only those would pass for a wait wired
+	// to any of the six names.
+	if !strings.Contains(err.Error(), "setRemoteDescription(answer)") {
+		t.Errorf("the error must name which call stalled; it says %q", err)
+	}
+	// And (answer) rather than a bare name, because Answer waits on the same
+	// browser method with the opposite meaning.
+	if strings.Contains(err.Error(), "setRemoteDescription(offer)") {
+		t.Errorf("that is the other site's name; it says %q", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("the bound's expiry must survive the wrapping, got %v", err)
+	}
+}
+
+// ⛔⛔ CLOSE ENDS A PROMISE WAIT, which it did NOT until a review of this
+// branch's own README sentence went looking. `await`'s select has exactly two
+// cases — the promise and ctx.Done() — and no p.quit, so a Close during any of
+// the six promise waits left the goroutine parked, and with a caller that
+// passed context.Background() it parked for ever. #274 wired Close into the
+// gathering wait and the two channel waits and left these six; the README then
+// said "Close ends a wait in progress", which was true of three waits of nine.
+//
+// ⛔ THE SENTENCE IS WHAT CAUGHT IT. The code was reviewed twice and read as
+// finished; a claim of completeness written in prose is checkable in a way the
+// code was not, and it failed.
+//
+// Deterministic the same way as the gathering test: the promise never settles,
+// so Answer is inside the wait when Close arrives, and the fake's call counter
+// says when that is.
+func TestClosingAPeerEndsAPromiseWait(t *testing.T) {
+	installFake(t)
+	offer, err := offerer2Offer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	setFake("stallRemote", true)
+	defer setFake("stallRemote", false)
+
+	type result struct {
+		answer string
+		err    error
+	}
+	out := make(chan result, 1)
+	go func() {
+		// ⛔ context.Background() on purpose: with no deadline, ONLY Close can
+		// end this.
+		//
+		// ⚠ I first wrote that this test "hangs rather than failing" without
+		// the fix. A review measured it and that UNDERSTATES it: the select
+		// below has its own `time.After`, so the mutation is caught by an
+		// ASSERTION at about three seconds, not by the suite's timeout. The
+		// distinction is the one this file keeps paying for — an assertion says
+		// what the guard is for, a timeout only says something stopped.
+		answer, err := p.Answer(context.Background(), offer)
+		out <- result{answer, err}
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for js.Global().Call("__collabRemoteCalls").Int() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("Answer never reached setRemoteDescription")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case r := <-out:
+		// ⛔ ErrClosed, not the context error that closing produced: Close is
+		// the stronger statement, and a caller told "deadline exceeded" about a
+		// peer it closed itself looks for a network fault.
+		if !errors.Is(r.err, ErrClosed) {
+			t.Fatalf("want ErrClosed, got %v (answer %q)", r.err, r.answer)
+		}
+		if r.answer != "" {
+			t.Errorf("a closed peer must hand back no answer; it gave %q", r.answer)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not end the wait: it is still parked")
+	}
+}
+
+// ⛔ The seventh and eighth waits name themselves too. Both are waits on the
+// browser that are NOT promises, so they cannot go through awaited and `viaonly`
+// cannot see them — a static check covers the shape it was given, and the claim
+// "every wait names its call" was broader than the check.
+// ⛔ The two sites are told apart by the ROLE, not by a knob: an answerer has
+// no channel of its own and waits for one to ARRIVE, while an offerer holds the
+// channel it created and waits for it to OPEN. Writing this test with one knob
+// and two rows put both rows in the same wait — found by running it, and the
+// reason the rows below differ in what they call rather than in what they set.
+func TestTheChannelWaitsNameWhichOneStalled(t *testing.T) {
+	installFake(t)
+	// noChannel for both: the answerer's channel is never delivered, and the
+	// offerer's is therefore never opened either.
+	setFake("noChannel", true)
+	defer setFake("noChannel", false)
+
+	offer, err := offerer2Offer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name, op string
+		reach    func(*Peer, context.Context) error
+	}{
+		{"an answerer waiting for the offerer's channel", "datachannel",
+			func(p *Peer, ctx context.Context) error {
+				if _, err := p.Answer(context.Background(), offer); err != nil {
+					return err
+				}
+				_, err := p.DataChannel(ctx)
+				return err
+			}},
+		{"an offerer waiting for its own channel to open", "channel open",
+			func(p *Peer, ctx context.Context) error {
+				if _, err := p.Offer(context.Background(), "collab"); err != nil {
+					return err
+				}
+				_, err := p.DataChannel(ctx)
+				return err
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := NewPeer(PeerConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = p.Close() }()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			err = tc.reach(p, ctx)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("want DeadlineExceeded, got %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.op) {
+				t.Errorf("the error must name which wait stalled; it says %q", err)
+			}
+			// And the three state words are still there: naming the operation
+			// replaces nothing.
+			for _, want := range []string{"connection ", "ice ", "gathering "} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("it should still name %q; it says %q", want, err)
+				}
+			}
+		})
+	}
+}
+
 // ⛔ The budget's own expiry path, which no test could reach while the budget
 // was a const: a run with NO caller deadline waits ICEGatherBudget, and half a
 // minute is a test nobody runs. Shortening it is the whole reason the budget is
@@ -1320,7 +1551,7 @@ func TestACancelledExchangeSaysWhereItStopped(t *testing.T) {
 			_, err := p.Offer(cancelled(), "collab")
 			return err
 		}},
-		{"an answer, cancelled before setRemoteDescription", "setRemoteDescription", func(p *Peer) error {
+		{"an answer, cancelled before setRemoteDescription", "setRemoteDescription(offer)", func(p *Peer) error {
 			_, err := p.Answer(cancelled(), offer)
 			return err
 		}},

@@ -77,7 +77,13 @@ func (t *wsTransport) open(ctx context.Context) (carrierConn, error) {
 		return c, nil
 	case <-ctx.Done():
 		c.release()
-		return nil, ctx.Err()
+		// ⛔ THE TENTH WAIT ON THE BROWSER, and it said nothing about itself:
+		// a bare "context deadline exceeded", without even the three state
+		// words the peer's waits carry. Found by a review COUNTING the selects
+		// of the package against a README sentence claiming every wait names
+		// its call — the third time that claim was wider than the code, and
+		// the first time the gap was in another file.
+		return nil, fmt.Errorf("websocket open: %w", ctx.Err())
 	}
 }
 
