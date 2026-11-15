@@ -225,12 +225,19 @@ jobs:
   # DATED claim like any other, and this one aged in two places at once.
   #
   # ⛔ AND THE TWO LANES JUDGED THE SAME REPOSITORY WITH DIFFERENT JUDGES. This
-  # one installed vulngate@latest while the root job pinned v0.121.0, so the
-  # nested modules were judged by whatever the registry answered that minute
-  # and the root module by a version four releases behind it. A judge and its
-  # subject have to count alike; two judges of one repository certainly do.
-  # Both are v0.127.0 now, and both in the `go install <module>@vN` spelling
-  # this organisation's customManager is the only thing that reads.
+  # one installed vulngate@latest while the root job pinned v0.121.0 — SIX minor
+  # releases apart, not the four an earlier draft of this comment said — so the
+  # same advisory could be a finding in one lane and a notice in the other with
+  # nothing saying why. A judge and its subject have to count alike; two judges
+  # of one repository certainly do.
+  #
+  # ⚠ What each half of the fix actually does, because they are not the same
+  # thing and a review measured the difference: `@latest` already resolved to
+  # v0.127.0, so THIS lane's behaviour is unchanged and the pin buys only
+  # watchability — a float in a `run:` block is read by nothing, so it is not a
+  # pin that drifts, it is a version nobody chose. The ROOT lane is the one that
+  # moves, v0.121.0 to v0.127.0. Both now use the `go install <module>@vN`
+  # spelling this organisation's customManager is the only thing that reads.
   nested-vulnerabilities:
     name: known vulnerabilities (${{ matrix.mod }})
     runs-on: ubuntu-latest
