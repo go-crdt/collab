@@ -16,7 +16,15 @@ type Acknowledgement struct {
 }
 
 // Acknowledged reports what each connected participant has acknowledged, sorted
-// by site, and false if the document is not open or nobody has joined.
+// by site. The bool is false only when the document is not open; an open room
+// with nobody in it is an empty slice and true, because "the document is gone"
+// and "the room emptied" are different answers and a caller diagnosing a stall
+// acts differently on each.
+//
+// ⭐ IT IS MOST USEFUL EXACTLY WHERE [Server.Stable] GIVES UP. Stable returns
+// false while any participant has acknowledged nothing, because the meet is
+// then nothing — and that is the moment somebody wants to know WHICH one. This
+// returns true and names it, with a nil Have.
 //
 // ⛔ WHY THIS EXISTS, AND IT IS THE AXIS [Server.Stable] CANNOT SHOW. Stable
 // returns the MEET — the element-wise minimum over the participants — so a
@@ -48,9 +56,6 @@ func (s *Server) Acknowledged(name string) ([]Acknowledgement, bool) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if len(d.subs) == 0 {
-		return nil, false
-	}
 	out := make([]Acknowledgement, 0, len(d.subs))
 	for sub := range d.subs {
 		// ⛔ Cloned, not aliased: `have` is guarded by d.mu, and handing the
