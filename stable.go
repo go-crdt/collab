@@ -38,8 +38,8 @@ type Acknowledgement struct {
 //	site 8:    acknowledged up to 20 of 20
 //
 // which is seven "behind" lines for one lagging acknowledger: site 8's own
-// operations had reached everybody, and site 8 had not reached everybody else's
-// last two. The meet is a minimum over acknowledgers, so the acknowledger is
+// operations had reached everybody, and site 8 was short of everybody else's
+// last two — three of site 7's, which is where the 17 comes from. The meet is a minimum over acknowledgers, so the acknowledger is
 // the thing to print — and the server is the only place that knows it.
 //
 // ⚠ It is a snapshot of the participants connected AT THIS MOMENT, like Stable:
