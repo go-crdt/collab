@@ -378,10 +378,12 @@ func (p *Peer) untilClosed(ctx context.Context) (context.Context, context.Cancel
 // see them — they are not calls to `await` — which is worth recording, because a
 // static check covers the shape it was given and the claim was broader than the
 // check.
+// ⛔ NO nil GUARD. Both call sites are inside `case <-ctx.Done():`, where
+// ctx.Err() is non-nil by construction, so a guard here could never fire — a
+// mutsweep of the file found it surviving its own deletion, and this branch
+// removed another unreachable guard for exactly that reason. [Peer.stalled]
+// keeps its own, because it IS called where the error may be nil.
 func (p *Peer) stalledAt(what string, err error) error {
-	if err == nil {
-		return nil
-	}
 	return p.stalled(fmt.Errorf("%s: %w", what, err))
 }
 

@@ -1101,8 +1101,14 @@ func TestClosingAPeerEndsAPromiseWait(t *testing.T) {
 	out := make(chan result, 1)
 	go func() {
 		// ⛔ context.Background() on purpose: with no deadline, ONLY Close can
-		// end this. Before the fix the test hangs rather than failing, which is
-		// how this defect announces itself.
+		// end this.
+		//
+		// ⚠ I first wrote that this test "hangs rather than failing" without
+		// the fix. A review measured it and that UNDERSTATES it: the select
+		// below has its own `time.After`, so the mutation is caught by an
+		// ASSERTION at about three seconds, not by the suite's timeout. The
+		// distinction is the one this file keeps paying for — an assertion says
+		// what the guard is for, a timeout only says something stopped.
 		answer, err := p.Answer(context.Background(), offer)
 		out <- result{answer, err}
 	}()

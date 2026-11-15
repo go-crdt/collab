@@ -153,6 +153,10 @@ func openDataChannel(ctx context.Context, ch js.Value,
 		return c, nil
 	case <-ctx.Done():
 		c.release()
-		return nil, ctx.Err()
+		// ⛔ The eleventh, and the last: a data channel that never reaches
+		// "open". Named for the same reason as the WebSocket's above — a
+		// caller holding "context deadline exceeded" cannot tell a carrier
+		// that never opened from any other stall.
+		return nil, fmt.Errorf("data channel open: %w", ctx.Err())
 	}
 }

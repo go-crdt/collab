@@ -212,12 +212,19 @@ it wrote while away. After that, operations and presence flow both ways.
   one of them.** A stalled handshake used to report the connection, ICE and
   gathering states — the same three words at every site — so the error said
   that something had stopped and not *what*. Each wait now carries its
-  operation: `createOffer`, `setLocalDescription(offer)`,
-  `setRemoteDescription(offer)`, `createAnswer`,
-  `setLocalDescription(answer)`, `setRemoteDescription(answer)`, and the two
-  that are selects rather than promises, `datachannel` and `channel open`.
-  ⛔⛔ **This sentence is here because an earlier version of it was false, in
-  both halves, and saying it is what proved it.** It claimed every wait was
+  operation — **eleven of them, counted**: the six promises `createOffer`,
+  `setLocalDescription(offer)`, `setRemoteDescription(offer)`, `createAnswer`,
+  `setLocalDescription(answer)`, `setRemoteDescription(answer)`; the two peer
+  selects `datachannel` and `channel open`; the gathering wait; and the two
+  carriers' own, `websocket open` and `data channel open`.
+  ⛔⛔ **This sentence is here because THREE earlier versions of it were too
+  wide, and writing it out is what proved that each time.** A review counted
+  the package's waits against the claim and found a gap in all three rounds:
+  the sixth promise wait, then the seventh and eighth (selects, which the
+  static check could not see), then the tenth and eleventh — in other files of
+  this package, saying nothing at all, not even the three state words. ⭐ Each
+  refutation was somebody counting a number written down here; a code reading
+  follows the paths the reader thinks of. It claimed every wait was
   named and none unbounded. `await`'s select had exactly two cases — the
   promise and the caller's context — and no `Close`, so a `Close` during any of
   the six *promise* waits left the goroutine parked, for ever when the caller
