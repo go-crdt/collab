@@ -187,9 +187,29 @@ func (p *Peer) AcceptAnswer(blob string) error {
 	if err != nil {
 		return err
 	}
-	// setRemoteDescription settles at once in a browser; it is not waited on with
-	// the caller's context because there is no call after it to be blocked.
-	_, err = await(context.Background(), p.pc.Call("setRemoteDescription", describe(sig)))
+	// ⛔ THE SIXTH SITE, AND IT WAS THE ONE THAT DID NOT NAME ITSELF. #271 gave
+	// five of the six browser promises an operation name, so that a wait which
+	// stalls says WHICH call stalled; this one went through bare `await` and
+	// stalled anonymously. The comment below is why the CONTEXT is
+	// Background — a deliberate choice, still true — and it says nothing about
+	// the naming, which is exactly how the gap read as intentional to two
+	// reviews. Found by viaonly (go-fleettools#250) on this package, which is
+	// what the command was written for.
+	//
+	// ⛔⛔ AND IT WAS NOT BOUNDED EITHER. `await(context.Background(), …)` leaves
+	// the promise as the only way out, so a browser that never settles this call
+	// parks AcceptAnswer forever — the #267 family, in a function that cannot
+	// take a deadline from its caller because it has no context parameter. The
+	// comment that stood here, "setRemoteDescription settles at once in a
+	// browser", is an assumption ABOUT THE BROWSER, and #274 is the record of
+	// what that assumption is worth: a browser that gathers and never says so.
+	// It is true about the context and it was never a reason to be unbounded.
+	ctx, cancel := context.WithTimeout(context.Background(), settleBudget)
+	defer cancel()
+	// The caller's context is still not used — there is none, and there is no
+	// call after this one to be blocked — so this is a bound, not a deadline
+	// somebody chose.
+	_, err = p.awaited(ctx, "setRemoteDescription(answer)", p.pc.Call("setRemoteDescription", describe(sig)))
 	return err
 }
 
@@ -215,7 +235,12 @@ func (p *Peer) Answer(ctx context.Context, remoteOffer string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := p.awaited(ctx, "setRemoteDescription", p.pc.Call("setRemoteDescription", describe(sig))); err != nil {
+	// ⛔ NAMED (offer), because the same browser method is now waited on at two
+	// sites with opposite meanings: here the remote OFFER, and in AcceptAnswer
+	// the remote ANSWER. A bare "setRemoteDescription" in an error would not
+	// say which side of the exchange stalled — the same reason
+	// setLocalDescription carries (offer) and (answer).
+	if _, err := p.awaited(ctx, "setRemoteDescription(offer)", p.pc.Call("setRemoteDescription", describe(sig))); err != nil {
 		return "", err
 	}
 	answer, err := p.awaited(ctx, "createAnswer", p.pc.Call("createAnswer"))
@@ -407,6 +432,25 @@ func (p *Peer) awaited(ctx context.Context, what string, promise js.Value) (js.V
 // slowest healthy run observed so that expiry means "stuck", which is the only
 // thing it is allowed to mean.
 const ICEGatherBudget = 30 * time.Second
+
+// SettleBudget is how long [Peer.AcceptAnswer] gives the browser to settle
+// setRemoteDescription. It exists because AcceptAnswer takes NO context — it
+// accepts a pasted blob and has no call after it to be blocked — so there was
+// nothing bounding that wait at all, and a browser that never settled it parked
+// the caller forever.
+//
+// ⚠ IT IS NOT A MEASURED NUMBER, and saying so is the point. Nothing here has
+// measured how long a browser takes to set a remote answer; it is local work
+// with no network in it, so the honest statement is that this is an upper bound
+// chosen to sit far above anything healthy. Its only job is to turn a hang into
+// an error that names the operation. A bound that is too generous still does
+// that; one that is too tight turns a slow machine into a failure, which is the
+// mistake [ICEGatherBudget]'s first value made.
+const SettleBudget = 30 * time.Second
+
+// settleBudget is what the wait reads, so a test can shorten it. Unexported for
+// the same reason as iceGatherBudget below.
+var settleBudget = SettleBudget
 
 // iceGatherBudget is what the wait actually reads, so a test can shorten it.
 //

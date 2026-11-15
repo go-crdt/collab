@@ -208,6 +208,25 @@ it wrote while away. After that, operations and presence flow both ways.
   ends a wait in progress instead of leaving it parked until the budget. Every
   one of those outcomes is a test, and each is mutation-checked.
 
+- **Every wait on the browser says which call stalled, and none of them is
+  unbounded.** A stalled handshake used to report the connection, ICE and
+  gathering states — the same three words at all six sites — so the error said
+  that something had stopped and not *what*. Each wait now carries its
+  operation: `createOffer`, `setLocalDescription(offer)`,
+  `setRemoteDescription(offer)`, `createAnswer`,
+  `setLocalDescription(answer)`, `setRemoteDescription(answer)`. ⛔ **That
+  contract reached five sites of six for two releases.** `Peer.AcceptAnswer`
+  went through the bare helper, so it stalled anonymously *and* without a bound
+  — it takes no context, by design, and `context.Background()` left the
+  browser's promise as the only way out, which is a hang rather than an error.
+  It is bounded by `SettleBudget` now, and the error names the call. The comment
+  above it explained why the *context* is `Background` — true, and never a
+  reason to be unbounded — which is exactly how a missing sixth case read as
+  deliberate to two reviews. It was found by `viaonly`, a static check that asks
+  which calls bypass the wrapper they were supposed to go through, run against
+  this package; reading had not found it, and neither had five tests written for
+  the five sites that were right.
+
 ## What a binding needs
 
 An editor cannot be handed the whole text on every keystroke somebody else

@@ -169,6 +169,7 @@ const fakeWebRTC = `
         return Promise.resolve();
       },
       setRemoteDescription(desc) {
+        if (globalThis.__collabFake.stallRemote) return new Promise(() => {});
         this.remoteDescription = desc;
         const m = /a=pcid:(\d+)/.exec(desc.sdp || "");
         if (desc.type === "offer" && m && !globalThis.__collabFake.noChannel) {
@@ -978,6 +979,82 @@ func TestAnEndOfCandidatesMarkerIsNotAnAddress(t *testing.T) {
 	}
 }
 
+// ⛔⛔ THE SIXTH WAIT, which #271 missed and which had NEITHER of the two things
+// its five siblings have: it did not name the operation it was waiting on, and
+// it was not bounded at all.
+//
+// `AcceptAnswer` takes no context — it accepts a pasted blob — so the previous
+// `await(context.Background(), …)` left the promise as the only way out: a
+// browser that never settled setRemoteDescription parked the caller forever.
+// That is the #267 family, in the one function that cannot be given a deadline
+// by its caller.
+//
+// ⛔ It was found by `viaonly` (go-fleettools#250) run against this package,
+// not by reading: the comment above the call explains why the CONTEXT is
+// Background, which is true and was never a reason to be unbounded, and that
+// sentence is exactly what made the gap read as deliberate to two reviews.
+//
+// The test hangs rather than failing if the bound is removed, which is why the
+// elapsed time is asserted: a test that hangs is a measurement, and here it is
+// the only one available.
+func TestAcceptAnswerIsBoundedAndNamesTheOperation(t *testing.T) {
+	installFake(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	host, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = host.Close() }()
+	guest, err := NewPeer(PeerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = guest.Close() }()
+
+	offer, err := host.Offer(ctx, "collab")
+	if err != nil {
+		t.Fatalf("offer: %v", err)
+	}
+	answer, err := guest.Answer(ctx, offer)
+	if err != nil {
+		t.Fatalf("answer: %v", err)
+	}
+
+	// Only now, so that the handshake above is a real one: the stall belongs to
+	// the one call under test and to no other.
+	restore := settleBudget
+	settleBudget = 120 * time.Millisecond
+	defer func() { settleBudget = restore }()
+	setFake("stallRemote", true)
+	defer setFake("stallRemote", false)
+
+	start := time.Now()
+	err = host.AcceptAnswer(answer)
+	if err == nil {
+		t.Fatal("the browser never settled, so it must refuse")
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("it waited %v, so the budget did not bound it", took)
+	}
+	// ⛔ The operation is the point. stalled() reports the same three state
+	// words at every site, so asserting only those would pass for a wait wired
+	// to any of the six names.
+	if !strings.Contains(err.Error(), "setRemoteDescription(answer)") {
+		t.Errorf("the error must name which call stalled; it says %q", err)
+	}
+	// And (answer) rather than a bare name, because Answer waits on the same
+	// browser method with the opposite meaning.
+	if strings.Contains(err.Error(), "setRemoteDescription(offer)") {
+		t.Errorf("that is the other site's name; it says %q", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("the bound's expiry must survive the wrapping, got %v", err)
+	}
+}
+
 // ⛔ The budget's own expiry path, which no test could reach while the budget
 // was a const: a run with NO caller deadline waits ICEGatherBudget, and half a
 // minute is a test nobody runs. Shortening it is the whole reason the budget is
@@ -1320,7 +1397,7 @@ func TestACancelledExchangeSaysWhereItStopped(t *testing.T) {
 			_, err := p.Offer(cancelled(), "collab")
 			return err
 		}},
-		{"an answer, cancelled before setRemoteDescription", "setRemoteDescription", func(p *Peer) error {
+		{"an answer, cancelled before setRemoteDescription", "setRemoteDescription(offer)", func(p *Peer) error {
 			_, err := p.Answer(cancelled(), offer)
 			return err
 		}},
