@@ -94,12 +94,65 @@ func assertNamesTheMissingChannel(t *testing.T, err error) {
 // with the test's own context and waited the ten minutes `go test` allows -- so
 // here the waiting is the subject rather than an accident, and bounded.
 //
-// Its sibling, bcast_js.go:220 after openWith, is NOT held and could not be by
-// this means: measured, OpenBroadcastSession succeeds on a context that is
-// already over, because a tab alone in a room becomes its host immediately and
-// the election never has to wait for anything. Making openWith fail needs a
-// fixture that can break the election itself, which the BroadcastChannel fake
-// has no knob for.
+// ⛔⛔ THE PARAGRAPH THAT STOOD HERE IS NO LONGER TRUE, AND THE CHANGE THAT
+// FALSIFIED IT WAS MINE. It said, as measured fact, that the sibling guard
+// after openWith "could not be held by this means: measured,
+// OpenBroadcastSession succeeds on a context that is already over, because a
+// tab alone in a room becomes its host immediately and the election never has
+// to wait for anything."
+//
+// #277 made openWith return ctx.Err() when the LOCK election is abandoned
+// rather than falling through to the window election, so a finished context now
+// produces `context canceled` from OpenBroadcastSession. A review measured both
+// halves: the sentence above, and the guard it called unholdable, which is held
+// by TestAFinishedContextRefusesTheWholeSession below.
+//
+// ⚠ Recorded rather than quietly deleted, because the lesson is the expensive
+// part: a measurement written into a comment is true on the day it is taken and
+// nothing re-runs it. This one survived in the repository for as long as the
+// behaviour it described, and the commit that changed that behaviour did not
+// come looking for it.
+// ⛔ THE GUARD TWO COMMENTS CALLED UNHOLDABLE. bcast_js.go:220, after openWith:
+// deleted, OpenBroadcastSession returns a session built on a failed election,
+// and closes nothing — the bus it opened stays open, because that branch is
+// also what closes it.
+//
+// It became holdable with #277, which made openWith refuse a finished context
+// instead of falling through to the window election. No new fixture was needed
+// at all: the "knob the BroadcastChannel fake has none of", as both comments
+// put it, turned out to be the context the caller already holds.
+//
+// ⚠ This is a USER-VISIBLE change to an exported function, which is why it is
+// a test and a README line and not only a commit message: a caller that passed
+// a cancelled context used to get a working session back.
+func TestAFinishedContextRefusesTheWholeSession(t *testing.T) {
+	js.Global().Call("eval", fakeBroadcastChannel)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	s, err := OpenBroadcastSession(ctx, "room:over-before-it-began", time.Second)
+	if err == nil {
+		t.Fatal("a finished context must refuse, not hand back a session")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("the context's own error must survive, got %v", err)
+	}
+	if s != nil {
+		t.Error("a session was returned alongside the error")
+	}
+	// The control that this is about the CONTEXT and not about the fake: the
+	// same call with a live context succeeds, so the refusal above cannot come
+	// from a broken fixture.
+	live, err := OpenBroadcastSession(t.Context(), "room:live-control", time.Second)
+	if err != nil {
+		t.Fatalf("the control: a live context must still open a session, got %v", err)
+	}
+	if live != nil {
+		_ = live.Close()
+	}
+}
+
 func TestATabThatCannotReachAHostInTimeIsToldSo(t *testing.T) {
 	js.Global().Call("eval", fakeBroadcastChannel)
 

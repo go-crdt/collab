@@ -270,5 +270,28 @@ func openWith(ctx context.Context, bc *busConn, room string, window time.Duratio
 	if role, byLock := electByLock(ctx, room); byLock {
 		return wireRole(ctx, bc, role)
 	}
+	// ⛔ A LOCK ELECTION THIS TAB GAVE UP ON IS NOT A BROWSER WITHOUT LOCKS
+	// (#276). electByLock returns (0, false) for both, because its bool says
+	// only "the lock answered" — so without this, a cancelled or expired
+	// context fell through and started the WINDOW election: a second election
+	// nobody asked for, on a context that was already finished.
+	//
+	// ⚠⚠ NOT HELD BY A TEST EITHER, and measured rather than guessed: a
+	// mutation inverting this condition SURVIVES, because electRole refuses the
+	// same finished context with the same error and does not touch the bus on
+	// the way (a nil busConn passed through it does not panic). So the ERROR a
+	// caller sees is identical with or without this, and what the guard buys is
+	// not ENTERING that election at all.
+	//
+	// ⚠ What I did not measure: whether entering it has any other effect — a
+	// hello posted to the bus, a listener wired — before electRole refuses. The
+	// guard stays because the distinction #276 asks for is cheap to state here
+	// and because electRole's ordering is not this function's to rely on; the
+	// distinction that IS held deterministically lives one level down, where
+	// electByLock refuses to ask the browser at all and the request count says
+	// so.
+	if err := ctx.Err(); err != nil {
+		return 0, nil, nil, err
+	}
 	return hostOrJoinBus(ctx, bc, window)
 }
