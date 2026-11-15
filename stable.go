@@ -1,6 +1,78 @@
 package collab
 
-import "github.com/go-crdt/crdt"
+import (
+	"sort"
+
+	"github.com/go-crdt/crdt"
+)
+
+// An Acknowledgement is what one participant connected NOW has told the server
+// it has applied.
+type Acknowledgement struct {
+	Site crdt.SiteID
+	// Have is nil while that participant has said nothing, which is what takes
+	// the meet to nothing — see [Server.Stable].
+	Have crdt.CompositeVersion
+}
+
+// Acknowledged reports what each connected participant has acknowledged, sorted
+// by site. The bool is false only when the document is not open; an open room
+// with nobody in it is an empty slice and true, because "the document is gone"
+// and "the room emptied" are different answers and a caller diagnosing a stall
+// acts differently on each.
+//
+// ⭐ IT IS MOST USEFUL EXACTLY WHERE [Server.Stable] GIVES UP. Stable returns
+// false while any participant has acknowledged nothing, because the meet is
+// then nothing — and that is the moment somebody wants to know WHICH one. This
+// returns true and names it, with a nil Have.
+//
+// ⛔ WHY THIS EXISTS, AND IT IS THE AXIS [Server.Stable] CANNOT SHOW. Stable
+// returns the MEET — the element-wise minimum over the participants — so a
+// single participant two operations behind caps it for every sender except
+// itself, and a report written per SENDER shows one straggler as N faults.
+// go-crdt/collab#204 is exactly that: twice on the `arch amd64` lane, at 124
+// and then 145 of 160, the breakdown read
+//
+//	site 1..6: acknowledged up to 18 of 20  <-- behind
+//	site 7:    acknowledged up to 17 of 20  <-- behind
+//	site 8:    acknowledged up to 20 of 20
+//
+// which is seven "behind" lines for one lagging acknowledger: site 8's own
+// operations had reached everybody, and site 8 was short of everybody else's
+// last two — three of site 7's, which is where the 17 comes from. The meet is a minimum over acknowledgers, so the acknowledger is
+// the thing to print — and the server is the only place that knows it.
+//
+// ⚠ It is a snapshot of the participants connected AT THIS MOMENT, like Stable:
+// a replica that is offline holding work of its own is not in it and cannot be.
+// A site appears at most once, because a rejoin displaces the session already
+// holding that identity and removes it from the document before the new one is
+// added.
+func (s *Server) Acknowledged(name string) ([]Acknowledgement, bool) {
+	s.mu.Lock()
+	d, open := s.docs[name]
+	s.mu.Unlock()
+	if !open {
+		return nil, false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]Acknowledgement, 0, len(d.subs))
+	for sub := range d.subs {
+		// ⛔ Cloned, not aliased: `have` is guarded by d.mu, and handing the
+		// caller the server's own map would be a data race the moment the next
+		// acknowledgement arrives.
+		a := Acknowledgement{Site: sub.site}
+		if sub.have != nil {
+			a.Have = sub.have.Clone()
+		}
+		out = append(out, a)
+	}
+	// ⛔ Sorted, because d.subs is a map and Go randomises its iteration: a
+	// diagnostic whose order moves between runs cannot be compared with the
+	// previous run, which is the only thing a flake report is ever used for.
+	sort.Slice(out, func(i, j int) bool { return out[i].Site < out[j].Site })
+	return out, true
+}
 
 // What every participant has certainly seen.
 //

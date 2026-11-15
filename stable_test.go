@@ -31,6 +31,120 @@ func totalSeen(v crdt.CompositeVersion) uint64 {
 // It is asked here rather than assumed because the answer decides whether a
 // policy for collecting is worth writing. A meet that never moves is a feature
 // nobody can use.
+
+// perAcknowledger reports what each participant has told the server it applied,
+// totalled across every sender — the axis the meet is a minimum OVER.
+//
+// ⛔ This is the one perSite cannot give. perSite answers "how far has the meet
+// got with site k's operations", which shows a single straggler as one "behind"
+// line per sender. This answers "how much of the history has participant k
+// applied", so a lagging participant is one short line and everybody else is
+// complete. The two together account for the same stall from both ends.
+func perAcknowledger(acks []collab.Acknowledgement, known bool, editors, rounds int) string {
+	// ⛔ TWO WAYS THERE IS NO TABLE, AND THEY ARE DIFFERENT FINDINGS. "The
+	// server does not know this document" is about the test's own premise — a
+	// wrong name, or a room evicted under it — and "the room emptied" is about
+	// the subject. An earlier version of this printed the second for both.
+	if !known {
+		return "\tthe server does not know this document, so the premise of this wait is gone\n"
+	}
+	if len(acks) == 0 {
+		return "\tthe server reports no connected participant, which is itself the finding\n"
+	}
+	want := uint64(editors * rounds)
+	var b strings.Builder
+	b.WriteString("\tand by ACKNOWLEDGER, which is the axis the meet is a minimum over:\n")
+	for _, a := range acks {
+		if a.Have == nil {
+			fmt.Fprintf(&b, "\tparticipant %d: has acknowledged NOTHING, which takes the meet to nothing\n", a.Site)
+			continue
+		}
+		applied := totalSeen(a.Have)
+		mark := ""
+		if applied < want {
+			mark = fmt.Sprintf("  <-- behind by %d", want-applied)
+		}
+		fmt.Fprintf(&b, "\tparticipant %d: applied %d of %d%s\n", a.Site, applied, want, mark)
+	}
+	return b.String()
+}
+
+// ⛔⛔ THE FAILURE MESSAGE IS CODE NOTHING RUNS. perAcknowledger exists only on
+// a path this suite does not take when it passes, which is how a diagnostic
+// rots: the next occurrence prints a panic, or nothing, instead of the answer.
+// So it is asserted directly, against the SECOND occurrence's own numbers.
+func TestTheAcknowledgerTableNamesTheStraggler(t *testing.T) {
+	const editors, rounds = 8, 20
+	part := crdt.Part{Kind: crdt.PartText, Name: "body"}
+	ver := func(from map[int]uint64) crdt.CompositeVersion {
+		vv := crdt.VersionVector{}
+		for i := 1; i <= editors; i++ {
+			n := uint64(rounds)
+			if v, ok := from[i]; ok {
+				n = v
+			}
+			vv[crdt.SiteID(i)] = n
+		}
+		return crdt.CompositeVersion{part: vv}
+	}
+	// ⛔ go-crdt/collab#204's second occurrence, reconstructed so the numbers
+	// are ITS numbers. A first version of this fixture gave the straggler 18 of
+	// its OWN twenty, which cannot happen — a site authors its operations, so
+	// it holds all of them — and totalled 144 against the occurrence's 145. A
+	// review caught the discrepancy, and a fixture off by one from the incident
+	// it names is a fixture that proves something else.
+	//
+	// The published per-sender table was 18×6, 17, 20 = 145. That is this: one
+	// participant short of everybody ELSE's last two (three for site 7), and
+	// complete on its own.
+	straggler := ver(map[int]uint64{1: 18, 2: 18, 3: 18, 4: 18, 5: 18, 6: 18, 7: 17})
+	acks := make([]collab.Acknowledgement, 0, editors)
+	for i := 1; i < editors; i++ {
+		acks = append(acks, collab.Acknowledgement{Site: crdt.SiteID(i), Have: ver(nil)})
+	}
+	acks = append(acks, collab.Acknowledgement{Site: crdt.SiteID(editors), Have: straggler})
+
+	out := perAcknowledger(acks, true, editors, rounds)
+	if n := strings.Count(out, "<-- behind"); n != 1 {
+		t.Errorf("ONE straggler must read as one line, %d did:\n%s", n, out)
+	}
+	if !strings.Contains(out, "participant 8: applied 145 of 160  <-- behind by 15") {
+		t.Errorf("it must name the participant and the gap, with the occurrence's own total; it said:\n%s", out)
+	}
+	// ⛔ And the complete ones must be LISTED and unmarked. Without this, a
+	// formatter that printed only the stragglers would pass every assertion
+	// above — the reader would see one line and no idea whether the other seven
+	// were fine or simply omitted.
+	for i := 1; i < editors; i++ {
+		want := fmt.Sprintf("participant %d: applied 160 of 160\n", i)
+		if !strings.Contains(out, want) {
+			t.Errorf("a complete participant must be listed unmarked as %q; it said:\n%s", want, out)
+		}
+	}
+
+	// A participant that has said nothing is the case that takes the meet to
+	// nothing, and it must not read as "applied 0" among the others.
+	silent := perAcknowledger([]collab.Acknowledgement{{Site: 3}}, true, editors, rounds)
+	if !strings.Contains(silent, "participant 3: has acknowledged NOTHING") {
+		t.Errorf("silence is not zero; it said %q", silent)
+	}
+	// ⛔ AND THE TWO WAYS THERE IS NO TABLE ARE DIFFERENT ANSWERS. An open room
+	// that emptied is a finding about this test; a document the server does not
+	// know is a finding about the test's own premise, and reading the second as
+	// the first would send the next reader after the wrong thing. A review
+	// caught this message asserting the first for both.
+	if empty := perAcknowledger(nil, true, editors, rounds); !strings.Contains(empty, "no connected participant") {
+		t.Errorf("an emptied room must say so; it said %q", empty)
+	}
+	gone := perAcknowledger(nil, false, editors, rounds)
+	if !strings.Contains(gone, "does not know this document") {
+		t.Errorf("an unknown document must say THAT, not that the room is empty; it said %q", gone)
+	}
+	if strings.Contains(gone, "no connected participant") {
+		t.Errorf("the two must not read alike; it said %q", gone)
+	}
+}
+
 // perSite reports what each participant is acknowledged up to, and how far
 // short of its own contribution that is.
 //
@@ -38,6 +152,9 @@ func totalSeen(v crdt.CompositeVersion) uint64 {
 // 124 of 160 (go-crdt/collab#204): the arithmetic rules out one participant
 // having stopped -- a single site stuck would leave at least 140 -- and cannot
 // choose among the ways several could be a little behind. A breakdown can.
+//
+// ⚠ What it cannot do is name the ACKNOWLEDGER, and the second occurrence
+// showed why that matters: see perAcknowledger above.
 func perSite(v crdt.CompositeVersion, editors, rounds int) string {
 	var b strings.Builder
 	for i := 1; i <= editors; i++ {
@@ -131,15 +248,27 @@ func TestWhatEverybodyHasSeenAdvances(t *testing.T) {
 			// stuck would leave at least 140) and cannot choose among the
 			// rest. A per-site breakdown can.
 			v, _ := srv.Stable("paper")
+			// ⛔⛔ THE SENDER TABLE IS THE WRONG AXIS ON ITS OWN, which the
+			// SECOND occurrence showed: 2026-10-09, run 37896495193, same
+			// lane, 145 of 160, reading `site 1..6: 18 of 20 <-- behind`,
+			// `site 7: 17` and `site 8: 20`. Seven "behind" lines for ONE
+			// lagging acknowledger: Stable is a minimum over the
+			// acknowledgers, so a participant two operations behind caps it
+			// for every sender but itself. Site 8's own operations had
+			// reached everybody; site 8 had not reached everybody else's
+			// last two. The sender table stays, because it accounts for the
+			// total; the acknowledger table goes beside it, because it is
+			// the axis that names the culprit and only the server knows it.
+			acks, known := srv.Acknowledged("paper")
 			last := "and it never moved at all"
 			if len(steps) > 0 {
 				from := max(len(steps)-keep, 0)
 				last = fmt.Sprintf("the meet moved %d time(s); the last of them: %s",
 					len(steps), strings.Join(steps[from:], ", "))
 			}
-			t.Fatalf("what everybody has certainly seen stalled at %d of %d operations, and had not moved for %v\n%s%s",
+			t.Fatalf("what everybody has certainly seen stalled at %d of %d operations, and had not moved for %v\n%s%s%s",
 				seen, want, time.Since(moved).Round(time.Millisecond),
-				perSite(v, editors, rounds), last)
+				perSite(v, editors, rounds), perAcknowledger(acks, known, editors, rounds), last)
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
