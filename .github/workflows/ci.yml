@@ -481,8 +481,19 @@ jobs:
           #
           # ⚠ The pin is on the DOWNLOADER, not on what puppeteer-core uses at
           # run time: this CLI only fetches the browser, and puppeteer-core keeps
-          # its own copy of its own dependency. Renovate can see this pin, which
-          # it could not see before -- an unpinned npx fetch is invisible to it.
+          # its own copy of its own dependency.
+          #
+          # ⛔⛔ AND RENOVATE CANNOT SEE THIS PIN. An earlier draft of this comment
+          # claimed it could; a pre-merge review asked, and the organisation's own
+          # preset answers: go-crdt/.github default.json carries exactly ONE
+          # customManager, matching `go install <module>@vN`, and its own
+          # description states the general rule -- "gomod looks at go.mod,
+          # github-actions looks at `uses:`, a version inside a `run:` block is
+          # seen by neither, so it is a pin that will never be offered an update".
+          # `npx <pkg>@<version>` is that case. So this version goes stale in
+          # silence, exactly as `vulngate@v0.7.0` did for six hours on 2026-10-11
+          # before that manager was written. The fix is a second customManager for
+          # npx specifiers in the org preset, not a sentence here.
           npx --yes @puppeteer/browsers@3.2.7 install chrome@149.0.7827.22 > chrome.txt
           cat chrome.txt
           # ⛔ This install can exit 0 and write NOTHING. Measured on node 26.13.0
