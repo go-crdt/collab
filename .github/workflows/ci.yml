@@ -41,6 +41,49 @@ jobs:
             exit 1
           fi
 
+      # ⛔⛔ THE TWO RULES THIS REPOSITORY'S OWN INCIDENTS PAID FOR, and which
+      # it did not run. `viaonly` was written against this package after the
+      # same defect shipped three times in four days -- a rule honoured at some
+      # siblings and not at others -- and then four more times inside the branch
+      # that was removing it:
+      #
+      #   #247  RetryPolicy.Permanent asked about each attempt -- one of two
+      #         loops did
+      #   #268  the context's expiry returned through stalled() -- two of three
+      #   #271  the wait went through awaited() -- ONE OF FIVE
+      #   #274  "is this offer usable?" asked at one exit, then one more, then
+      #         the branch that kept its own copy of the contract
+      #
+      # Every one of those was found by a reviewer or a consumer reading the
+      # code, never by anything that ran. The tool existed and this lane did
+      # not call it, which is the shape of a lesson that stays a note.
+      #
+      # ⛔ TWO RULES, because a `return` is not a CALL. --wraps/--via asks which
+      # calls bypass the wrapper; --asks/--in asks which EXIT POINTS never asked
+      # the question. The second is the one that catches a fast path at the top
+      # of a function, and it is why #274 took four rounds: a reader re-reads
+      # the select and the error branches, never the first two lines.
+      #
+      # ⚠ The waiver names a LINE, which is brittle on purpose: under --asks a
+      # function-named waiver would exempt every exit of that function at once,
+      # so it is refused. If peer_js.go moves, viaonly exits 2 saying the waiver
+      # matches no exit -- a loud red with the reason in it, rather than a
+      # silent exemption for something no longer there.
+      #
+      # ⚠ Pinned, not @latest: a version inside a `run:` block is read by no
+      # manager except this organisation's customManager, which matches exactly
+      # this `go install <module>@vN` spelling.
+      - name: viaonly, the two rules a sibling-by-sibling defect needs
+        run: |
+          go install github.com/go-fleettools/fleettools/cmd/viaonly@v0.126.0
+          viaonly --wraps await --via '(*Peer).awaited' .
+          viaonly --asks '(*Peer).gathered' \
+                  --asks '(*Peer).stillOpen' \
+                  --asks '(*Peer).hasCandidate' \
+                  --in '(*Peer).gatherICE' \
+                  --allow 'peer_js.go:603=a peer closed during the wait has no offer to hand back, and ErrClosed is the answer; asking the usability question here would ask it of a dead connection' \
+                  .
+
       # A workflow whose shell is broken is still valid YAML: an edit to the
       # sibling repository split a run block between a loop's body and its
       # `done`, parsed, and failed on the runner (go-crdt/crdt#138).
