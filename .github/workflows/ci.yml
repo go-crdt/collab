@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
       - name: gofmt
         run: |
           unformatted=$(gofmt -l .)
@@ -79,11 +79,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
       - name: Install govulncheck and the gate that judges it
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.72.0
+          go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.121.0
       - name: Scan, and judge the findings rather than the exit status
         run: |
           # govulncheck exits 0 over an advisory it decides this module does not
@@ -166,7 +166,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
       - run: go version
       - name: Install govulncheck and the gate that judges it
         run: |
@@ -197,7 +197,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
       - uses: actions/setup-node@v7
         with:
           node-version: '26'
@@ -279,7 +279,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
       - run: go vet ./...
       - run: go test -race -v ./...
       - name: Test + 100% coverage gate
@@ -314,7 +314,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
       - run: go vet ./...
       - run: go test -race -v ./...
       - name: Test + 100% coverage gate
@@ -350,7 +350,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
       - run: go vet ./...
       - run: go test -race ./...
       - name: Test + 100% coverage gate on the logic
@@ -378,7 +378,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
       - uses: actions/setup-node@v7
         with:
           node-version: '26'
@@ -446,7 +446,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
       - uses: actions/setup-node@v7
         with:
           node-version: '26'
@@ -461,7 +461,30 @@ jobs:
           npm install --no-audit --no-fund --silent puppeteer-core@24
           npx --yes @puppeteer/browsers install chrome@149.0.7827.22 > chrome.txt
           cat chrome.txt
-          echo "CHROME=$(awk '{print $NF}' chrome.txt)" >> "$GITHUB_ENV"
+          # ⛔ This install can exit 0 and write NOTHING. Measured on node 26.13.0
+          # in #256, where it did exactly that in four seconds, printing nothing on
+          # stdout and nothing on stderr -- so `bash -e` had no exit status to act
+          # on. awk then exported an empty CHROME and the lane died in the NEXT
+          # step with a bare `exit 127`, which names neither the browser nor the
+          # install.
+          #
+          # The rest of this lane already refuses an empty answer -- "no browser
+          # tests found; this lane has stopped asking anything" -- and refuses a
+          # discovered test that did not run. It has to refuse here for the same
+          # reason: the one question it was not asking was about its own tools.
+          test -s chrome.txt || {
+            echo "::error::@puppeteer/browsers install wrote no path (it exited 0 with empty output)"
+            exit 1
+          }
+          chrome=$(awk '{print $NF}' chrome.txt)
+          # And a path is not a browser. If the last field stops being the install
+          # directory -- the format has no promise attached -- this says so here
+          # rather than as a 127 further down.
+          [ -x "$chrome" ] || {
+            echo "::error::the path @puppeteer/browsers printed is not executable: $chrome"
+            exit 1
+          }
+          echo "CHROME=$chrome" >> "$GITHUB_ENV"
           echo "COLLAB_BROWSER_NODE_PATH=$RUNNER_TEMP/node_modules" >> "$GITHUB_ENV"
       # Discovered rather than named. This lane named one test and there were
       # two: TestTwoTabsElectOneHostWithNoWindow needs exactly what this job
@@ -508,7 +531,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
       - uses: actions/setup-node@v7
         with:
           node-version: '26'
@@ -534,7 +557,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
       # This has not hung here. It hung in go-crdt/crdt, on the same runner
       # image and the same one-line install, for the better part of an hour and
       # more than once — and bounding it is what identified the culprit: three
@@ -547,10 +570,21 @@ jobs:
       # first, and they are only refreshed if that was not enough. apt is also
       # told to give up on a stuck mirror rather than sit on it, which is what
       # made the outer timeout the only thing stopping it.
-      - name: Install qemu-user-static
+      # ⛔ `qemu-user-static` is a VIRTUAL package on Ubuntu 26.04, which
+      # `ubuntu-latest` became on 2026-10-19, and apt refuses to choose between its
+      # two providers:
+      #
+      #   E: Package 'qemu-user-static' has no installation candidate
+      #
+      # ⚠ Installing a provider is NOT the fix: `qemu-user-binfmt` registers binfmt
+      # handlers, it does not ship the `qemu-<arch>-static` binaries this lane
+      # invokes. `qemu-user` ships the dynamic `qemu-<arch>`, which is all that
+      # `go test -exec` needs, so both are installed and BOTH NAMES are accepted
+      # below. go-tex/engine#645 has the full account.
+      - name: Install qemu user-mode emulators
         run: |
           apt=(-y -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-          if timeout 240 sudo apt-get install "${apt[@]}" qemu-user-static; then
+          if timeout 240 sudo apt-get install "${apt[@]}" qemu-user qemu-user-binfmt; then
             exit 0
           fi
           for attempt in 1 2; do
@@ -558,14 +592,30 @@ jobs:
             timeout 240 sudo apt-get update "${apt[@]}" || true
             sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
             sudo dpkg --configure -a || true
-            if timeout 240 sudo apt-get install "${apt[@]}" qemu-user-static; then
+            if timeout 240 sudo apt-get install "${apt[@]}" qemu-user qemu-user-binfmt; then
               exit 0
             fi
           done
-          echo "::error::qemu-user-static could not be installed"
+          echo "::error::qemu-user qemu-user-binfmt could not be installed"
           exit 1
       - name: Test under qemu (${{ matrix.goarch }})
-        run: GOARCH=${{ matrix.goarch }} go test -exec=${{ matrix.qemu }} ./...
+        run: |
+          base="${{ matrix.qemu }}"
+          q=""
+          for cand in "$base" "${base%-static}"; do
+            command -v "$cand" >/dev/null 2>&1 && q="$cand" && break
+          done
+          # ⛔ A missing emulator FAILS this lane. A lane that reports success for
+          # an architecture it never ran is the one outcome this matrix exists to
+          # rule out.
+          if [ -z "$q" ]; then
+            echo "::error::no qemu user emulator for ${{ matrix.goarch }} (looked for $base and ${base%-static})"
+            exit 1
+          fi
+          # Printed on purpose: without it, "ran under emulation" and "skipped" are
+          # indistinguishable from a green tick.
+          echo "running ${{ matrix.goarch }} under $q"
+          GOARCH=${{ matrix.goarch }} go test -exec="$q" ./...
 
   # Fuzz the decoders. crdt has had this lane for a while; collab did not, so its
   # six targets ran their seed corpus and nothing else -- a handful of inputs
@@ -607,7 +657,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
       # -parallel 2, and the deadline told apart from a real failure: both are
       # crdt's reasoning, and they apply here for the same reason. Six of these
       # run at once on one runner, each starting a worker per core, so the machine

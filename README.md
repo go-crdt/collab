@@ -188,6 +188,72 @@ it wrote while away. After that, operations and presence flow both ways.
 - **Documents outlive sessions.** The last participant out writes the document;
   `Server.Flush` writes it without waiting. A write that fails is retried rather
   than forgotten.
+- **No browser event can hang a handshake.** `Peer.Offer` used to wait for
+  `icegatheringstatechange` to report `complete`, which a browser is not obliged
+  to deliver: a consumer carried that stall as a CI flake for ten weeks, with
+  both a host and a reflexive candidate gathered and only the announcement
+  missing. The wait now also ends on the canonical `onicecandidate(null)`, and
+  when neither arrives it is bounded by `ICEGatherBudget` (thirty seconds, and
+  only when the caller's own context carries no deadline). ⛔ **On expiry it
+  proceeds if the description carries an address** — that offer is usable, and
+  failing threw away a working connection over a missing event — while a
+  gathering that produced **none** keeps the error, and a caller that
+  *cancelled* is never handed an offer it withdrew the question for. The witness
+  is the SDP, not a count of candidate events: an end-of-candidates marker is
+  not an address, and candidates delivered before any listener exists are
+  invisible to a counter but present in the description. ⛔ The same question is
+  asked on **every** exit, so a browser with no usable interface that *reports*
+  completion is refused too rather than yielding a blob with no address in it —
+  an invariant enforced at one of four doors is not an invariant. And `Close`
+  ends a wait in progress instead of leaving it parked until the budget. Every
+  one of those outcomes is a test, and each is mutation-checked.
+
+- **Every wait on the browser says which call stalled, and `Close` ends every
+  one of them.** A stalled handshake used to report the connection, ICE and
+  gathering states — the same three words at every site — so the error said
+  that something had stopped and not *what*. Each wait now carries its
+  operation — **eleven of the twelve, counted**: the six promises
+  `createOffer`, `setLocalDescription(offer)`, `setRemoteDescription(offer)`,
+  `createAnswer`, `setLocalDescription(answer)`, `setRemoteDescription(answer)`;
+  the two peer selects `datachannel` and `channel open`; the gathering wait;
+  and the two carriers' own, `websocket open` and `data channel open`.
+  ⚠ **The twelfth is the Web Locks election (`electByLock`), and it is an open
+  defect rather than an unnamed wait**: giving up there returns "this browser
+  has no Web Locks", so abandoning is indistinguishable from the API being
+  absent, and it releases its callback while the lock request is still
+  outstanding — #270's class, in a function #274 did not reach. Filed as
+  **#276**, not fixed here, because it is a lifecycle defect in the election
+  and not a missing name.
+  ⛔⛔ **This sentence is here because FOUR earlier versions of it were too
+  wide, and writing it out is what proved that each time.** A review counted
+  the package's waits against the claim and found a gap in every round: the
+  sixth promise wait, then the seventh and eighth (selects, which the static
+  check could not see), then the tenth and eleventh in other files, then the
+  twelfth in a file about elections rather than transport. ⭐ Each refutation
+  was somebody counting a number written down here; a code reading follows the
+  paths the reader thinks of, and four readings had passed over these. It claimed every wait was
+  named and none unbounded. `await`'s select had exactly two cases — the
+  promise and the caller's context — and no `Close`, so a `Close` during any of
+  the six *promise* waits left the goroutine parked, for ever when the caller
+  passed no deadline; #274 had wired `Close` into the gathering wait and the two
+  channel waits and left these six, so "Close ends a wait in progress" was true
+  of three of nine. And the two channel waits named no operation at all. A
+  review reproduced the hang with a probe. ⚠ Note which tool found which: the
+  static check (`viaonly`) found the sixth *promise* wait and **could not see**
+  the other two, because they are selects and not calls to anything — a static
+  check covers the shape it was given, while a sentence claiming completeness is
+  checkable by anybody. ⛔ **That contract reached five sites of six for two
+  releases.** `Peer.AcceptAnswer`
+  went through the bare helper, so it stalled anonymously *and* without a bound
+  — it takes no context, by design, and `context.Background()` left the
+  browser's promise as the only way out, which is a hang rather than an error.
+  It is bounded by `SettleBudget` now, and the error names the call. The comment
+  above it explained why the *context* is `Background` — true, and never a
+  reason to be unbounded — which is exactly how a missing sixth case read as
+  deliberate to two reviews. It was found by `viaonly`, a static check that asks
+  which calls bypass the wrapper they were supposed to go through, run against
+  this package; reading had not found it, and neither had five tests written for
+  the five sites that were right.
 
 ## What a binding needs
 

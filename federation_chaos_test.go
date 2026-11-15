@@ -213,13 +213,31 @@ func TestAMeshOfServersConvergesAndThenGoesQuiet(t *testing.T) {
 	// And now the mesh has to go quiet. An operation that has been round the
 	// loop teaches nobody anything the second time, so nothing should be
 	// crossing a link once the typing has stopped and everyone agrees.
+	//
+	// ⛔ But convergence is not quiescence, and the check above is the first,
+	// not the second: it proves every participant holds the same bytes, which
+	// says nothing about an acknowledgement still in flight for the last of
+	// them. One of those crossing a link is not the fault this test exists to
+	// catch -- it is the tail of a conversation that has already finished.
+	//
+	// So two windows are watched and only the second decides. An echo crosses
+	// links in every window, which is the whole of what makes it an echo; a
+	// straggler crosses in the first and in no other.
+	//
+	// This was a red lane on main, and nobody saw it for five weeks: run
+	// 37443495109 (2026-10-06, test (macos-latest)) failed on exactly ONE
+	// message of 1933, in 0.68 s. The tail is logged rather than asserted on,
+	// because its size is information -- a tail of hundreds would be a
+	// different finding, and this is how it would be seen.
 	settleDown := crossings.Load()
 	time.Sleep(500 * time.Millisecond)
+	tail := crossings.Load()
+	time.Sleep(500 * time.Millisecond)
 	after := crossings.Load()
-	t.Logf("%d participants across %d servers, %d characters, %d messages crossed links",
-		len(clients), servers, want, after)
-	if grew := after - settleDown; grew > 0 {
-		t.Fatalf("the mesh is still talking after everyone agreed: %d more messages crossed links in half a second", grew)
+	t.Logf("%d participants across %d servers, %d characters, %d messages crossed links (%d of them in the half-second after everyone agreed, %d in the half-second after that)",
+		len(clients), servers, want, after, tail-settleDown, after-tail)
+	if grew := after - tail; grew > 0 {
+		t.Fatalf("the mesh is still talking a second after everyone agreed: %d more messages crossed links in the second half-second, after %d in the first", grew, tail-settleDown)
 	}
 	if after == 0 {
 		t.Fatal("nothing ever crossed a link; the mesh was not a mesh")

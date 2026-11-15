@@ -92,12 +92,32 @@ func TestWhatEverybodyHasSeenAdvances(t *testing.T) {
 	// arrives after convergence rather than with it: an acknowledgement
 	// describes what its sender had applied when it was sent, so it is always a
 	// round-trip behind the state it describes.
-	deadline := time.Now().Add(20 * time.Second)
+	start := time.Now()
+	deadline := start.Add(20 * time.Second)
 	var seen uint64
+	// WHEN the meet last moved, and the last few places it moved to.
+	//
+	// The per-site breakdown below says who is behind. It cannot say whether
+	// they were still catching up or had stopped, because it is a snapshot
+	// taken at the deadline and a snapshot has no time in it. That is the open
+	// question in go-crdt/collab#204 -- "something stops rather than slows" is
+	// a claim about time, so the test has to keep some.
+	//
+	// Both occurrences so far were argued from the MARGIN between this test's
+	// local duration and its deadline, about 650x, which is an argument that a
+	// loaded runner cannot spend it. This measures the thing itself instead:
+	// frozen at its final value for nearly the whole deadline is a stall,
+	// reaching it moments before the deadline is slowness.
+	moved := start
+	var steps []string
+	const keep = 8
 	for {
 		v, ok := srv.Stable("paper")
 		if ok {
-			seen = totalSeen(v)
+			if got := totalSeen(v); got != seen {
+				steps = append(steps, fmt.Sprintf("%d at %v", got, time.Since(start).Round(time.Millisecond)))
+				seen, moved = got, time.Now()
+			}
 			if seen >= uint64(want) {
 				break
 			}
@@ -111,8 +131,15 @@ func TestWhatEverybodyHasSeenAdvances(t *testing.T) {
 			// stuck would leave at least 140) and cannot choose among the
 			// rest. A per-site breakdown can.
 			v, _ := srv.Stable("paper")
-			t.Fatalf("what everybody has certainly seen stalled at %d of %d operations\n%s",
-				seen, want, perSite(v, editors, rounds))
+			last := "and it never moved at all"
+			if len(steps) > 0 {
+				from := max(len(steps)-keep, 0)
+				last = fmt.Sprintf("the meet moved %d time(s); the last of them: %s",
+					len(steps), strings.Join(steps[from:], ", "))
+			}
+			t.Fatalf("what everybody has certainly seen stalled at %d of %d operations, and had not moved for %v\n%s%s",
+				seen, want, time.Since(moved).Round(time.Millisecond),
+				perSite(v, editors, rounds), last)
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
