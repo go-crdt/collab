@@ -41,6 +41,71 @@ jobs:
             exit 1
           fi
 
+      # ⛔⛔ THE TWO RULES THIS REPOSITORY'S OWN INCIDENTS PAID FOR, and which
+      # it did not run. `viaonly` was written against this package after the
+      # same defect shipped three times in four days -- a rule honoured at some
+      # siblings and not at others -- and then four more times inside the branch
+      # that was removing it:
+      #
+      #   #247  RetryPolicy.Permanent asked about each attempt -- one of two
+      #         loops did
+      #   #268  the context's expiry returned through stalled() -- two of three
+      #   #271  the wait went through awaited() -- ONE OF FIVE
+      #   #274  "is this offer usable?" asked at one exit, then one more, then
+      #         the branch that kept its own copy of the contract
+      #
+      # Every one of those was found by a reviewer or a consumer reading the
+      # code, never by anything that ran. The tool existed and this lane did
+      # not call it, which is the shape of a lesson that stays a note.
+      #
+      # ⛔ TWO RULES, because a `return` is not a CALL. --wraps/--via asks which
+      # calls bypass the wrapper; --asks/--in asks which EXIT POINTS never asked
+      # the question. The second is the one that catches a fast path at the top
+      # of a function, and it is why #274 took four rounds: a reader re-reads
+      # the select and the error branches, never the first two lines.
+      #
+      # ⚠ The waiver names a LINE, which is brittle on purpose: under --asks a
+      # function-named waiver would exempt every exit of that function at once,
+      # so it is refused. An edit that moves peer_js.go:603 therefore turns this
+      # lane red, and that is a maintenance tax rather than a defect found.
+      #
+      # ⛔ MEASURED, because a first version of this comment got it wrong: it
+      # exits 1, not 2. A review inserted one line at the top of peer_js.go and
+      # ran it. The output is two lines -- the exit at its NEW number reported
+      # as not asking, and "1 --allow waiver(s) match no exit: peer_js.go:603"
+      # -- and the status is 1 because viaonly's own rule is that a finding
+      # outranks a stale waiver and must not be downgraded to "refused to
+      # decide". So: non-zero either way, it names the line to move, and this
+      # comment no longer promises a status it does not return.
+      #
+      # ⚠ Pinned, not @latest: a version inside a `run:` block is read by no
+      # manager except this organisation's customManager, which matches exactly
+      # this `go install <module>@vN` spelling.
+      # ⚠ Run through "$(go env GOPATH)/bin/…", as the actionlint step above
+      # does, rather than trusting PATH: the two checks in this job then fail
+      # the same way if an install silently puts the binary somewhere else.
+      # And each invocation carries its own ::error::, because without one a
+      # failure is only the generic "Process completed with exit code 1"
+      # annotation and the reason stays in the log — which a review caught by
+      # comparing this step with the gofmt step twenty lines above.
+      - name: viaonly, the two rules a sibling-by-sibling defect needs
+        run: |
+          go install github.com/go-fleettools/fleettools/cmd/viaonly@v0.126.0
+          viaonly="$(go env GOPATH)/bin/viaonly"
+          "$viaonly" --wraps await --via '(*Peer).awaited' . || {
+            echo "::error::a call reaches await without going through (*Peer).awaited — the shape of #247, #268 and #271"
+            exit 1
+          }
+          "$viaonly" --asks '(*Peer).gathered' \
+                     --asks '(*Peer).stillOpen' \
+                     --asks '(*Peer).hasCandidate' \
+                     --in '(*Peer).gatherICE' \
+                     --allow 'peer_js.go:603=a peer closed during the wait has no offer to hand back, and ErrClosed is the answer; asking the usability question here would ask it of a dead connection' \
+                     . || {
+            echo "::error::an exit of (*Peer).gatherICE never asked whether the offer is usable, or the waived line has moved — the shape of #274, which took four review rounds"
+            exit 1
+          }
+
       # A workflow whose shell is broken is still valid YAML: an edit to the
       # sibling repository split a run block between a loop's body and its
       # `done`, parsed, and failed on the runner (go-crdt/crdt#138).
