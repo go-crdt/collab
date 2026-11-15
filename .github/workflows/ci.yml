@@ -459,7 +459,31 @@ jobs:
           cd "$RUNNER_TEMP"
           npm init -y >/dev/null 2>&1
           npm install --no-audit --no-fund --silent puppeteer-core@24
-          npx --yes @puppeteer/browsers install chrome@149.0.7827.22 > chrome.txt
+          # ⛔⛔ THE INSTALLER IS PINNED TOO, AND LEAVING IT UNPINNED WAS NOT
+          # "it floats to the latest" -- it was WORSE THAN THAT. `npx` prefers a
+          # binary already in node_modules, and the line above installs one:
+          # puppeteer-core@24 depends on @puppeteer/browsers 2.13.2, while the
+          # registry's latest is 3.2.7. So the unpinned fetch silently ran an
+          # OLDER MAJOR, chosen by a transitive dependency rather than by anyone
+          # here.
+          #
+          # Measured on node 26.13.0, locally, reproducing this step's exact
+          # sequence in an empty directory:
+          #
+          #   npm install puppeteer-core@24      -> @puppeteer/browsers 2.13.2
+          #   npx --yes @puppeteer/browsers …    -> exit 0, 0 bytes on stdout
+          #   npx --yes @puppeteer/browsers@3.2.7 …  -> exit 0, 220 bytes, the path
+          #
+          # Same directory, same node, same Chrome version: the only variable is
+          # which installer ran. 2.13.2 does nothing and says nothing under node
+          # 26; 3.2.7 works. That is why #256 (node 24 -> 26) was red for a week
+          # on this lane and nowhere else.
+          #
+          # ⚠ The pin is on the DOWNLOADER, not on what puppeteer-core uses at
+          # run time: this CLI only fetches the browser, and puppeteer-core keeps
+          # its own copy of its own dependency. Renovate can see this pin, which
+          # it could not see before -- an unpinned npx fetch is invisible to it.
+          npx --yes @puppeteer/browsers@3.2.7 install chrome@149.0.7827.22 > chrome.txt
           cat chrome.txt
           # ⛔ This install can exit 0 and write NOTHING. Measured on node 26.13.0
           # in #256, where it did exactly that in four seconds, printing nothing on
