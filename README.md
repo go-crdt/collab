@@ -208,14 +208,28 @@ it wrote while away. After that, operations and presence flow both ways.
   ends a wait in progress instead of leaving it parked until the budget. Every
   one of those outcomes is a test, and each is mutation-checked.
 
-- **Every wait on the browser says which call stalled, and none of them is
-  unbounded.** A stalled handshake used to report the connection, ICE and
-  gathering states — the same three words at all six sites — so the error said
+- **Every wait on the browser says which call stalled, and `Close` ends every
+  one of them.** A stalled handshake used to report the connection, ICE and
+  gathering states — the same three words at every site — so the error said
   that something had stopped and not *what*. Each wait now carries its
   operation: `createOffer`, `setLocalDescription(offer)`,
   `setRemoteDescription(offer)`, `createAnswer`,
-  `setLocalDescription(answer)`, `setRemoteDescription(answer)`. ⛔ **That
-  contract reached five sites of six for two releases.** `Peer.AcceptAnswer`
+  `setLocalDescription(answer)`, `setRemoteDescription(answer)`, and the two
+  that are selects rather than promises, `datachannel` and `channel open`.
+  ⛔⛔ **This sentence is here because an earlier version of it was false, in
+  both halves, and saying it is what proved it.** It claimed every wait was
+  named and none unbounded. `await`'s select had exactly two cases — the
+  promise and the caller's context — and no `Close`, so a `Close` during any of
+  the six *promise* waits left the goroutine parked, for ever when the caller
+  passed no deadline; #274 had wired `Close` into the gathering wait and the two
+  channel waits and left these six, so "Close ends a wait in progress" was true
+  of three of nine. And the two channel waits named no operation at all. A
+  review reproduced the hang with a probe. ⚠ Note which tool found which: the
+  static check (`viaonly`) found the sixth *promise* wait and **could not see**
+  the other two, because they are selects and not calls to anything — a static
+  check covers the shape it was given, while a sentence claiming completeness is
+  checkable by anybody. ⛔ **That contract reached five sites of six for two
+  releases.** `Peer.AcceptAnswer`
   went through the bare helper, so it stalled anonymously *and* without a bound
   — it takes no context, by design, and `context.Background()` left the
   browser's promise as the only way out, which is a hang rather than an error.

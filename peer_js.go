@@ -290,7 +290,7 @@ func (p *Peer) DataChannel(ctx context.Context) (js.Value, error) {
 		case <-p.quit:
 			return js.Value{}, ErrClosed
 		case <-ctx.Done():
-			return js.Value{}, p.stalled(ctx.Err())
+			return js.Value{}, p.stalledAt("datachannel (waiting for the offerer's channel)", ctx.Err())
 		}
 	}
 	return p.awaitOpen(ctx, ch)
@@ -346,8 +346,43 @@ func (p *Peer) awaitOpen(ctx context.Context, ch js.Value) (js.Value, error) {
 	case <-p.quit:
 		return js.Value{}, ErrClosed
 	case <-ctx.Done():
-		return js.Value{}, p.stalled(ctx.Err())
+		return js.Value{}, p.stalledAt("channel open", ctx.Err())
 	}
+}
+
+// untilClosed derives a context that ends when [Peer.Close] does, so a wait on
+// a browser promise is interrupted by closing the peer and not only by the
+// caller's own deadline.
+//
+// ⛔ The goroutine is bounded by the returned cancel, which every caller defers:
+// it ends when the wait ends, whichever way that happens.
+func (p *Peer) untilClosed(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		select {
+		case <-p.quit:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
+
+// stalledAt is [Peer.stalled] with the operation named, for the two waits that
+// are not promises and so cannot go through [Peer.awaited].
+//
+// ⛔ THE SEVENTH AND EIGHTH WAITS. #271 named five, this branch named the
+// sixth, and a review of the sentence claiming "every wait" found two more:
+// DataChannel waiting for an incoming channel, and awaitOpen waiting for one to
+// open. Both returned the three state words and no operation. `viaonly` cannot
+// see them — they are not calls to `await` — which is worth recording, because a
+// static check covers the shape it was given and the claim was broader than the
+// check.
+func (p *Peer) stalledAt(what string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return p.stalled(fmt.Errorf("%s: %w", what, err))
 }
 
 // stalled says where a connection had got to when the caller gave up.
@@ -398,7 +433,26 @@ func (p *Peer) stalled(err error) error {
 // gathering)" does not say whether setRemoteDescription or createAnswer was the
 // step that never came back, and that is the question the caller is holding.
 func (p *Peer) awaited(ctx context.Context, what string, promise js.Value) (js.Value, error) {
+	// ⛔⛔ CLOSE HAD TO BE WIRED IN HERE TOO, AND A REVIEW OF THE PROSE FOUND
+	// IT. `await`'s select has exactly two cases, the promise and ctx.Done() —
+	// no p.quit — so a Close during any of these six waits left the goroutine
+	// parked, and with a caller that passed context.Background() it parked for
+	// ever. #274 made Close end the GATHERING wait and the two channel waits
+	// and left these six; the README then said Close ends a wait in progress,
+	// which was true of three waits out of nine. Fixing some and claiming all
+	// is the defect this file keeps producing, so the claim and the code are
+	// made to agree here rather than in the sentence.
+	ctx, cancel := p.untilClosed(ctx)
+	defer cancel()
 	v, err := await(ctx, promise)
+	// ⛔ Close OUTRANKS the deadline, the precedence #274 established: a peer
+	// that was closed reports ErrClosed, not the context error that closing
+	// produced. Asked BEFORE the naming below, because "setRemoteDescription
+	// stalled" about a peer somebody closed is a true sentence that sends the
+	// reader to the wrong place.
+	if closedErr := p.stillOpen(); closedErr != nil {
+		return js.Value{}, closedErr
+	}
 	// await returns ctx.Err() verbatim on that branch, and ctx.Err() is nil
 	// while the context is live — so this names the state in exactly the case it
 	// belongs to.
