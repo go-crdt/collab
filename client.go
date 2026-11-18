@@ -109,7 +109,10 @@ type Client struct {
 	doc      *crdt.Composite
 	presence *awareness.Registry
 	changed  []crdt.PartChange
-	err      error
+	// undo holds the own-edit history of each text part that asked for one. See
+	// [Text.EnableUndo].
+	undo map[string]*textUndo
+	err  error
 	// down is set while a supervised client has no carrier. Nothing may be
 	// sent then, and nothing needs to be: an edit is in the replica already and
 	// the next attach pushes what the server lacks.
