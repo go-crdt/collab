@@ -5,7 +5,7 @@ go 1.27.4
 require (
 	github.com/andybalholm/brotli v1.3.0
 	github.com/coder/websocket v1.8.15
-	github.com/go-crdt/crdt v0.58.1-0.20261118092720-ef8fc5065310
+	github.com/go-crdt/crdt v0.59.0
 	github.com/grpc-transports/websocket v0.4.0
 	google.golang.org/grpc v1.85.0
 	google.golang.org/protobuf v1.36.12
