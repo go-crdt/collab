@@ -139,15 +139,31 @@ func (t *Text) LenUTF16() int {
 // Insert adds text at rune offset pos, locally and then everywhere.
 func (t *Text) Insert(pos int, text string) error {
 	return t.c.edit(t.Part(), func() (crdt.PartOps, error) {
-		ops, err := t.doc().Insert(pos, text)
+		ops, err := t.insert(pos, text)
 		return crdt.PartOps{Text: ops}, err
 	})
+}
+
+// insert and remove edit the part, through the participant's undo history when
+// it asked for one. The caller holds the lock.
+func (t *Text) insert(pos int, text string) ([]crdt.Op, error) {
+	if u := t.tracker(); u != nil {
+		return u.Insert(pos, text)
+	}
+	return t.doc().Insert(pos, text)
+}
+
+func (t *Text) remove(pos, length int) ([]crdt.Op, error) {
+	if u := t.tracker(); u != nil {
+		return u.Delete(pos, length)
+	}
+	return t.doc().Delete(pos, length)
 }
 
 // Delete removes length runes at rune offset pos, locally and then everywhere.
 func (t *Text) Delete(pos, length int) error {
 	return t.c.edit(t.Part(), func() (crdt.PartOps, error) {
-		ops, err := t.doc().Delete(pos, length)
+		ops, err := t.remove(pos, length)
 		return crdt.PartOps{Text: ops}, err
 	})
 }
@@ -155,7 +171,11 @@ func (t *Text) Delete(pos, length int) error {
 // InsertUTF16 adds text at an offset counted in UTF-16 code units.
 func (t *Text) InsertUTF16(pos int, text string) error {
 	return t.c.edit(t.Part(), func() (crdt.PartOps, error) {
-		ops, err := t.doc().InsertUTF16(pos, text)
+		at, err := t.doc().RuneOffset(pos)
+		if err != nil {
+			return crdt.PartOps{}, err
+		}
+		ops, err := t.insert(at, text)
 		return crdt.PartOps{Text: ops}, err
 	})
 }
@@ -163,7 +183,19 @@ func (t *Text) InsertUTF16(pos int, text string) error {
 // DeleteUTF16 removes length code units at an offset counted in the same units.
 func (t *Text) DeleteUTF16(pos, length int) error {
 	return t.c.edit(t.Part(), func() (crdt.PartOps, error) {
-		ops, err := t.doc().DeleteUTF16(pos, length)
+		if length < 0 {
+			return crdt.PartOps{}, crdt.ErrOutOfRange
+		}
+		d := t.doc()
+		from, err := d.RuneOffset(pos)
+		if err != nil {
+			return crdt.PartOps{}, err
+		}
+		to, err := d.RuneOffset(pos + length)
+		if err != nil {
+			return crdt.PartOps{}, err
+		}
+		ops, err := t.remove(from, to-from)
 		return crdt.PartOps{Text: ops}, err
 	})
 }
