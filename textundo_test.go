@@ -101,6 +101,9 @@ func TestUndoGroupsAndUTF16(t *testing.T) {
 	if err := a.Insert(0, "one "); err != nil {
 		t.Fatal(err)
 	}
+	if !a.CanUndo() {
+		t.Fatal("the open group holds an edit, which Undo would take back")
+	}
 	if err := a.InsertUTF16(4, "two"); err != nil {
 		t.Fatal(err)
 	}
