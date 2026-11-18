@@ -4,8 +4,8 @@ go 1.27.4
 
 require (
 	github.com/andybalholm/brotli v1.3.0
-	github.com/go-crdt/collab v0.80.0
-	github.com/go-crdt/crdt v0.57.0
+	github.com/go-crdt/collab v0.82.1
+	github.com/go-crdt/crdt v0.58.0
 	github.com/jackc/pgx/v5 v5.13.0
 )
 
