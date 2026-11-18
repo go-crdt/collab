@@ -90,7 +90,7 @@ jobs:
       # comparing this step with the gofmt step twenty lines above.
       - name: viaonly, the two rules a sibling-by-sibling defect needs
         run: |
-          go install github.com/go-fleettools/fleettools/cmd/viaonly@v0.126.0
+          go install github.com/go-fleettools/fleettools/cmd/viaonly@v0.136.0
           viaonly="$(go env GOPATH)/bin/viaonly"
           "$viaonly" --wraps await --via '(*Peer).awaited' . || {
             echo "::error::a call reaches await without going through (*Peer).awaited — the shape of #247, #268 and #271"
@@ -148,7 +148,7 @@ jobs:
       - name: Install govulncheck and the gate that judges it
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.127.0
+          go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.136.0
       - name: Scan, and judge the findings rather than the exit status
         run: |
           # govulncheck exits 0 over an advisory it decides this module does not
@@ -254,7 +254,7 @@ jobs:
       - name: Install govulncheck and the gate that judges it
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.127.0
+          go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.136.0
       - name: Scan this module, and judge the findings rather than the exit status
         working-directory: ${{ matrix.mod }}
         run: |
