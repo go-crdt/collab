@@ -2,8 +2,8 @@ github.com/andybalholm/brotli v1.3.0 h1:IdkhjSe/+34U+fP7FSR2Q6Poj1hnHUa2GoWmzXJd
 github.com/andybalholm/brotli v1.3.0/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
 github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
-github.com/go-crdt/crdt v0.58.1-0.20261118091103-8587f62d77f0 h1:etueh6VELrWkFR/XHG2DqzcegC/Pk4FYRkcC1u35VKo=
-github.com/go-crdt/crdt v0.58.1-0.20261118091103-8587f62d77f0/go.mod h1:kHlReXEoryOyNeoSZv7GizHHuSZ+DmVi2AuGIRb0jNc=
+github.com/go-crdt/crdt v0.58.1-0.20261118092720-ef8fc5065310 h1:Qx2mEmefnE8UGNHC4BFQdQ03rrfFljmWIKO5dZsFUR8=
+github.com/go-crdt/crdt v0.58.1-0.20261118092720-ef8fc5065310/go.mod h1:kHlReXEoryOyNeoSZv7GizHHuSZ+DmVi2AuGIRb0jNc=
 github.com/golang/protobuf v1.5.4 h1:i7eJL8qZTpSEXOPTxNKhASYpMn+8e5Q6AdndVa1dWek=
 github.com/golang/protobuf v1.5.4/go.mod h1:lnTiLA8Wa4RWRcIUkrtSVa5nRhsEGBg48fD6rSs7xps=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
