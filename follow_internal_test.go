@@ -77,7 +77,18 @@ func followed(t *testing.T, peer *brokenPeer) error {
 	t.Cleanup(func() { _ = s.Close(context.Background()) })
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	return s.Follow(ctx, peer, "doc", 42)
+	// Follow runs on its own goroutine so that a link which spins on a peer's
+	// error, and so never looks at its context again, is reported as a failure of
+	// this test instead of holding the binary until go test's timeout kills it.
+	done := make(chan error, 1)
+	go func() { done <- s.Follow(ctx, peer, "doc", 42) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		t.Fatal("Follow did not return, although its context ended after 5s")
+		return nil
+	}
 }
 
 func welcomeWith(w welcomeMsg) func() (byte, any, error) {

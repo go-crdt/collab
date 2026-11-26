@@ -156,13 +156,19 @@ func TestTwoServersFollowingEachOther(t *testing.T) {
 func TestFollowRefusesWhatItCannotDo(t *testing.T) {
 	srv, conn := serve(t, collab.Config{Store: collab.NewMemoryStore()})
 
-	if err := srv.Follow(t.Context(), collab.GRPC(conn), "", 5); err == nil {
-		t.Fatal("Follow with no document name succeeded")
+	// Each under a deadline: these refusals are what keep Follow from dialling,
+	// and a Follow that dialled and waited would otherwise wait for the test
+	// binary's own timeout, which reports no assertion. The deadline's error is
+	// not the refusal.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := srv.Follow(ctx, collab.GRPC(conn), "", 5); err == nil || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Follow with no document name = %v, want a refusal", err)
 	}
 	// Site 0 is the server's own replica: a link taking it would be minting
 	// operations as the server, which is the one identity nothing may claim.
-	if err := srv.Follow(t.Context(), collab.GRPC(conn), "doc", 0); err == nil {
-		t.Fatal("Follow as the server's own site succeeded")
+	if err := srv.Follow(ctx, collab.GRPC(conn), "doc", 0); err == nil || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Follow as the server's own site = %v, want a refusal", err)
 	}
 }
 

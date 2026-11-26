@@ -164,7 +164,22 @@ func TestUndoIsOffUntilAskedFor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	// A history lookup that went wrong panics inside a call that holds the
+	// client's lock, and Close needs that lock: a deferred Close would then wait
+	// for ever and the failure would be go test's timeout rather than this
+	// message. So a panic is reported here and Close is skipped after it.
+	poisoned := false
+	defer func() {
+		if !poisoned {
+			c.Close()
+		}
+	}()
+	defer func() {
+		if r := recover(); r != nil {
+			poisoned = true
+			t.Errorf("a client with no history panicked: %v", r)
+		}
+	}()
 	h, _ := c.Text("body")
 	if err := h.Insert(0, "x"); err != nil {
 		t.Fatal(err)

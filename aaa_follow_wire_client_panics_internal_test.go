@@ -43,7 +43,7 @@ func TestFollowWithAPeerThatCannotBeOpenedReturnsItsError(t *testing.T) {
 	s := NewServer(Config{Store: NewMemoryStore()})
 	t.Cleanup(func() { _ = s.Close(context.Background()) })
 	noPanicF(t, "Follow with an unopenable peer", func() {
-		if err := s.Follow(t.Context(), &brokenPeer{openErr: boom}, "doc", 42); !errors.Is(err, boom) {
+		if err := s.Follow(promptCtx(t), &brokenPeer{openErr: boom}, "doc", 42); !errors.Is(err, boom) {
 			t.Errorf("Follow = %v, want the peer's error", err)
 		}
 	})
