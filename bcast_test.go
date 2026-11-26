@@ -198,7 +198,7 @@ func TestBcastInbox(t *testing.T) {
 	q.fail(errors.New("second"))
 
 	for _, want := range []uint64{1, 2} {
-		e, err := q.recv(context.Background())
+		e, err := q.recv(bcastCtx(t))
 		if err != nil {
 			t.Fatalf("recv of queued %d: %v", want, err)
 		}
@@ -206,7 +206,7 @@ func TestBcastInbox(t *testing.T) {
 			t.Fatalf("recv from = %d, want %d", e.from, want)
 		}
 	}
-	if _, err := q.recv(context.Background()); err == nil || err.Error() != "first" {
+	if _, err := q.recv(bcastCtx(t)); err == nil || err.Error() != "first" {
 		t.Fatalf("after draining, recv = %v, want the first failure", err)
 	}
 	if err := q.reason(); err == nil || err.Error() != "first" {
@@ -220,7 +220,7 @@ func TestBcastInbox(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		q2.push(envelope{ctl: ctlData, from: 9})
 	}()
-	if e, err := q2.recv(context.Background()); err != nil || e.from != 9 {
+	if e, err := q2.recv(bcastCtx(t)); err != nil || e.from != 9 {
 		t.Fatalf("recv of a late message = (%#v, %v)", e, err)
 	}
 
@@ -248,7 +248,7 @@ func TestBcastAttachDropsAMalformedFrame(t *testing.T) {
 	other.post([]byte{}) // decodes to nothing
 	other.post(envelope{ctl: ctlHello, from: 2}.encode())
 
-	e, err := a.in.recv(context.Background())
+	e, err := a.in.recv(bcastCtx(t))
 	if err != nil {
 		t.Fatalf("recv after a dropped frame: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestBcastElection(t *testing.T) {
 		low := attach(hub.join(), 10)
 		high := attach(hub.join(), 20)
 
-		ctx := context.Background()
+		ctx := bcastCtx(t)
 		var lowRole, highRole Role
 		var wg sync.WaitGroup
 		wg.Add(2)
@@ -283,7 +283,7 @@ func TestBcastElection(t *testing.T) {
 
 	t.Run("a tab opening alone hosts", func(t *testing.T) {
 		hub := &memHub{}
-		role, err := electRole(context.Background(), attach(hub.join(), 1), 50*time.Millisecond)
+		role, err := electRole(bcastCtx(t), attach(hub.join(), 1), 50*time.Millisecond)
 		if err != nil {
 			t.Fatalf("electRole: %v", err)
 		}
@@ -302,7 +302,7 @@ func TestBcastElection(t *testing.T) {
 				host.post(envelope{ctl: ctlWelcome, from: 99, to: e.from}.encode())
 			}
 		})
-		role, err := electRole(context.Background(), joiner, bcastSettle)
+		role, err := electRole(bcastCtx(t), joiner, bcastSettle)
 		if err != nil {
 			t.Fatalf("electRole: %v", err)
 		}
@@ -327,7 +327,7 @@ func TestBcastElection(t *testing.T) {
 		self := attach(hub.join(), 10)
 		other := hub.join()
 		other.post(envelope{ctl: ctlHello, from: 20}.encode())
-		role, err := electRole(context.Background(), self, 50*time.Millisecond)
+		role, err := electRole(bcastCtx(t), self, 50*time.Millisecond)
 		if err != nil {
 			t.Fatalf("electRole: %v", err)
 		}
@@ -361,7 +361,7 @@ func TestBcastDialRepeatsUntilWelcomed(t *testing.T) {
 		}
 	})
 
-	conn, err := dialBus(context.Background(), dialer)
+	conn, err := dialBus(bcastCtx(t), dialer)
 	if err != nil {
 		t.Fatalf("dialBus: %v", err)
 	}
@@ -395,7 +395,7 @@ func TestBcastDialGivesUpAndIgnoresStrayFrames(t *testing.T) {
 func TestBcastClientCarrier(t *testing.T) {
 	hub := &memHub{}
 	self := attach(hub.join(), 5)
-	c := &bcastClient{bc: self, hostID: 8, ctx: context.Background()}
+	c := &bcastClient{bc: self, hostID: 8, ctx: bcastCtx(t)}
 
 	peer := hub.join()
 	got := make(chan envelope, 4)
@@ -575,7 +575,9 @@ func TestBcastTabsShareADocument(t *testing.T) {
 	srv := NewServer(Config{Store: NewMemoryStore()})
 	defer func() { _ = srv.Close(context.Background()) }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// Bounded: a tab whose join is never answered ends this test with the
+	// failure of its Join, not at go test's own timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 4*bcastSettle)
 	defer cancel()
 	served := make(chan error, 1)
 	go func() { served <- serveBus(ctx, srv, attach(hub.join(), 1)) }()
