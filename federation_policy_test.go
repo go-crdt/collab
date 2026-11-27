@@ -162,6 +162,30 @@ func scopedPolicyRun(t *testing.T, theirScope, theirUser, theirWrite, wantInMine
 	}
 	watcher := join(mine, federatedSite("grace@paris.example.ac"))
 
+	// The link opens only once THEIR server holds the impostor's work.
+	//
+	// The writer above returns once it has published, and their server applying
+	// that is asynchronous. A link opened in that gap hands our genuine work to
+	// their server first, which fans it out to the impostor -- who, claiming the
+	// very user who wrote ours, holds the same site and the same next ID. Its
+	// replica rejects the collision ("two operations share one ID") and its
+	// session ends, taking the forgery with it; their server then has nothing to
+	// carry and our link has nothing to refuse, so it neither carries the work nor
+	// ends (go-crdt/collab#202). That is the test racing itself and not the
+	// policy failing: no forgery arrived to be judged. A third participant on
+	// their server is the witness that it holds the work, as the watcher is on
+	// ours.
+	theirWatcher := join(theirs, federatedSite("watcher@"+theirScope))
+	theirSeen := text(theirWatcher)
+	theirDeadline := time.After(6 * time.Second)
+	for theirSeen.String() != theirWrite {
+		select {
+		case <-theirWatcher.Changes():
+		case <-theirDeadline:
+			t.Fatalf("their server holds %q, want the impostor's %q before the link opens", theirSeen.String(), theirWrite)
+		}
+	}
+
 	// The link's own outcome is watched rather than inferred. A policy that
 	// refused and a link that delivered nothing leave the same document behind,
 	// and telling them apart is the difference between a result and a
