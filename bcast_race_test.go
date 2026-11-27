@@ -16,7 +16,10 @@ import (
 // electing a rival host, giving two documents and no sync.
 func TestBcastServeGapConverges(t *testing.T) {
 	hub := &memHub{}
-	ctx, cancel := context.WithCancel(context.Background())
+	// A deadline, so that a frame the carrier mangles ends this test with the
+	// failure of the Join that never gets its answer, rather than at go test's
+	// own timeout, which names no assertion.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	const window = 60 * time.Millisecond
 
