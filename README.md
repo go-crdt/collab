@@ -144,6 +144,12 @@ for range c.Changes() {
 }
 ```
 
+`Text.Insert` and `Text.Delete` take an offset the caller read an instant before;
+a peer's edit merging in that instant moves what the offset names. An editor that
+works out its edit from the text it just read uses `Text.Edit(plan)` instead: the
+plan sees the text and its edits are applied under the lock peers merge under, so
+nothing lands between the two.
+
 A handle is what a caller touches rather than the replicated structure, and that
 is forced: editing the structure directly would produce operations nobody ever
 heard, so the participant would drift away from everyone else while its own
