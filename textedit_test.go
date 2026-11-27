@@ -91,3 +91,28 @@ func TestTextEditKeepsTheStepsBeforeARefusedOne(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The group marks do what Begin and Commit do, from inside a plan: two steps in
+// one group undo together, and a step of its own undoes alone.
+func TestTextEditGroupsForUndo(t *testing.T) {
+	ada, _, _, _ := editPair(t)
+	ada.EnableUndo()
+	err := ada.Edit(func(string) []collab.TextEdit {
+		return []collab.TextEdit{
+			{Pos: 0, Insert: "a", NewGroup: true},
+			{Pos: 1, Insert: "b", EndGroup: true},
+			{Pos: 2, Insert: "c", NewGroup: true, EndGroup: true},
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ab", ""} {
+		if err := ada.Undo(); err != nil {
+			t.Fatal(err)
+		}
+		if got := ada.String(); got != want {
+			t.Fatalf("after undo: %q, want %q", got, want)
+		}
+	}
+}

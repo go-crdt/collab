@@ -162,10 +162,17 @@ func (t *Text) remove(pos, length int) ([]crdt.Op, error) {
 
 // A TextEdit is one step of a [Text.Edit]: Remove runes are deleted at rune
 // offset Pos, then Insert is put there.
+//
+// NewGroup closes the undo group in progress and opens a new one before the
+// edit; EndGroup closes it after (see [Text.Begin] and [Text.Commit]). They do
+// nothing unless [Text.EnableUndo] was called. They exist because a plan runs
+// with the lock held and so cannot call Begin or Commit itself.
 type TextEdit struct {
-	Pos    int
-	Remove int
-	Insert string
+	Pos      int
+	Remove   int
+	Insert   string
+	NewGroup bool
+	EndGroup bool
 }
 
 // Edit reads the text as it stands and applies the edits plan returns for it,
@@ -184,6 +191,11 @@ func (t *Text) Edit(plan func(current string) []TextEdit) error {
 	var err error
 	for _, e := range plan(t.doc().String()) {
 		var o []crdt.Op
+		u := t.tracker()
+		if u != nil && e.NewGroup {
+			u.Commit()
+			u.Begin()
+		}
 		if e.Remove > 0 {
 			if o, err = t.remove(e.Pos, e.Remove); err != nil {
 				break
@@ -195,6 +207,9 @@ func (t *Text) Edit(plan func(current string) []TextEdit) error {
 				break
 			}
 			ops = append(ops, o...)
+		}
+		if u != nil && e.EndGroup {
+			u.Commit()
 		}
 	}
 	t.c.mu.Unlock()
