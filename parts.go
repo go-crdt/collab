@@ -160,6 +160,67 @@ func (t *Text) remove(pos, length int) ([]crdt.Op, error) {
 	return t.doc().Delete(pos, length)
 }
 
+// A TextEdit is one step of a [Text.Edit]: Remove runes are deleted at rune
+// offset Pos, then Insert is put there.
+//
+// NewGroup closes the undo group in progress and opens a new one before the
+// edit; EndGroup closes it after (see [Text.Begin] and [Text.Commit]). They do
+// nothing unless [Text.EnableUndo] was called. They exist because a plan runs
+// with the lock held and so cannot call Begin or Commit itself.
+type TextEdit struct {
+	Pos      int
+	Remove   int
+	Insert   string
+	NewGroup bool
+	EndGroup bool
+}
+
+// Edit reads the text as it stands and applies the edits plan returns for it,
+// all under the lock a peer's edit is merged under: no remote edit lands between
+// the text plan saw and the edits made from it. Insert and Delete cannot say
+// that, because they take an offset the caller read an instant before, and an
+// edit that merged in that instant moves what the offset names.
+//
+// Each edit's Pos is counted in the text the edits before it left. plan runs
+// with the lock held and must not call the client or return before it is done;
+// what it returns goes out as one batch. If an edit is refused, the ones before
+// it are kept, sent, and the error returned.
+func (t *Text) Edit(plan func(current string) []TextEdit) error {
+	t.c.mu.Lock()
+	var ops []crdt.Op
+	var err error
+	for _, e := range plan(t.doc().String()) {
+		var o []crdt.Op
+		u := t.tracker()
+		if u != nil && e.NewGroup {
+			u.Commit()
+			u.Begin()
+		}
+		if e.Remove > 0 {
+			if o, err = t.remove(e.Pos, e.Remove); err != nil {
+				break
+			}
+			ops = append(ops, o...)
+		}
+		if e.Insert != "" {
+			if o, err = t.insert(e.Pos, e.Insert); err != nil {
+				break
+			}
+			ops = append(ops, o...)
+		}
+		if u != nil && e.EndGroup {
+			u.Commit()
+		}
+	}
+	t.c.mu.Unlock()
+	if len(ops) > 0 {
+		if perr := t.c.publish([]crdt.PartOps{{Part: t.Part(), Text: ops}}); err == nil {
+			err = perr
+		}
+	}
+	return err
+}
+
 // Delete removes length runes at rune offset pos, locally and then everywhere.
 func (t *Text) Delete(pos, length int) error {
 	return t.c.edit(t.Part(), func() (crdt.PartOps, error) {
