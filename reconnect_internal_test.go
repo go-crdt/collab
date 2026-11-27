@@ -472,8 +472,15 @@ func TestFollowWithRetryRefusesWhatItCannotDo(t *testing.T) {
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := s.FollowWithRetry(t.Context(), tt.dial, tt.document, tt.as, tt.policy); err == nil {
+			// A deadline, because the refusals are what keep this call out of
+			// its retry loop: without one the loop runs until the test binary
+			// is killed, which no assertion reports.
+			err := s.FollowWithRetry(promptCtx(t), tt.dial, tt.document, tt.as, tt.policy)
+			if err == nil {
 				t.Fatal("FollowWithRetry returned no error")
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("FollowWithRetry was not refused, it went on retrying until its deadline: %v", err)
 			}
 		})
 	}
@@ -505,7 +512,7 @@ func TestAPermanentFailureEndsTheLink(t *testing.T) {
 		}
 		link.back.sleep = func(context.Context, time.Duration) error { return nil }
 
-		if err := link.run(t.Context()); !errors.Is(err, refused) {
+		if err := link.run(promptCtx(t)); !errors.Is(err, refused) {
 			t.Fatalf("the link ended with %v, want the refusal", err)
 		}
 		if dials != 2 {
@@ -524,7 +531,7 @@ func TestAPermanentFailureEndsTheLink(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = link.run(t.Context())
+		err = link.run(promptCtx(t))
 		if err == nil {
 			t.Fatal("a dialler that returned nothing was treated as a working link")
 		}
@@ -541,7 +548,7 @@ func TestFollowWithRetryRunsTheLoopWithWorkingDefaults(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close(context.Background()) })
 
 	unreachable := errors.New("no route")
-	err := s.FollowWithRetry(t.Context(),
+	err := s.FollowWithRetry(promptCtx(t),
 		func(context.Context) (Transport, error) { return nil, unreachable },
 		"doc", 42,
 		RetryPolicy{Permanent: func(error) bool { return true }})

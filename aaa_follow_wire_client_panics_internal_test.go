@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/go-crdt/crdt"
 )
@@ -41,12 +42,25 @@ func TestFollowOnADeadContextReturnsItsError(t *testing.T) {
 func TestFollowWithAPeerThatCannotBeOpenedReturnsItsError(t *testing.T) {
 	boom := errors.New("cannot open")
 	s := NewServer(Config{Store: NewMemoryStore()})
-	t.Cleanup(func() { _ = s.Close(context.Background()) })
-	noPanicF(t, "Follow with an unopenable peer", func() {
-		if err := s.Follow(t.Context(), &brokenPeer{openErr: boom}, "doc", 42); !errors.Is(err, boom) {
+	// Closed only once Follow has returned: a Follow stuck on the document's lock
+	// would hold Close on it too, and the test would end by go test's timeout.
+	// On its own goroutine with a deadline. follow.go:141 gives a document with no
+	// link set one before the link is registered; without it the write panics
+	// while the document's lock is held, the deferred leave then waits for that
+	// lock for ever, and the panic neither reaches a recover nor ends the
+	// process. A call that never returns is reported here, as a failure.
+	ctx := promptCtx(t)
+	done := make(chan error, 1)
+	go func() { done <- s.Follow(ctx, &brokenPeer{openErr: boom}, "doc", 42) }()
+	select {
+	case err := <-done:
+		_ = s.Close(context.Background())
+		if !errors.Is(err, boom) {
 			t.Errorf("Follow = %v, want the peer's error", err)
 		}
-	})
+	case <-time.After(5 * time.Second):
+		t.Error("Follow did not return: registering the link on a document with no link set must not stall it")
+	}
 }
 
 // follow.go:438 and 442. A document built without its maps is given them rather
@@ -191,4 +205,41 @@ func TestAbsorbWelcomeRefusesADamagedSnapshot(t *testing.T) {
 			t.Errorf("absorbWelcome = %v, want a decoding error", err)
 		}
 	})
+}
+
+// textundo.go:64. A text that never asked for a history has none: Insert goes
+// on without one rather than reading through a nil entry. Here, among the
+// first tests to run, because a panic inside an edit leaves the client's lock
+// to a deferred Close in every later test that types, and the run then ends by
+// go test's timeout instead of by this message.
+func TestATextWithNoHistoryEditsWithoutPanicking(t *testing.T) {
+	srv := NewServer(Config{})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	local, server := Pipe()
+	go func() { _ = srv.ServePipe(ctx, server) }()
+	c, err := Join(ctx, local, ClientConfig{Document: "doc", Site: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := c.Text("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Close needs the lock the panicking edit still holds, so after a panic it is
+	// skipped and the failure is reported instead of waited on.
+	returned := false
+	noPanicF(t, "Insert on a text with no history", func() {
+		if err := h.Insert(0, "x"); err != nil {
+			t.Errorf("Insert = %v", err)
+		}
+		returned = true
+	})
+	if !returned {
+		return
+	}
+	if h.CanUndo() {
+		t.Error("a history was recorded without being asked")
+	}
+	c.Close()
 }

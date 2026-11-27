@@ -152,16 +152,16 @@ func TestAsStatusPassesPlainErrorsThrough(t *testing.T) {
 func TestFollowWithRetryRefusesWhatCannotBeRetriedWithoutPanicking(t *testing.T) {
 	srv := NewServer(Config{})
 	noPanicS(t, "nil dialler", func() {
-		err := srv.FollowWithRetry(context.Background(), nil, "doc", 1, RetryPolicy{})
-		if err == nil {
-			t.Error("a nil dialler was accepted")
+		err := srv.FollowWithRetry(promptCtx(t), nil, "doc", 1, RetryPolicy{})
+		if err == nil || errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("a nil dialler was not refused at once: %v", err)
 		}
 	})
 	noPanicS(t, "refused site", func() {
 		dial := func(context.Context) (Transport, error) { return nil, errors.New("unreachable") }
-		err := srv.FollowWithRetry(context.Background(), dial, "", 0, RetryPolicy{})
-		if err == nil {
-			t.Error("an unfollowable document was accepted")
+		err := srv.FollowWithRetry(promptCtx(t), dial, "", 0, RetryPolicy{})
+		if err == nil || errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("an unfollowable document was not refused at once: %v", err)
 		}
 	})
 }
