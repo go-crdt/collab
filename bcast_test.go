@@ -283,7 +283,13 @@ func TestBcastElection(t *testing.T) {
 
 	t.Run("a tab opening alone hosts", func(t *testing.T) {
 		hub := &memHub{}
-		role, err := electRole(bcastCtx(t), attach(hub.join(), 1), 50*time.Millisecond)
+		self := attach(hub.join(), 1)
+		role, err, ok := within(t, "electRole for a lone tab", func() (Role, error) {
+			return electRole(bcastCtx(t), self, 50*time.Millisecond)
+		})
+		if !ok {
+			return
+		}
 		if err != nil {
 			t.Fatalf("electRole: %v", err)
 		}
@@ -315,7 +321,14 @@ func TestBcastElection(t *testing.T) {
 		hub := &memHub{}
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if _, err := electRole(ctx, attach(hub.join(), 1), bcastSettle); !errors.Is(err, context.Canceled) {
+		self := attach(hub.join(), 1)
+		_, err, ok := within(t, "electRole on a cancelled context", func() (Role, error) {
+			return electRole(ctx, self, bcastSettle)
+		})
+		if !ok {
+			return
+		}
+		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("electRole on a cancelled context = %v, want context.Canceled", err)
 		}
 	})
@@ -327,7 +340,12 @@ func TestBcastElection(t *testing.T) {
 		self := attach(hub.join(), 10)
 		other := hub.join()
 		other.post(envelope{ctl: ctlHello, from: 20}.encode())
-		role, err := electRole(bcastCtx(t), self, 50*time.Millisecond)
+		role, err, ok := within(t, "electRole after a higher hello", func() (Role, error) {
+			return electRole(bcastCtx(t), self, 50*time.Millisecond)
+		})
+		if !ok {
+			return
+		}
 		if err != nil {
 			t.Fatalf("electRole: %v", err)
 		}
@@ -386,7 +404,11 @@ func TestBcastDialGivesUpAndIgnoresStrayFrames(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
-	if _, err := dialBus(ctx, dialer); !errors.Is(err, context.DeadlineExceeded) {
+	_, err, ok := within(t, "dialBus with no host", func() (carrierConn, error) { return dialBus(ctx, dialer) })
+	if !ok {
+		return
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("dialBus with no host = %v, want DeadlineExceeded", err)
 	}
 }

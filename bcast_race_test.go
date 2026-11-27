@@ -28,7 +28,24 @@ func TestBcastServeGapConverges(t *testing.T) {
 
 	// Tab A opens alone and elects host; its answerer is live at once, before its
 	// Server is attached.
-	roleA, hostA, connA, err := hostOrJoinBus(ctx, attach(hub.join(), 100), window)
+	// Bounded, and abandoned if it does not return: an election that ignores its
+	// context spins for ever, and a test waiting for it would be ended by go test's
+	// own timeout with a panic and no assertion.
+	type elected struct {
+		role Role
+		host *bcastHost
+		conn carrierConn
+		err  error
+	}
+	tabA := attach(hub.join(), 100)
+	ea, _, ok := within(t, "tab A hostOrJoinBus", func() (elected, struct{}) {
+		role, host, conn, err := hostOrJoinBus(ctx, tabA, window)
+		return elected{role, host, conn, err}, struct{}{}
+	})
+	if !ok {
+		return
+	}
+	roleA, hostA, connA, err := ea.role, ea.host, ea.conn, ea.err
 	if err != nil {
 		t.Fatalf("tab A hostOrJoinBus: %v", err)
 	}
@@ -70,7 +87,14 @@ func TestBcastServeGapConverges(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- hostA.wait(); hostA.close() }()
 
-	b := <-bch
+	var b result
+	select {
+	case b = <-bch:
+	case <-time.After(bcastSettle):
+		// Left behind, for the reason given at tab A.
+		t.Error("tab B's hostOrJoinBus did not return")
+		return
+	}
 	if b.err != nil {
 		t.Fatalf("tab B hostOrJoinBus: %v", b.err)
 	}
@@ -84,12 +108,12 @@ func TestBcastServeGapConverges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tab B Join: %v", err)
 	}
-	defer func() { _ = bc.Close() }()
+	defer closeWithin(t, bc)
 	bcastInsert(t, bc, 0, "hello")
 
 	// A third tab joins the live host and catches up: the host really is serving.
 	c := dialClient(t, ctx, hub, 300, ClientConfig{Document: "shared", Site: 3})
-	defer func() { _ = c.Close() }()
+	defer closeWithin(t, c)
 	awaitBcast(t, c, "the third tab to catch up", func() bool { return bcastText(t, c) == "hello" })
 
 	cancel()
@@ -205,7 +229,21 @@ func TestHostOrJoinBusErrors(t *testing.T) {
 	beacon.post(envelope{ctl: ctlHost, from: 99}.encode()) // present, but never welcomes a dial
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel2()
-	role, host, conn, err := hostOrJoinBus(ctx2, self, 40*time.Millisecond)
+	// Bounded: a dial that ignores its context spins for ever. See [within].
+	type dialled struct {
+		role Role
+		host *bcastHost
+		conn carrierConn
+		err  error
+	}
+	d, _, ok := within(t, "hostOrJoinBus with no welcome", func() (dialled, struct{}) {
+		role, host, conn, err := hostOrJoinBus(ctx2, self, 40*time.Millisecond)
+		return dialled{role, host, conn, err}, struct{}{}
+	})
+	if !ok {
+		return
+	}
+	role, host, conn, err := d.role, d.host, d.conn, d.err
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("hostOrJoinBus dial with no welcome = (%v, %v), want DeadlineExceeded", role, err)
 	}
