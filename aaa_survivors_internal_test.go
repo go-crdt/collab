@@ -209,3 +209,50 @@ func TestACancelledClientIsNotMarkedDown(t *testing.T) {
 		t.Error("a cancelled client was marked down, as if its carrier had been lost")
 	}
 }
+
+// collectableDocument is a document whose one deletion everybody has delivered.
+func collectableDocument(t *testing.T) *document {
+	t.Helper()
+	d := &document{doc: crdt.NewComposite(serverSite)}
+	cells, err := d.doc.Map("cells")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cells.Set("k", []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cells.Delete("k"); err != nil {
+		t.Fatal(err)
+	}
+	v := d.doc.Version()
+	d.seen = map[crdt.SiteID]crdt.CompositeVersion{1: v, 2: v}
+	return d
+}
+
+// durability.go:122 and 126. A tombstone is dropped only when everybody has
+// delivered it (a version) AND promised the clocks they will write above (a
+// floor). Either missing leaves it alone, and the control says the same document
+// with both is collected, so that "left alone" is not "never collected".
+func TestACollectionNeedsBothAVersionAndAFloor(t *testing.T) {
+	d := collectableDocument(t)
+	clocks := d.doc.Clocks()
+	d.reached = map[crdt.SiteID]crdt.CompositeClocks{1: clocks, 2: clocks}
+	d.collect()
+	if !d.dirty {
+		t.Fatal("control: a deletion everybody delivered and promised past was not collected")
+	}
+
+	noFloor := collectableDocument(t)
+	noFloor.collect()
+	if noFloor.dirty {
+		t.Error("a document nobody promised clocks for was collected")
+	}
+
+	noVersion := collectableDocument(t)
+	noVersion.seen[2] = nil
+	noVersion.reached = map[crdt.SiteID]crdt.CompositeClocks{1: clocks, 2: clocks}
+	noVersion.collect()
+	if noVersion.dirty {
+		t.Error("a document a participant never acknowledged was collected")
+	}
+}
